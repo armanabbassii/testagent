@@ -1,0 +1,146 @@
+scenario:
+  name: voucher_creation_flow
+
+  description: >
+    Create a discount voucher, extract its ID from the response,
+    store it as a global Postman variable, then use that ID to
+    update, retrieve, deactivate, activate, and list vouchers.
+
+swagger_sources:
+  - name: admin
+    url: "https://podium-admin.sandpod.ir/api/swagger-ui/index.html?urls.primaryName=Admin"
+
+steps:
+
+  - name: create_voucher
+
+    swagger: admin
+
+    operation:
+      method: POST
+      path: /admin/voucher/percent
+
+    positive:
+      expected_status: 200
+
+      extract:
+        - from: response
+          json_path: $.entity.id
+          variable: voucherId
+          scope: global
+
+    negative:
+
+      - name: without_authorization
+        type: unauthorized
+        expected_status: 401
+
+      - name: wrong_variable
+        type: invalid_request
+        expected_status: 400
+
+
+  - name: update_voucher
+
+    swagger: admin
+
+    operation:
+      method: PUT
+      path: /admin/voucher/{id}
+
+    params:
+      path:
+        id: "{{voucherId}}"
+
+    positive:
+      expected_status: 200
+
+    negative:
+
+      - name: without_authorization
+        type: unauthorized
+        expected_status: 401
+
+
+  - name: get_voucher_details
+
+    swagger: admin
+
+    operation:
+      method: GET
+      path: /admin/voucher/{id}
+
+    params:
+      path:
+        id: "{{voucherId}}"
+
+    positive:
+      expected_status: 200
+
+    negative:
+
+      - name: without_authorization
+        type: unauthorized
+        expected_status: 401
+
+
+  - name: deactivate_voucher
+
+    swagger: admin
+
+    operation:
+      method: PUT
+      path: /admin/voucher/{id}/deActive
+
+    params:
+      path:
+        id: "{{voucherId}}"
+
+    positive:
+      expected_status: 200
+
+    negative:
+
+      - name: without_authorization
+        type: unauthorized
+        expected_status: 401
+
+
+  - name: activate_voucher
+
+    swagger: admin
+
+    operation:
+      method: PUT
+      path: /admin/voucher/{id}/active
+
+    params:
+      path:
+        id: "{{voucherId}}"
+
+    positive:
+      expected_status: 200
+
+    negative:
+
+      - name: without_authorization
+        type: unauthorized
+        expected_status: 401
+
+
+  - name: list_vouchers
+
+    swagger: admin
+
+    operation:
+      method: GET
+      path: /admin/voucher
+
+    positive:
+      expected_status: 200
+
+    negative:
+
+      - name: without_authorization
+        type: unauthorized
+        expected_status: 401

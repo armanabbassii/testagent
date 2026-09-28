@@ -1,0 +1,88 @@
+# =========================
+# Environment & Secrets
+# =========================
+.env
+.env.*
+!.env.example
+
+# =========================
+# Project / IDE
+# =========================
+.idea/
+.vscode/
+
+# =========================
+# Python Virtual Environments
+# =========================
+.venv/
+venv/
+env/
+
+# =========================
+# Python Cache
+# =========================
+__pycache__/
+*.py[cod]
+*$py.class
+
+# =========================
+# Build / Distribution
+# =========================
+build/
+dist/
+*.egg-info/
+
+# =========================
+# Testing / Coverage
+# =========================
+.pytest_cache/
+.coverage
+htmlcov/
+
+# =========================
+# Logs / Generated Output
+# =========================
+logs/
+output/
+checkpoints.db
+review_scores.jsonl
+
+# =========================
+# OS
+# =========================
+.DS_Store
+Thumbs.db# Project files
+.env
+review_scores.jsonl
+logs
+output
+checkpoints.db
+
+
+# Python-generated files
+__pycache__
+*.py[ocd]
+build/
+dist/
+wheels/
+*.egg-info
+
+# Virtual environments
+.venv
+
+# Test
+.pytest_cache/
+
+# Coverage
+.coverage
+.coverage.*
+coverage.xml
+htmlcov/
+
+# Type checking
+.mypy_cache/
+.ruff_cache/
+
+# IDE
+.vscode/
+.idea/

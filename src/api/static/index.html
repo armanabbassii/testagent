@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>دستیار سرویس‌های کسب‌وکار</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/marked/11.1.1/marked.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/dompurify/3.0.8/purify.min.js"></script>
+<style>
+  :root {
+    --bg: #f3f4f1;
+    --panel: #fbfbf9;
+    --ink: #1f2a24;
+    --muted: #6b6f66;
+    --line: #d8d6ce;
+    --accent: #3f6b5c;
+    --accent-soft: #e4ece8;
+    --accent-ink: #22392f;
+    --error: #a13f3f;
+    --radius: 10px;
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+    --sans: -apple-system, "Segoe UI", "Vazirmatn", "IRANSans", system-ui, sans-serif;
+  }
+
+  * { box-sizing: border-box; }
+
+  html, body {
+    height: 100%;
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font-family: var(--sans);
+  }
+
+  body {
+    display: flex;
+    flex-direction: column;
+  }
+
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--line);
+    background: var(--panel);
+  }
+
+  header h1 {
+    font-size: 15px;
+    font-weight: 600;
+    margin: 0;
+    letter-spacing: 0.2px;
+  }
+
+  .status {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    font-size: 12px;
+    color: var(--muted);
+    font-family: var(--mono);
+  }
+
+  .status-dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: var(--muted);
+  }
+
+  .status-dot.ok { background: var(--accent); }
+  .status-dot.down { background: var(--error); }
+
+  main {
+    flex: 1;
+    display: grid;
+    grid-template-columns: 220px 1fr;
+    grid-template-rows: minmax(0, 1fr);
+    overflow: hidden;
+    min-height: 0;
+  }
+
+  @media (max-width: 720px) {
+    main { grid-template-columns: 1fr; }
+    aside { display: none; }
+  }
+
+  aside {
+    border-inline-start: 1px solid var(--line);
+    padding: 16px;
+    overflow-y: auto;
+    background: var(--panel);
+  }
+
+  aside h2 {
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.6px;
+    color: var(--muted);
+    margin: 0 0 8px;
+    font-family: var(--mono);
+  }
+
+  .chip-group { margin-bottom: 20px; }
+
+  .chip {
+    display: inline-block;
+    font-size: 12px;
+    font-family: var(--mono);
+    padding: 5px 10px;
+    margin: 0 4px 6px 0;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    background: var(--bg);
+    color: var(--ink);
+    cursor: pointer;
+    transition: background 120ms ease, border-color 120ms ease;
+  }
+
+  .chip:hover, .chip:focus-visible {
+    background: var(--accent-soft);
+    border-color: var(--accent);
+    outline: none;
+  }
+
+  .empty-hint {
+    font-size: 12px;
+    color: var(--muted);
+  }
+
+  #chat-panel {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    min-height: 0;
+  }
+
+  #log {
+    flex: 1;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 14px;
+  }
+
+  .msg {
+    max-width: 70%;
+    animation: rise 160ms ease-out;
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    .msg { animation: none; }
+  }
+
+  @keyframes rise {
+    from { opacity: 0; transform: translateY(4px); }
+    to { opacity: 1; transform: translateY(0); }
+  }
+
+  .msg.user { align-self: flex-end; }
+  .msg.assistant { align-self: flex-start; }
+  .msg.system { align-self: center; max-width: 90%; }
+
+  .bubble {
+    padding: 10px 14px;
+    border-radius: var(--radius);
+    line-height: 1.6;
+    font-size: 14px;
+    white-space: pre-wrap;
+  }
+
+  .msg.user .bubble {
+    background: var(--accent);
+    color: #fff;
+    border-bottom-left-radius: 2px;
+  }
+
+  .msg.assistant .bubble {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-bottom-right-radius: 2px;
+  }
+
+  .msg.system .bubble {
+    background: transparent;
+    color: var(--muted);
+    font-size: 12px;
+    text-align: center;
+    border: none;
+  }
+
+  /* استایل محتوای مارک‌داون رندر شده در پاسخ دستیار */
+  .bubble.markdown > *:first-child { margin-top: 0; }
+  .bubble.markdown > *:last-child { margin-bottom: 0; }
+
+  .bubble.markdown h1,
+  .bubble.markdown h2,
+  .bubble.markdown h3,
+  .bubble.markdown h4 {
+    font-size: 1em;
+    font-weight: 700;
+    margin: 10px 0 4px;
+    color: var(--ink);
+  }
+
+  .bubble.markdown p { margin: 6px 0; }
+
+  .bubble.markdown ul,
+  .bubble.markdown ol {
+    margin: 6px 0;
+    padding-inline-start: 20px;
+  }
+
+  .bubble.markdown li { margin: 2px 0; }
+
+  .bubble.markdown a {
+    color: var(--accent);
+    text-decoration: underline;
+  }
+
+  .bubble.markdown strong { font-weight: 700; }
+  .bubble.markdown em { font-style: italic; }
+
+  .bubble.markdown code {
+    font-family: var(--mono);
+    font-size: 0.9em;
+    background: var(--accent-soft);
+    color: var(--accent-ink);
+    padding: 1px 5px;
+    border-radius: 4px;
+    direction: ltr;
+    display: inline-block;
+  }
+
+  .bubble.markdown pre {
+    background: var(--accent-soft);
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 10px 12px;
+    overflow-x: auto;
+    direction: ltr;
+    text-align: left;
+    margin: 8px 0;
+  }
+
+  .bubble.markdown pre code {
+    background: none;
+    padding: 0;
+    border-radius: 0;
+  }
+
+  .bubble.markdown blockquote {
+    margin: 6px 0;
+    padding: 2px 10px;
+    border-inline-start: 3px solid var(--accent);
+    color: var(--muted);
+  }
+
+  .bubble.markdown table {
+    border-collapse: collapse;
+    margin: 8px 0;
+    font-size: 0.92em;
+  }
+
+  .bubble.markdown th,
+  .bubble.markdown td {
+    border: 1px solid var(--line);
+    padding: 4px 8px;
+  }
+
+  .bubble.markdown hr {
+    border: none;
+    border-top: 1px solid var(--line);
+    margin: 10px 0;
+  }
+
+  /* فیش کاتالوگ — سیگنیچر دیزاین: نمایش متادیتای جستجو زیر هر پاسخ */
+  .receipt {
+    margin-top: 6px;
+    padding: 6px 10px;
+    border-top: 1px dashed var(--line);
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+    align-items: center;
+  }
+
+  .receipt .pill {
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 1px 6px;
+    background: var(--accent-soft);
+    color: var(--accent-ink);
+  }
+
+  form#composer {
+    display: flex;
+    gap: 8px;
+    padding: 14px 20px;
+    border-top: 1px solid var(--line);
+    background: var(--panel);
+  }
+
+  #query {
+    flex: 1;
+    padding: 10px 14px;
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    font-size: 14px;
+    font-family: var(--sans);
+    background: var(--bg);
+    color: var(--ink);
+  }
+
+  #query:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 1px;
+  }
+
+  button[type="submit"] {
+    padding: 10px 18px;
+    border: none;
+    border-radius: var(--radius);
+    background: var(--accent);
+    color: #fff;
+    font-size: 14px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: opacity 120ms ease;
+  }
+
+  button[type="submit"]:hover { opacity: 0.9; }
+  button[type="submit"]:disabled { opacity: 0.5; cursor: not-allowed; }
+
+  button[type="submit"]:focus-visible {
+    outline: 2px solid var(--accent-ink);
+    outline-offset: 2px;
+  }
+
+  .typing {
+    font-family: var(--mono);
+    font-size: 12px;
+    color: var(--muted);
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>دستیار سرویس‌های کسب‌وکار</h1>
+  <div class="status">
+    <span class="status-dot" id="status-dot"></span>
+    <span id="status-text">در حال بررسی اتصال…</span>
+  </div>
+</header>
+
+<main>
+  <aside>
+    <div class="chip-group">
+      <h2>دسته‌بندی‌ها</h2>
+      <div id="categories"><span class="empty-hint">در حال بارگذاری…</span></div>
+    </div>
+    <div class="chip-group">
+      <h2>ارائه‌دهنده‌ها</h2>
+      <div id="providers"><span class="empty-hint">در حال بارگذاری…</span></div>
+    </div>
+  </aside>
+
+  <section id="chat-panel">
+    <div id="log" aria-live="polite">
+      <div class="msg system"><div class="bubble">نیازتان را بنویسید تا بهترین سرویس را پیشنهاد بدهیم.</div></div>
+    </div>
+    <form id="composer">
+      <input id="query" type="text" placeholder="مثلاً: یه سرویس پرداخت می‌خوام…" autocomplete="off" required />
+      <button type="submit" id="send-btn">ارسال</button>
+    </form>
+  </section>
+</main>
+
+<script>
+  const USER_ID = "web-ui-" + Math.random().toString(36).slice(2, 10);
+
+  const log = document.getElementById("log");
+  const form = document.getElementById("composer");
+  const input = document.getElementById("query");
+  const sendBtn = document.getElementById("send-btn");
+  const statusDot = document.getElementById("status-dot");
+  const statusText = document.getElementById("status-text");
+
+  function renderMarkdown(text) {
+    try {
+      const rawHtml = marked.parse(text, { breaks: true });
+      return DOMPurify.sanitize(rawHtml);
+    } catch (e) {
+      return null;
+    }
+  }
+
+  function addMessage(role, text) {
+    const wrap = document.createElement("div");
+    wrap.className = "msg " + role;
+    const bubble = document.createElement("div");
+    bubble.className = "bubble";
+
+    if (role === "assistant" && window.marked && window.DOMPurify) {
+      const html = renderMarkdown(text);
+      if (html !== null) {
+        bubble.classList.add("markdown");
+        bubble.innerHTML = html;
+      } else {
+        bubble.textContent = text;
+      }
+    } else {
+      bubble.textContent = text;
+    }
+
+    wrap.appendChild(bubble);
+    log.appendChild(wrap);
+    log.scrollTop = log.scrollHeight;
+    return wrap;
+  }
+
+  function addReceipt(container, filtersUsed, docCount) {
+    const receipt = document.createElement("div");
+    receipt.className = "receipt";
+
+    const countPill = document.createElement("span");
+    countPill.className = "pill";
+    countPill.textContent = docCount + " سند";
+    receipt.appendChild(countPill);
+
+    const entries = Object.entries(filtersUsed || {});
+    if (entries.length === 0) {
+      const noFilter = document.createElement("span");
+      noFilter.textContent = "بدون فیلتر";
+      receipt.appendChild(noFilter);
+    } else {
+      entries.forEach(([key, value]) => {
+        const pill = document.createElement("span");
+        pill.className = "pill";
+        pill.textContent = key + ": " + value;
+        receipt.appendChild(pill);
+      });
+    }
+    container.appendChild(receipt);
+  }
+
+  async function checkHealth() {
+    try {
+      const res = await fetch("/health");
+      if (!res.ok) throw new Error("bad status");
+      statusDot.classList.add("ok");
+      statusText.textContent = "متصل";
+    } catch (e) {
+      statusDot.classList.add("down");
+      statusText.textContent = "قطع ارتباط با سرویس";
+    }
+  }
+
+  function renderChips(container, items, emptyLabel) {
+    container.innerHTML = "";
+    if (!items || items.length === 0) {
+      const hint = document.createElement("span");
+      hint.className = "empty-hint";
+      hint.textContent = emptyLabel;
+      container.appendChild(hint);
+      return;
+    }
+    items.forEach((item) => {
+      const chip = document.createElement("button");
+      chip.type = "button";
+      chip.className = "chip";
+      chip.textContent = item;
+      chip.addEventListener("click", () => {
+        input.value = item + " ";
+        input.focus();
+      });
+      container.appendChild(chip);
+    });
+  }
+
+  async function loadSidebar() {
+    try {
+      const [catRes, provRes] = await Promise.all([
+        fetch("/categories"),
+        fetch("/providers"),
+      ]);
+      const catData = await catRes.json();
+      const provData = await provRes.json();
+      renderChips(document.getElementById("categories"), catData.categories, "دسته‌بندی‌ای تنظیم نشده");
+      renderChips(document.getElementById("providers"), provData.providers, "ارائه‌دهنده‌ای تنظیم نشده");
+    } catch (e) {
+      renderChips(document.getElementById("categories"), [], "خطا در بارگذاری");
+      renderChips(document.getElementById("providers"), [], "خطا در بارگذاری");
+    }
+  }
+
+  form.addEventListener("submit", async (e) => {
+    e.preventDefault();
+    const query = input.value.trim();
+    if (!query) return;
+
+    addMessage("user", query);
+    input.value = "";
+    input.disabled = true;
+    sendBtn.disabled = true;
+
+    const typing = addMessage("assistant", "در حال بررسی…");
+    typing.querySelector(".bubble").classList.add("typing");
+
+    try {
+      const res = await fetch("/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query, user_id: USER_ID }),
+      });
+
+      if (!res.ok) {
+        throw new Error("request failed with status " + res.status);
+      }
+
+      const data = await res.json();
+      typing.remove();
+      const answerMsg = addMessage("assistant", data.answer);
+      addReceipt(answerMsg, data.filters_used, (data.documents || []).length);
+    } catch (err) {
+      typing.remove();
+      addMessage("system", "مشکلی در دریافت پاسخ پیش آمد. دوباره تلاش کنید.");
+    } finally {
+      input.disabled = false;
+      sendBtn.disabled = false;
+      input.focus();
+    }
+  });
+
+  checkHealth();
+  loadSidebar();
+</script>
+
+</body>
+</html>
