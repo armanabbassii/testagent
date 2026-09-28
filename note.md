@@ -21,5 +21,4 @@ Application Log       Security Log
            Elasticsearch
                 │
                 ▼
-        
-ff      Kibana
+              Kibana
