@@ -25,6 +25,10 @@ from pathlib import Path
 
 from typing_extensions import NotRequired, TypedDict
 
+from src.agents.test_case_generator.json_output import (
+    JsonExtractionError,
+    extract_json_object,
+)
 from src.agents.test_case_generator.scenario_parser import (
     NegativeCase,
     Scenario,
@@ -108,6 +112,9 @@ class SaveVariable(TypedDict):
     # global → pm.globals.set ، collection → pm.collectionVariables.set
     # اگر نیاید، رفتارِ قبلی (collection) حفظ می‌شود.
     scope: NotRequired[str]
+    # منبعِ مقدار: "body" (پیش‌فرض) یا "header".
+    # با "header"، json_path نامِ هدر است، نه یک مسیرِ JSON.
+    source: NotRequired[str]
 
 
 class Assertion(TypedDict):
@@ -242,36 +249,15 @@ def _build_user_message(
 # ── استخراج و اعتبارسنجی خروجی ───────────────────────────────────────────────
 
 def _extract_json(raw: str) -> dict:
-    """متن خام LLM را به dict تبدیل می‌کند — fence و متن اضافه را تحمل می‌کند."""
-    if not raw or not raw.strip():
-        raise TestCaseGenerationError("LLM returned an empty response.")
+    """متن خام LLM را به dict تبدیل می‌کند — fence و متن اضافه را تحمل می‌کند.
 
-    text = raw.strip()
-    if text.startswith("```"):
-        text = re.sub(r"^```[a-zA-Z]*\s*", "", text)
-        text = re.sub(r"\s*```$", "", text).strip()
-
+    منطقِ استخراج در json_output.py است تا در مسیرِ سناریو و مسیرِ تحلیلِ تسک
+    تکرار نشود؛ این‌جا فقط به خطای این ماژول ترجمه می‌شود.
+    """
     try:
-        data = json.loads(text)
-    except json.JSONDecodeError:
-        # آخرین تلاش: بیرون کشیدن اولین بلوک { ... } از میان متن اضافه
-        start, end = text.find("{"), text.rfind("}")
-        if start == -1 or end <= start:
-            raise TestCaseGenerationError(
-                f"LLM did not return JSON. Response preview: {raw[:300]}"
-            ) from None
-        try:
-            data = json.loads(text[start:end + 1])
-        except json.JSONDecodeError as exc:
-            raise TestCaseGenerationError(
-                f"LLM returned invalid JSON ({exc}). Response preview: {raw[:300]}"
-            ) from exc
-
-    if not isinstance(data, dict):
-        raise TestCaseGenerationError(
-            f"Expected a JSON object at the top level, got {type(data).__name__}."
-        )
-    return data
+        return extract_json_object(raw)
+    except JsonExtractionError as exc:
+        raise TestCaseGenerationError(str(exc)) from exc
 
 
 def _validate_test_case(

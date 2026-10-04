@@ -33,6 +33,9 @@ api = [
     "uvicorn[standard]>=0.30.0",
     "httpx>=0.27.0",   # مورد نیاز fastapi.testclient.TestClient
 ]
+ui = [
+    "streamlit>=1.36.0",   # رابط قدم اول: تحلیل تسک (ui/step1_task_analysis.py)
+]
 
 [build-system]
 requires = ["hatchling"]

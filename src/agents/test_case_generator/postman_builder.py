@@ -34,7 +34,7 @@ from src.agents.test_case_generator.testcase_generator import (
 from src.debug import DebugConfig
 
 # آدرس رسمی Schema نسخه‌ی ۲.۱ کالکشن Postman
-_SCHEMA_V21 = "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+SCHEMA_V21 = "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
 
 # هدرِ Content-Type که برای بدنه‌ی JSON اضافه می‌شود
 _CONTENT_TYPE = "Content-Type"
@@ -43,6 +43,19 @@ _CONTENT_TYPE_JSON = "application/json"
 # نامِ متغیرهای سطحِ کالکشن
 _BASE_URL_VAR = DEFAULT_BASE_URL_VAR
 _TOKEN_VAR = "token"
+
+# منبعِ مقدار در save_variable — بدنه‌ی JSON (پیش‌فرض) یا هدرِ پاسخ
+_BODY_SOURCE = "body"
+_HEADER_SOURCE = "header"
+
+# برچسبِ نوعِ تست‌کیس در توضیحاتِ request. انواعِ ناشناخته مثلِ قبل «Test» می‌شوند،
+# پس رفتارِ جریانِ موجود (positive/negative) دست‌نخورده می‌ماند.
+_TYPE_LABELS = {
+    "positive": "Positive",
+    "negative": "Negative",
+    "boundary": "Boundary",
+    "state_transition": "State transition",
+}
 
 # اسکوپ‌های ذخیره‌سازیِ متغیر → تابعِ متناظر در Postman
 _SCOPE_SETTERS = {
@@ -87,6 +100,7 @@ class PostmanBuilder:
         base_url: str,
         collection_name: str = "Generated API Tests",
         extra_variables: list[dict] | None = None,
+        description: str = "",
     ) -> dict:
         """suite را به یک Postman Collection (dict) تبدیل می‌کند.
 
@@ -99,6 +113,8 @@ class PostmanBuilder:
                                چند منبعِ Swagger (چند سرویس) دارند و هر کدام
                                base URLِ خودشان را می‌خواهند. متغیرهایی که کلیدشان
                                از قبل تعریف شده باشد نادیده گرفته می‌شوند.
+            description      : توضیحاتِ سطحِ کالکشن (info.description). خالی باشد،
+                               اصلاً اضافه نمی‌شود تا خروجیِ قبلی یکسان بماند.
 
         پرتاب می‌کند:
             PostmanBuildError : suite بدونِ controller، base_url خالی، یا یک
@@ -130,11 +146,16 @@ class PostmanBuilder:
         ]
         variables.extend(self._extra_variables(extra_variables, variables))
 
+        info: dict = {
+            "name": collection_name,
+            "schema": SCHEMA_V21,
+        }
+        description = (description or "").strip()
+        if description:
+            info["description"] = description
+
         collection = {
-            "info": {
-                "name": collection_name,
-                "schema": _SCHEMA_V21,
-            },
+            "info": info,
             "variable": variables,
             "item": items,
         }
@@ -326,9 +347,7 @@ class PostmanBuilder:
     def _build_description(case: TestCase) -> str:
         """description و assumptions را به متنِ توضیحاتِ request تبدیل می‌کند."""
         case_type = str(case.get("type", "")).lower()
-        label = "Positive" if case_type == "positive" else (
-            "Negative" if case_type == "negative" else "Test"
-        )
+        label = _TYPE_LABELS.get(case_type, "Test")
 
         lines = [f"**{label} test case**"]
 
@@ -354,8 +373,10 @@ class PostmanBuilder:
         exec_lines: list[str] = []
 
         # آیا به بدنه‌ی JSONِ پاسخ نیاز داریم؟ (برای field-assertion یا save)
+        # فقط saveهای بدنه‌محور به jsonData نیاز دارند؛ save از هدر نه.
         needs_json = any(
-            self._json_path_to_accessor(sv.get("json_path", "")) is not None
+            self._save_source(sv) == _BODY_SOURCE
+            and self._json_path_to_accessor(sv.get("json_path", "")) is not None
             for sv in save_variables
             if isinstance(sv, dict)
         ) or any(
@@ -441,19 +462,58 @@ class PostmanBuilder:
         اسکوپ تعیین می‌کند کدام API استفاده شود:
             global     → pm.globals.set(...)
             collection → pm.collectionVariables.set(...)   (پیش‌فرض)
+
+        منبع (source) تعیین می‌کند مقدار از کجا خوانده شود:
+            body   → jsonData.<json_path>            (پیش‌فرض، رفتارِ قبلی)
+            header → pm.response.headers.get(...)    (json_path نامِ هدر است)
         """
         if not isinstance(save, dict):
             return []
         variable = save.get("variable")
-        accessor = self._json_path_to_accessor(save.get("json_path", ""))
-        if not variable or accessor is None:
-            # مسیرِ نامعتبر → به‌جای تولیدِ JSِ خراب، از آن می‌گذریم
+        if not variable:
             return []
+
         scope = str(save.get("scope") or _DEFAULT_SCOPE).strip().lower()
         setter = _SCOPE_SETTERS.get(scope, _SCOPE_SETTERS[_DEFAULT_SCOPE])
-        return [f"{setter}({self._js_string(str(variable))}, {accessor});"]
+        variable_literal = self._js_string(str(variable))
+
+        if self._save_source(save) == _HEADER_SOURCE:
+            header = self._header_name(save.get("json_path", ""))
+            if not header:
+                # نامِ هدرِ خالی → به‌جای تولیدِ JSِ خراب، از آن می‌گذریم
+                return []
+            return [
+                f"{setter}({variable_literal}, "
+                f"pm.response.headers.get({self._js_string(header)}));"
+            ]
+
+        accessor = self._json_path_to_accessor(save.get("json_path", ""))
+        if accessor is None:
+            # مسیرِ نامعتبر → به‌جای تولیدِ JSِ خراب، از آن می‌گذریم
+            return []
+        return [f"{setter}({variable_literal}, {accessor});"]
 
     # ── کمکی‌ها ──────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _save_source(save: dict) -> str:
+        """منبعِ مقدارِ یک save_variable — «body» (پیش‌فرض) یا «header»."""
+        source = str(save.get("source") or _BODY_SOURCE).strip().lower()
+        return _HEADER_SOURCE if source == _HEADER_SOURCE else _BODY_SOURCE
+
+    @staticmethod
+    def _header_name(value: object) -> str:
+        """نامِ هدرِ پاسخ را از مقدارِ json_path بیرون می‌کشد.
+
+        قراردادِ قدم سوم مسیر را با «$.» می‌نویسد، بنابراین «$.X-Trace-Id» به
+        «X-Trace-Id» تبدیل می‌شود. مقدارِ خالی یعنی هدرِ نامشخص.
+        """
+        if not isinstance(value, str):
+            return ""
+        name = value.strip()
+        if name.startswith("$"):
+            name = name[1:]
+        return name.lstrip(".").strip()
 
     @staticmethod
     def _json_path_to_accessor(json_path: object) -> str | None:
