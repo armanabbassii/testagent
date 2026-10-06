@@ -15,10 +15,17 @@ ui/step4_postman_generation.py — رابطِ ساده‌ی Streamlit برای �
 این صفحه هیچ API ای را اجرا نمی‌کند، کالکشن را در Postman اجرا نمی‌کند، هیچ
 سندِ Swagger ای را نمی‌خواند، هیچ LLM ای صدا نمی‌زند و قدم پنجم را شروع نمی‌کند.
 
+همین صفحه در ویزاردِ ui/app.py هم استفاده می‌شود: render_step کارِ نمایش و اجرا
+را انجام می‌دهد و main فقط پوسته‌ی صفحه‌ی مستقل است. داخلِ ویزارد، نتیجه‌های قدم
+۱ تا ۳ خودکار از وضعیتِ جریان می‌آیند و فقط نامِ کالکشن (اختیاری) از کاربر
+پرسیده می‌شود.
+
 اجرا (از ریشه‌ی پروژه):
 
     uv sync --group ui
     uv run --group ui streamlit run ui/step4_postman_generation.py
+
+یا از داخلِ ویزارد: uv run --group ui streamlit run ui/app.py
 """
 
 from __future__ import annotations
@@ -40,6 +47,7 @@ from src.agents.test_case_generator.postman_generation import (  # noqa: E402
     Step4PostmanGenerator,
 )
 from src.debug import DebugConfig  # noqa: E402
+from ui.components import render_propagated_inputs  # noqa: E402
 from ui.formatting import (  # noqa: E402
     collection_filename,
     collection_json,
@@ -48,33 +56,33 @@ from ui.formatting import (  # noqa: E402
     step4_unresolved_rows,
     step4_warnings,
 )
+from ui.workflow import (  # noqa: E402
+    INPUT_COLLECTION_NAME,
+    RESULT_ARGUMENT,
+    WorkflowState,
+    run_label,
+)
 
 _RESULT_KEY = "postman_generation_result"
 _ERROR_KEY = "postman_generation_error"
 _APPROVED_KEY = "postman_generation_approved"
 
+_COLLECTION_NAME_PLACEHOLDER = "Leave empty to derive it from the Step 1 task summary."
 
-def _generate(
-    step1_raw: str, step2_raw: str, step3_raw: str, collection_name: str
-) -> None:
-    """کالکشن را می‌سازد و نتیجه یا خطا را در session_state می‌گذارد.
 
-    هر نتیجه‌ی تازه تأییدِ قبلی را باطل می‌کند تا تأییدِ کهنه روی کالکشنِ جدید
-    نماند.
+def _run(
+    step1_result: dict,
+    step2_result: dict,
+    step3_result: dict,
+    collection_name: str,
+) -> tuple[dict | None, str | None]:
+    """کالکشن را می‌سازد و (نتیجه، خطا) را برمی‌گرداند.
+
+    قطعی است و هیچ LLM/شبکه‌ای درگیر نیست — پس spinner لازم نیست. هیچ چیزی در
+    session_state نوشته نمی‌شود: صفحه‌ی مستقل نتیجه را آنجا می‌گذارد و ویزارد
+    در وضعیتِ جریان.
     """
-    st.session_state[_APPROVED_KEY] = False
-
     try:
-        step1_result = json.loads(step1_raw)
-        step2_result = json.loads(step2_raw)
-        step3_result = json.loads(step3_raw)
-    except json.JSONDecodeError as exc:
-        st.session_state[_RESULT_KEY] = None
-        st.session_state[_ERROR_KEY] = f"Input is not valid JSON: {exc}"
-        return
-
-    try:
-        # قطعی است و هیچ LLM/شبکه‌ای درگیر نیست — پس spinner لازم نیست.
         result = Step4PostmanGenerator(
             debug_config=DebugConfig.from_env(),
             collection_name=collection_name,
@@ -85,16 +93,22 @@ def _generate(
         )
     except PostmanGenerationError as exc:
         # ورودیِ ناسازگار یا کالکشنِ نامعتبر
-        st.session_state[_RESULT_KEY] = None
-        st.session_state[_ERROR_KEY] = f"Collection generation failed:\n\n{exc}"
+        return None, f"Collection generation failed:\n\n{exc}"
     except Exception as exc:  # noqa: BLE001 — خطای غیرمنتظره نباید UI را بترکاند
-        st.session_state[_RESULT_KEY] = None
-        st.session_state[_ERROR_KEY] = (
-            f"Collection generation failed: {type(exc).__name__}: {exc}"
-        )
-    else:
-        st.session_state[_RESULT_KEY] = result
-        st.session_state[_ERROR_KEY] = None
+        return None, f"Collection generation failed: {type(exc).__name__}: {exc}"
+
+    return result, None
+
+
+def _store(result: dict | None, error: str | None) -> None:
+    """نتیجه یا خطا را در session_state می‌گذارد (حالتِ صفحه‌ی مستقل).
+
+    هر نتیجه‌ی تازه تأییدِ قبلی را باطل می‌کند تا تأییدِ کهنه روی کالکشنِ جدید
+    نماند.
+    """
+    st.session_state[_APPROVED_KEY] = False
+    st.session_state[_RESULT_KEY] = result
+    st.session_state[_ERROR_KEY] = error
 
 
 def _render_unresolved(result: dict) -> None:
@@ -230,7 +244,7 @@ def _render_approval(result: dict) -> None:
 
 
 def _render_inputs() -> None:
-    """فرمِ ورودی را می‌سازد و در صورت ارسال، کالکشن را می‌سازد."""
+    """فرمِ ورودیِ صفحه‌ی مستقل را می‌سازد و در صورت ارسال، کالکشن را می‌سازد."""
     with st.form("postman_generation_form"):
         step1_raw = st.text_area(
             "Step 1 result (JSON) *",
@@ -258,9 +272,7 @@ def _render_inputs() -> None:
         )
         collection_name = st.text_input(
             "Collection name (optional)",
-            placeholder=(
-                "Leave empty to derive it from the Step 1 task summary."
-            ),
+            placeholder=_COLLECTION_NAME_PLACEHOLDER,
         )
         submitted = st.form_submit_button("Generate Postman Collection")
 
@@ -273,11 +285,88 @@ def _render_inputs() -> None:
         ("Step 3", step3_raw),
     ):
         if not value.strip():
-            st.session_state[_RESULT_KEY] = None
-            st.session_state[_ERROR_KEY] = f"The {label} result is required."
+            _store(None, f"The {label} result is required.")
             return
 
-    _generate(step1_raw, step2_raw, step3_raw, collection_name)
+    try:
+        step1_result = json.loads(step1_raw)
+        step2_result = json.loads(step2_raw)
+        step3_result = json.loads(step3_raw)
+    except json.JSONDecodeError as exc:
+        _store(None, f"Input is not valid JSON: {exc}")
+        return
+
+    _store(*_run(step1_result, step2_result, step3_result, collection_name))
+
+
+def _render_standalone() -> None:
+    """صفحه‌ی مستقلِ قدمِ چهارم — ورودی دستی و نتیجه در session_state."""
+    _render_inputs()
+
+    error = st.session_state.get(_ERROR_KEY)
+    if error:
+        st.error(error)
+
+    result = st.session_state.get(_RESULT_KEY)
+    if result:
+        _render_result(result)
+        _render_approval(result)
+
+
+def _render_in_workflow(workflow: WorkflowState) -> None:
+    """قدمِ چهارم داخلِ ویزارد: نتیجه‌های قدم ۱ تا ۳ خودکار می‌آیند.
+
+    نامِ کالکشن تنها ورودیِ دستیِ این قدم است و اختیاری — پس از اولین اجرا در
+    وضعیتِ جریان می‌ماند و دوباره پرسیده نمی‌شود.
+    """
+    render_propagated_inputs(workflow, 4)
+
+    with st.form("postman_generation_form"):
+        collection_name = st.text_input(
+            "Collection name (optional)",
+            value=workflow.input_value(INPUT_COLLECTION_NAME),
+            placeholder=_COLLECTION_NAME_PLACEHOLDER,
+        )
+        submitted = st.form_submit_button(run_label(workflow, 4))
+
+    if submitted:
+        payload = workflow.step_inputs(4)
+        upstream = [RESULT_ARGUMENT[source] for source in (1, 2, 3)]
+        if any(name not in payload for name in upstream):
+            st.error(
+                "The Step 1–3 results are not available yet. Run them and approve "
+                "Step 3 first."
+            )
+        else:
+            workflow.set_input(INPUT_COLLECTION_NAME, collection_name)
+            result, error = _run(
+                payload[upstream[0]],
+                payload[upstream[1]],
+                payload[upstream[2]],
+                collection_name,
+            )
+            if error:
+                workflow.record_error(4, error)
+            else:
+                workflow.record_result(4, result)
+            # کلِ صفحه (از جمله نوارِ قدم‌ها) با وضعیتِ تازه دوباره کشیده شود.
+            st.rerun()
+
+    result = workflow.result(4)
+    if result:
+        _render_result(result)
+
+
+def render_step(workflow: WorkflowState | None = None) -> None:
+    """ورودی و نتیجه‌ی قدمِ چهارم را نشان می‌دهد.
+
+    workflow=None یعنی صفحه‌ی مستقل (ورودی دستی، نتیجه در session_state).
+    workflow یعنی داخلِ ویزارد (ورودی و نتیجه در وضعیتِ جریان).
+    """
+    if workflow is None:
+        _render_standalone()
+    else:
+        _render_in_workflow(workflow)
 
 
 def main() -> None:
@@ -295,16 +384,8 @@ def main() -> None:
         "API and does not run the collection."
     )
 
-    _render_inputs()
-
-    error = st.session_state.get(_ERROR_KEY)
-    if error:
-        st.error(error)
-
-    result = st.session_state.get(_RESULT_KEY)
-    if result:
-        _render_result(result)
-        _render_approval(result)
+    render_step()
 
 
-main()
+if __name__ == "__main__":
+    main()

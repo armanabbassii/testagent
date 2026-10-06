@@ -14,10 +14,16 @@ src/agents/test_case_generator/scenario_analysis.py می‌مانند.
 این صفحه هیچ API ای را اجرا نمی‌کند، هیچ سندِ Swagger ای را نمی‌خواند، هیچ
 مجموعه‌ی Postman ای نمی‌سازد و قدم چهارم را اجرا نمی‌کند.
 
+همین صفحه در ویزاردِ ui/app.py هم استفاده می‌شود: render_step کارِ نمایش و اجرا
+را انجام می‌دهد و main فقط پوسته‌ی صفحه‌ی مستقل است. داخلِ ویزارد، نتیجه‌های قدم
+اول و دوم خودکار از وضعیتِ جریان می‌آیند و این قدم هیچ ورودیِ دستیِ دیگری ندارد.
+
 اجرا (از ریشه‌ی پروژه):
 
     uv sync --group ui
     uv run --group ui streamlit run ui/step3_scenario_analysis.py
+
+یا از داخلِ ویزارد: uv run --group ui streamlit run ui/app.py
 """
 
 from __future__ import annotations
@@ -40,6 +46,7 @@ from src.agents.test_case_generator.scenario_analysis import (  # noqa: E402
     extract_test_cases,
 )
 from src.debug import DebugConfig  # noqa: E402
+from ui.components import render_propagated_inputs  # noqa: E402
 from ui.formatting import (  # noqa: E402
     clarification_details,
     dependency_details,
@@ -47,6 +54,11 @@ from ui.formatting import (  # noqa: E402
     execution_steps,
     scenario_details,
     step3_counts,
+)
+from ui.workflow import (  # noqa: E402
+    RESULT_ARGUMENT,
+    WorkflowState,
+    run_label,
 )
 
 # شناسه‌ی کاربری که به‌عنوان هدر x-user-id به سرویسِ LLM فرستاده می‌شود
@@ -57,23 +69,24 @@ _ERROR_KEY = "scenario_analysis_error"
 _TEST_CASES_KEY = "scenario_analysis_test_cases"
 _APPROVED_KEY = "scenario_analysis_approved"
 
+_STEP1_PLACEHOLDER = (
+    "Paste the JSON produced by Step 1 — the 'Raw JSON' section at the bottom of "
+    "the Step 1 page is exactly this."
+)
+_STEP2_PLACEHOLDER = (
+    "Paste the JSON produced by Step 2 — the 'Raw JSON' section at the bottom of "
+    "the Step 2 page is exactly this."
+)
 
-def _analyze(step1_raw: str, step2_raw: str) -> None:
-    """تحلیلِ سناریو را اجرا می‌کند و نتیجه یا خطا را در session_state می‌گذارد.
 
-    هر نتیجه‌ی تازه تأییدِ قبلی را باطل می‌کند تا تأییدِ کهنه روی نتیجه‌ی
-    جدید نماند.
+def _run(
+    step1_result: dict, step2_result: dict
+) -> tuple[dict | None, str | None]:
+    """تحلیلِ سناریو را اجرا می‌کند و (نتیجه، خطا) را برمی‌گرداند.
+
+    هیچ چیزی در session_state نوشته نمی‌شود: نگه‌داشتنِ نتیجه کارِ فراخوان است —
+    صفحه‌ی مستقل آن را در session_state می‌گذارد و ویزارد در وضعیتِ جریان.
     """
-    st.session_state[_APPROVED_KEY] = False
-
-    try:
-        step1_result = json.loads(step1_raw)
-        step2_result = json.loads(step2_raw)
-    except json.JSONDecodeError as exc:
-        st.session_state[_RESULT_KEY] = None
-        st.session_state[_ERROR_KEY] = f"Input is not valid JSON: {exc}"
-        return
-
     try:
         with st.spinner("Grouping scenarios and analysing dependencies..."):
             result = Step3ScenarioAnalysisGenerator(
@@ -85,17 +98,22 @@ def _analyze(step1_raw: str, step2_raw: str) -> None:
             )
     except ScenarioAnalysisError as exc:
         # ورودیِ نامعتبر یا خروجیِ ناسازگار با قرارداد
-        st.session_state[_RESULT_KEY] = None
-        st.session_state[_ERROR_KEY] = f"Scenario analysis failed:\n\n{exc}"
+        return None, f"Scenario analysis failed:\n\n{exc}"
     except Exception as exc:  # noqa: BLE001 — خطای شبکه/سرویس نباید UI را بترکاند
-        st.session_state[_RESULT_KEY] = None
-        st.session_state[_ERROR_KEY] = (
-            f"Scenario analysis failed: {type(exc).__name__}: {exc}"
-        )
-    else:
-        st.session_state[_RESULT_KEY] = result
-        st.session_state[_TEST_CASES_KEY] = extract_test_cases(step1_result)
-        st.session_state[_ERROR_KEY] = None
+        return None, f"Scenario analysis failed: {type(exc).__name__}: {exc}"
+
+    return result, None
+
+
+def _store(result: dict | None, error: str | None) -> None:
+    """نتیجه یا خطا را در session_state می‌گذارد (حالتِ صفحه‌ی مستقل).
+
+    هر نتیجه‌ی تازه تأییدِ قبلی را باطل می‌کند تا تأییدِ کهنه روی نتیجه‌ی
+    جدید نماند.
+    """
+    st.session_state[_APPROVED_KEY] = False
+    st.session_state[_RESULT_KEY] = result
+    st.session_state[_ERROR_KEY] = error
 
 
 def _render_scenarios(result: dict, test_cases: list[dict]) -> None:
@@ -206,23 +224,17 @@ def _render_approval() -> None:
 
 
 def _render_inputs() -> None:
-    """فرمِ ورودی را می‌سازد و در صورت ارسال، تحلیل را اجرا می‌کند."""
+    """فرمِ ورودیِ صفحه‌ی مستقل را می‌سازد و در صورت ارسال، تحلیل را اجرا می‌کند."""
     with st.form("scenario_analysis_form"):
         step1_raw = st.text_area(
             "Step 1 result (JSON) *",
             height=180,
-            placeholder=(
-                "Paste the JSON produced by Step 1 — the 'Raw JSON' section at the "
-                "bottom of the Step 1 page is exactly this."
-            ),
+            placeholder=_STEP1_PLACEHOLDER,
         )
         step2_raw = st.text_area(
             "Step 2 result (JSON) *",
             height=180,
-            placeholder=(
-                "Paste the JSON produced by Step 2 — the 'Raw JSON' section at the "
-                "bottom of the Step 2 page is exactly this."
-            ),
+            placeholder=_STEP2_PLACEHOLDER,
         )
         submitted = st.form_submit_button("Analyze Scenarios & Dependencies")
 
@@ -230,16 +242,86 @@ def _render_inputs() -> None:
         return
 
     if not step1_raw.strip():
-        st.session_state[_RESULT_KEY] = None
-        st.session_state[_ERROR_KEY] = "The Step 1 result is required."
+        _store(None, "The Step 1 result is required.")
         return
 
     if not step2_raw.strip():
-        st.session_state[_RESULT_KEY] = None
-        st.session_state[_ERROR_KEY] = "The Step 2 result is required."
+        _store(None, "The Step 2 result is required.")
         return
 
-    _analyze(step1_raw, step2_raw)
+    try:
+        step1_result = json.loads(step1_raw)
+        step2_result = json.loads(step2_raw)
+    except json.JSONDecodeError as exc:
+        _store(None, f"Input is not valid JSON: {exc}")
+        return
+
+    result, error = _run(step1_result, step2_result)
+    _store(result, error)
+    if error is None:
+        st.session_state[_TEST_CASES_KEY] = extract_test_cases(step1_result)
+
+
+def _render_standalone() -> None:
+    """صفحه‌ی مستقلِ قدمِ سوم — ورودی دستی و نتیجه در session_state."""
+    _render_inputs()
+
+    error = st.session_state.get(_ERROR_KEY)
+    if error:
+        st.error(error)
+
+    result = st.session_state.get(_RESULT_KEY)
+    if result:
+        _render_result(result, st.session_state.get(_TEST_CASES_KEY) or [])
+        _render_approval()
+
+
+def _render_in_workflow(workflow: WorkflowState) -> None:
+    """قدمِ سوم داخلِ ویزارد: نتیجه‌های قدم اول و دوم خودکار می‌آیند.
+
+    این قدم هیچ ورودیِ دستی ندارد — پس فقط یک دکمه‌ی اجرا لازم است.
+    """
+    render_propagated_inputs(workflow, 3)
+    st.caption(
+        "This step needs no further input: the Step 1 test cases and the Step 2 "
+        "mapping above are enough."
+    )
+
+    if st.button(run_label(workflow, 3), key="workflow_run_3"):
+        payload = workflow.step_inputs(3)
+        upstream = [RESULT_ARGUMENT[source] for source in (1, 2)]
+        if any(name not in payload for name in upstream):
+            st.error(
+                "The Step 1 and Step 2 results are not available yet. Run them and "
+                "approve Step 2 first."
+            )
+        else:
+            result, error = _run(payload[upstream[0]], payload[upstream[1]])
+            if error:
+                workflow.record_error(3, error)
+            else:
+                workflow.record_result(3, result)
+            # کلِ صفحه (از جمله نوارِ قدم‌ها) با وضعیتِ تازه دوباره کشیده شود.
+            st.rerun()
+
+    result = workflow.result(3)
+    if result:
+        step1_result = workflow.result(1)
+        _render_result(
+            result, extract_test_cases(step1_result) if step1_result else []
+        )
+
+
+def render_step(workflow: WorkflowState | None = None) -> None:
+    """ورودی و نتیجه‌ی قدمِ سوم را نشان می‌دهد.
+
+    workflow=None یعنی صفحه‌ی مستقل (ورودی دستی، نتیجه در session_state).
+    workflow یعنی داخلِ ویزارد (ورودی و نتیجه در وضعیتِ جریان).
+    """
+    if workflow is None:
+        _render_standalone()
+    else:
+        _render_in_workflow(workflow)
 
 
 def main() -> None:
@@ -257,16 +339,8 @@ def main() -> None:
         "collection."
     )
 
-    _render_inputs()
-
-    error = st.session_state.get(_ERROR_KEY)
-    if error:
-        st.error(error)
-
-    result = st.session_state.get(_RESULT_KEY)
-    if result:
-        _render_result(result, st.session_state.get(_TEST_CASES_KEY) or [])
-        _render_approval()
+    render_step()
 
 
-main()
+if __name__ == "__main__":
+    main()

@@ -15,10 +15,17 @@ ui/step1_task_analysis.py — رابطِ ساده‌ی Streamlit برای قدم
 Postman می‌سازد، نه API ای را اجرا می‌کند و نه قدم‌های بعدیِ جریان را
 اجرا می‌کند.
 
+همین صفحه در ویزاردِ ui/app.py هم استفاده می‌شود: render_step کارِ نمایش و اجرا
+را انجام می‌دهد و main فقط پوسته‌ی صفحه‌ی مستقل است. هیچ منطقِ تازه‌ای اینجا
+اضافه نشده — فقط محلِ نگه‌داشتنِ نتیجه (session_state یا وضعیتِ ویزارد) عوض
+می‌شود.
+
 اجرا (از ریشه‌ی پروژه):
 
     uv sync --group ui
     uv run --group ui streamlit run ui/step1_task_analysis.py
+
+یا از داخلِ ویزارد: uv run --group ui streamlit run ui/app.py
 """
 
 from __future__ import annotations
@@ -45,6 +52,12 @@ from ui.formatting import (  # noqa: E402
     markdown_bullets,
     type_counts,
 )
+from ui.workflow import (  # noqa: E402
+    INPUT_DEVELOPED_SERVICES,
+    INPUT_TASK_DESCRIPTION,
+    WorkflowState,
+    run_label,
+)
 
 # شناسه‌ی کاربری که به‌عنوان هدر x-user-id به سرویسِ LLM فرستاده می‌شود
 _UI_USER_ID = "step1-task-analysis-ui"
@@ -52,12 +65,23 @@ _UI_USER_ID = "step1-task-analysis-ui"
 _RESULT_KEY = "analysis_result"
 _ERROR_KEY = "analysis_error"
 
+_TASK_PLACEHOLDER = (
+    "Paste the development task here — the business and functional behaviour "
+    "described in the task is the source of truth."
+)
+_SERVICES_PLACEHOLDER = (
+    "APIs/endpoints implemented for this task — plain text, paths, HTTP methods, "
+    "Swagger URLs, or a mixture. Multiple services allowed."
+)
 
-def _analyze(task_description: str, developed_services: str) -> None:
-    """تحلیل را اجرا می‌کند و نتیجه یا خطا را در session_state می‌گذارد.
 
-    نتیجه در session_state نگه داشته می‌شود تا با هر rerun (مثلاً باز کردنِ
-    یک تست‌کیس) از بین نرود.
+def _run(
+    task_description: str, developed_services: str
+) -> tuple[dict | None, str | None]:
+    """تحلیل را اجرا می‌کند و (نتیجه، خطا) را برمی‌گرداند.
+
+    هیچ چیزی در session_state نوشته نمی‌شود: نگه‌داشتنِ نتیجه کارِ فراخوان است —
+    صفحه‌ی مستقل آن را در session_state می‌گذارد و ویزارد در وضعیتِ جریان.
     """
     try:
         with st.spinner("Analyzing task..."):
@@ -70,23 +94,27 @@ def _analyze(task_description: str, developed_services: str) -> None:
             )
     except ValueError as exc:
         # ورودیِ نامعتبر — مثلاً توصیفِ تسکِ خالی که پیش از این‌جا گرفته می‌شود
-        st.session_state[_RESULT_KEY] = None
-        st.session_state[_ERROR_KEY] = f"Invalid input: {exc}"
+        return None, f"Invalid input: {exc}"
     except TaskAnalysisError as exc:
         # خروجیِ مدل با قرارداد نخوانده است — پیامِ کاملِ اعتبارسنجی نشان داده می‌شود
-        st.session_state[_RESULT_KEY] = None
-        st.session_state[_ERROR_KEY] = (
+        return None, (
             "The model output did not match the required test case format.\n\n"
             f"{exc}"
         )
     except Exception as exc:  # noqa: BLE001 — خطای شبکه/سرویس نباید UI را بترکاند
-        st.session_state[_RESULT_KEY] = None
-        st.session_state[_ERROR_KEY] = (
-            f"Task analysis failed: {type(exc).__name__}: {exc}"
-        )
-    else:
-        st.session_state[_RESULT_KEY] = result
-        st.session_state[_ERROR_KEY] = None
+        return None, f"Task analysis failed: {type(exc).__name__}: {exc}"
+
+    return result, None
+
+
+def _store(result: dict | None, error: str | None) -> None:
+    """نتیجه یا خطا را در session_state می‌گذارد (حالتِ صفحه‌ی مستقل).
+
+    نتیجه در session_state نگه داشته می‌شود تا با هر rerun (مثلاً باز کردنِ
+    یک تست‌کیس) از بین نرود.
+    """
+    st.session_state[_RESULT_KEY] = result
+    st.session_state[_ERROR_KEY] = error
 
 
 def _render_result(result: dict) -> None:
@@ -134,23 +162,17 @@ def _render_result(result: dict) -> None:
 
 
 def _render_inputs() -> None:
-    """فرمِ ورودی را می‌سازد و در صورت ارسال، تحلیل را اجرا می‌کند."""
+    """فرمِ ورودیِ صفحه‌ی مستقل را می‌سازد و در صورت ارسال، تحلیل را اجرا می‌کند."""
     with st.form("task_analysis_form"):
         task_description = st.text_area(
             "Task Description *",
             height=220,
-            placeholder=(
-                "Paste the development task here — the business and functional "
-                "behaviour described in the task is the source of truth."
-            ),
+            placeholder=_TASK_PLACEHOLDER,
         )
         developed_services = st.text_area(
             "Developed Services",
             height=160,
-            placeholder=(
-                "APIs/endpoints implemented for this task — plain text, paths, "
-                "HTTP methods, Swagger URLs, or a mixture. Multiple services allowed."
-            ),
+            placeholder=_SERVICES_PLACEHOLDER,
         )
         submitted = st.form_submit_button("Analyze Task")
 
@@ -158,11 +180,76 @@ def _render_inputs() -> None:
         return
 
     if not task_description.strip():
-        st.session_state[_RESULT_KEY] = None
-        st.session_state[_ERROR_KEY] = "Task Description is required."
+        _store(None, "Task Description is required.")
         return
 
-    _analyze(task_description, developed_services)
+    _store(*_run(task_description, developed_services))
+
+
+def _render_standalone() -> None:
+    """صفحه‌ی مستقلِ قدمِ اول — ورودی دستی و نتیجه در session_state."""
+    _render_inputs()
+
+    error = st.session_state.get(_ERROR_KEY)
+    if error:
+        st.error(error)
+
+    result = st.session_state.get(_RESULT_KEY)
+    if result:
+        _render_result(result)
+
+
+def _render_in_workflow(workflow: WorkflowState) -> None:
+    """قدمِ اول داخلِ ویزارد: ورودی‌ها در وضعیتِ جریان می‌مانند و نتیجه هم آنجا.
+
+    نتیجه‌ی تازه، قدم‌های پایین‌دستی را کهنه می‌کند و آن‌ها را پاک نمی‌کند؛
+    پیامش در بالای ویزارد نشان داده می‌شود.
+    """
+    with st.form("task_analysis_form"):
+        task_description = st.text_area(
+            "Task Description *",
+            value=workflow.input_value(INPUT_TASK_DESCRIPTION),
+            height=220,
+            placeholder=_TASK_PLACEHOLDER,
+        )
+        developed_services = st.text_area(
+            "Developed Services",
+            value=workflow.input_value(INPUT_DEVELOPED_SERVICES),
+            height=160,
+            placeholder=_SERVICES_PLACEHOLDER,
+        )
+        submitted = st.form_submit_button(run_label(workflow, 1))
+
+    if submitted:
+        if not task_description.strip():
+            # ورودیِ نامعتبر وضعیت را دست نمی‌زند — نتیجه‌ی قبلی سرِ جایش می‌ماند.
+            st.error("Task Description is required.")
+        else:
+            workflow.set_input(INPUT_TASK_DESCRIPTION, task_description)
+            workflow.set_input(INPUT_DEVELOPED_SERVICES, developed_services)
+            result, error = _run(task_description, developed_services)
+            if error:
+                workflow.record_error(1, error)
+            else:
+                workflow.record_result(1, result)
+            # کلِ صفحه (از جمله نوارِ قدم‌ها) با وضعیتِ تازه دوباره کشیده شود.
+            st.rerun()
+
+    result = workflow.result(1)
+    if result:
+        _render_result(result)
+
+
+def render_step(workflow: WorkflowState | None = None) -> None:
+    """ورودی و نتیجه‌ی قدمِ اول را نشان می‌دهد.
+
+    workflow=None یعنی صفحه‌ی مستقل (ورودی دستی، نتیجه در session_state).
+    workflow یعنی داخلِ ویزارد (ورودی و نتیجه در وضعیتِ جریان).
+    """
+    if workflow is None:
+        _render_standalone()
+    else:
+        _render_in_workflow(workflow)
 
 
 def main() -> None:
@@ -179,15 +266,8 @@ def main() -> None:
         "collection, and does not execute any API."
     )
 
-    _render_inputs()
-
-    error = st.session_state.get(_ERROR_KEY)
-    if error:
-        st.error(error)
-
-    result = st.session_state.get(_RESULT_KEY)
-    if result:
-        _render_result(result)
+    render_step()
 
 
-main()
+if __name__ == "__main__":
+    main()

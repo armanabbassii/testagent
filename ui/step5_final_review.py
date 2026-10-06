@@ -17,10 +17,17 @@ src/agents/test_case_generator/final_review.py می‌مانند.
 نمی‌کند، کالکشن را در Postman اجرا نمی‌کند و هیچ نتیجه‌ی قبلی را تغییر نمی‌دهد.
 تأییدِ این قدم یعنی «بازبین artifact را دید و پذیرفت» — نه اجرای چیزی.
 
+همین صفحه در ویزاردِ ui/app.py هم استفاده می‌شود: render_step کارِ نمایش و اجرا
+را انجام می‌دهد و main فقط پوسته‌ی صفحه‌ی مستقل است. داخلِ ویزارد، نتیجه‌های قدم
+۱ تا ۴ — از جمله خودِ کالکشنِ قدم چهارم — خودکار از وضعیتِ جریان می‌آیند و
+هیچ چیزی دانلود/دوباره‌بارگذاری نمی‌شود. صادراتِ نهایی هم فقط کارِ همین قدم است.
+
 اجرا (از ریشه‌ی پروژه):
 
     uv sync --group ui
     uv run --group ui streamlit run ui/step5_final_review.py
+
+یا از داخلِ ویزارد: uv run --group ui streamlit run ui/app.py
 """
 
 from __future__ import annotations
@@ -44,6 +51,7 @@ from src.agents.test_case_generator.final_review import (  # noqa: E402
     STATUS_READY,
 )
 from src.debug import DebugConfig  # noqa: E402
+from ui.components import render_propagated_inputs  # noqa: E402
 from ui.formatting import (  # noqa: E402
     collection_filename,
     collection_json,
@@ -56,6 +64,11 @@ from ui.formatting import (  # noqa: E402
     step5_status_label,
     step5_summary,
     step5_warnings,
+)
+from ui.workflow import (  # noqa: E402
+    RESULT_ARGUMENT,
+    WorkflowState,
+    run_label,
 )
 
 _RESULT_KEY = "final_review_result"
@@ -74,40 +87,57 @@ _INPUT_KEYS = (
     ),
 )
 
+# نتیجه‌های قدم‌های قبلی که این قدم مستقیم مصرف می‌کند.
+_UPSTREAM = (1, 2, 3, 4)
 
-def _review(inputs: dict[str, str]) -> None:
-    """بازبینیِ نهایی را اجرا می‌کند و نتیجه یا خطا را در session_state می‌گذارد.
+
+def _run(
+    step1_result: object,
+    step2_result: object,
+    step3_result: object,
+    step4_result: object,
+) -> tuple[dict | None, str | None]:
+    """بازبینیِ نهایی را اجرا می‌کند و (نتیجه، خطا) را برمی‌گرداند.
+
+    قطعی است و هیچ LLM/شبکه‌ای درگیر نیست — پس spinner لازم نیست. هیچ چیزی در
+    session_state نوشته نمی‌شود: صفحه‌ی مستقل نتیجه را آنجا می‌گذارد و ویزارد
+    در وضعیتِ جریان.
+    """
+    try:
+        result = FinalReviewGenerator(debug_config=DebugConfig.from_env()).generate(
+            step1_result=step1_result,
+            step2_result=step2_result,
+            step3_result=step3_result,
+            step4_result=step4_result,
+        )
+    except Exception as exc:  # noqa: BLE001 — خطای غیرمنتظره نباید UI را بترکاند
+        return None, f"Final review failed: {type(exc).__name__}: {exc}"
+
+    return result, None
+
+
+def _store(result: dict | None, error: str | None) -> None:
+    """نتیجه یا خطا را در session_state می‌گذارد (حالتِ صفحه‌ی مستقل).
 
     هر نتیجه‌ی تازه تأییدِ قبلی را باطل می‌کند تا تأییدِ کهنه روی گزارشِ جدید
     نماند.
     """
     st.session_state[_APPROVED_KEY] = False
+    st.session_state[_RESULT_KEY] = result
+    st.session_state[_ERROR_KEY] = error
 
+
+def _review(inputs: dict[str, str]) -> None:
+    """بازبینیِ نهایی را از ورودی‌های دستی اجرا می‌کند (حالتِ صفحه‌ی مستقل)."""
     parsed: dict[str, object] = {}
     for label, key, _ in _INPUT_KEYS:
         try:
             parsed[key] = json.loads(inputs[key])
         except json.JSONDecodeError as exc:
-            st.session_state[_RESULT_KEY] = None
-            st.session_state[_ERROR_KEY] = f"{label} input is not valid JSON: {exc}"
+            _store(None, f"{label} input is not valid JSON: {exc}")
             return
 
-    try:
-        # قطعی است و هیچ LLM/شبکه‌ای درگیر نیست — پس spinner لازم نیست.
-        result = FinalReviewGenerator(
-            debug_config=DebugConfig.from_env()
-        ).generate(
-            step1_result=parsed["step1_result"],
-            step2_result=parsed["step2_result"],
-            step3_result=parsed["step3_result"],
-            step4_result=parsed["step4_result"],
-        )
-    except Exception as exc:  # noqa: BLE001 — خطای غیرمنتظره نباید UI را بترکاند
-        st.session_state[_RESULT_KEY] = None
-        st.session_state[_ERROR_KEY] = f"Final review failed: {type(exc).__name__}: {exc}"
-    else:
-        st.session_state[_RESULT_KEY] = result
-        st.session_state[_ERROR_KEY] = None
+    _store(*_run(*(parsed[key] for _, key, _ in _INPUT_KEYS)))
 
 
 def _render_status(result: dict) -> None:
@@ -282,7 +312,7 @@ def _render_result(result: dict) -> None:
 
 
 def _render_inputs() -> None:
-    """فرمِ ورودی را می‌سازد و در صورت ارسال، بازبینی را اجرا می‌کند."""
+    """فرمِ ورودیِ صفحه‌ی مستقل را می‌سازد و در صورت ارسال، بازبینی را اجرا می‌کند."""
     with st.form("final_review_form"):
         raw: dict[str, str] = {}
         for label, key, hint in _INPUT_KEYS:
@@ -299,11 +329,70 @@ def _render_inputs() -> None:
 
     for label, key, _ in _INPUT_KEYS:
         if not raw[key].strip():
-            st.session_state[_RESULT_KEY] = None
-            st.session_state[_ERROR_KEY] = f"The {label} result is required."
+            _store(None, f"The {label} result is required.")
             return
 
     _review(raw)
+
+
+def _render_standalone() -> None:
+    """صفحه‌ی مستقلِ قدمِ پنجم — ورودی دستی و نتیجه در session_state."""
+    _render_inputs()
+
+    error = st.session_state.get(_ERROR_KEY)
+    if error:
+        st.error(error)
+
+    result = st.session_state.get(_RESULT_KEY)
+    if result:
+        _render_result(result)
+        _render_approval(result)
+
+
+def _render_in_workflow(workflow: WorkflowState) -> None:
+    """قدمِ پنجم داخلِ ویزارد: نتیجه‌های قدم ۱ تا ۴ خودکار می‌آیند.
+
+    کالکشنِ قدم چهارم در حافظه پاس داده می‌شود — نه دانلود، نه دوباره‌بارگذاری.
+    صادراتِ نهایی هم فقط کارِ همین قدم است.
+    """
+    render_propagated_inputs(workflow, 5)
+    st.caption(
+        "This step needs no further input: the Step 4 collection and the earlier "
+        "results above are exactly what it reviews and exports."
+    )
+
+    if st.button(run_label(workflow, 5), key="workflow_run_5"):
+        payload = workflow.step_inputs(5)
+        upstream = [RESULT_ARGUMENT[source] for source in _UPSTREAM]
+        if any(name not in payload for name in upstream):
+            st.error(
+                "The Step 1–4 results are not available yet. Run them and approve "
+                "Step 4 first."
+            )
+        else:
+            result, error = _run(*(payload[name] for name in upstream))
+            if error:
+                workflow.record_error(5, error)
+            else:
+                workflow.record_result(5, result)
+            # کلِ صفحه (از جمله نوارِ قدم‌ها) با وضعیتِ تازه دوباره کشیده شود.
+            st.rerun()
+
+    result = workflow.result(5)
+    if result:
+        _render_result(result)
+
+
+def render_step(workflow: WorkflowState | None = None) -> None:
+    """ورودی و نتیجه‌ی قدمِ پنجم را نشان می‌دهد.
+
+    workflow=None یعنی صفحه‌ی مستقل (ورودی دستی، نتیجه در session_state).
+    workflow یعنی داخلِ ویزارد (ورودی و نتیجه در وضعیتِ جریان).
+    """
+    if workflow is None:
+        _render_standalone()
+    else:
+        _render_in_workflow(workflow)
 
 
 def main() -> None:
@@ -322,16 +411,8 @@ def main() -> None:
         "not run the collection."
     )
 
-    _render_inputs()
-
-    error = st.session_state.get(_ERROR_KEY)
-    if error:
-        st.error(error)
-
-    result = st.session_state.get(_RESULT_KEY)
-    if result:
-        _render_result(result)
-        _render_approval(result)
+    render_step()
 
 
-main()
+if __name__ == "__main__":
+    main()
