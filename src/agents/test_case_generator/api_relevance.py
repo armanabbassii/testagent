@@ -153,7 +153,7 @@ def api_tokens(api: DiscoveredApi) -> set[str]:
     return tokens
 
 
-def test_case_tokens(test_case: object) -> set[str]:
+def extract_test_case_tokens(test_case: object) -> set[str]:
     """توکن‌های یک تست‌کیس: همه‌ی رشته‌های داخلش، در هر عمقی.
 
     عمداً به شکلِ schema وابسته نیست تا تغییرِ schemaی قدم اول این فیلتر را
@@ -201,7 +201,7 @@ def select_candidates(
 
     case_tokens: set[str] = set()
     for test_case in test_cases:
-        case_tokens |= test_case_tokens(test_case)
+        case_tokens |= extract_test_case_tokens(test_case)
 
     selected: list[DiscoveredService] = []
     candidate_count = 0
@@ -228,7 +228,7 @@ def select_candidates(
 __all__ = [
     "RelevanceSelection",
     "api_tokens",
+    "extract_test_case_tokens",
     "select_candidates",
-    "test_case_tokens",
     "tokenize",
 ]

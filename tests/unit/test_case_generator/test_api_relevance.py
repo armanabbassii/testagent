@@ -20,8 +20,8 @@ from src.agents.test_case_generator.api_discovery import (
 from src.agents.test_case_generator.api_relevance import (
     RelevanceSelection,
     api_tokens,
+    extract_test_case_tokens,
     select_candidates,
-    test_case_tokens,
     tokenize,
 )
 
@@ -160,7 +160,7 @@ class TestApiTokens:
 
 class TestTestCaseTokens:
     def test_nested_values_are_collected(self):
-        tokens = test_case_tokens(
+        tokens = extract_test_case_tokens(
             {
                 "id": "TC-001",
                 "title": "Update a voucher",
@@ -173,10 +173,10 @@ class TestTestCaseTokens:
 
     def test_schema_keys_are_not_tokens(self):
         """واژه‌های schema چیزی را متمایز نمی‌کنند."""
-        assert "expected" not in test_case_tokens({"expected_result": "Voucher updated"})
+        assert "expected" not in extract_test_case_tokens({"expected_result": "Voucher updated"})
 
     def test_a_bare_string_case_is_accepted(self):
-        assert "voucher" in test_case_tokens("Update a voucher")
+        assert "voucher" in extract_test_case_tokens("Update a voucher")
 
 
 # ── انتخابِ نامزدها ──────────────────────────────────────────────────────────
