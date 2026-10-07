@@ -13,14 +13,25 @@ In this step you receive two things:
 1. TEST CASES
    The structured business test cases generated in Step 1.
 
-2. DISCOVERED APIS
+2. CANDIDATE APIS
    The API operations that were extracted deterministically from the real Swagger/OpenAPI documents supplied by the user.
+
+   This list is a deterministically selected subset of the discovered operations:
+   it keeps the operations whose path, operationId or summary share terminology
+   with the test cases, and it may be much smaller than the full catalog so that
+   this prompt stays within the model's limits. Operations that share no
+   terminology with any test case were left out.
+
+   The complete discovered catalog still exists inside the application and is
+   used to validate your answer, and a human reviews the result afterwards. So
+   never invent anything to compensate for a candidate you cannot find here.
 
 ==================================================
 THE SWAGGER DOCUMENT IS THE ONLY TECHNICAL SOURCE OF TRUTH
 ==================================================
 
-The DISCOVERED APIS list is the complete set of operations that exist.
+Every entry in the CANDIDATE APIS list is a real operation taken from the real
+document — but the list below is a filtered view, not necessarily the whole set.
 
 You must NOT:
 
@@ -29,9 +40,11 @@ You must NOT:
 - Invent an HTTP method
 - Invent an operationId
 - Invent or alter parameters, request bodies or responses
-- Propose an operation that is not in the DISCOVERED APIS list
+- Propose an operation that is not in the CANDIDATE APIS list
 
-If an operation is not in the list, it does not exist.
+If an operation is not in the list, do not propose it. If none of the listed
+candidates matches the business meaning of a test case, return "api": null and
+explain what is missing — never guess.
 
 ==================================================
 GOAL
@@ -106,15 +119,21 @@ When the mapping is clear, use an empty string.
 OUTPUT FORMAT
 ==================================================
 
-Return ONLY valid JSON.
+Your entire response must be exactly one JSON object, and nothing else.
 
-Do not return Markdown.
-
-Do not wrap the JSON in ```json.
+- Start your response with the character { and end it with the character }.
+- No preamble. No planning. No thinking out loud. No self-correction. No summary.
+- Do not write anything like "I will generate the JSON now", "Here is the mapping",
+  "Self-Correction/Refinement during thought:", "I will output raw JSON" or
+  "[Output Generation] -> JSON string.". Those sentences make the response unparsable.
+- Do not return Markdown.
+- Do not wrap the JSON in ```json.
+- No comments, no code fences and no text before or after the JSON.
+- Anything you want to explain belongs inside "reason" and "clarification".
 
 The ids, methods and paths in the examples below are placeholders. Always use the
 exact test_case_id values from the TEST CASES input, and only operations that
-appear in the DISCOVERED APIS input.
+appear in the CANDIDATE APIS input.
 
 Use exactly this top-level structure:
 
@@ -171,8 +190,9 @@ TEST CASES:
 
 {{test_cases}}
 
-DISCOVERED APIS:
+CANDIDATE APIS:
 
 {{discovered_apis}}
 
-Map every test case to the most appropriate discovered operation and return the structured JSON result.
+Map every test case to the most appropriate candidate operation and return the
+structured JSON result — and only that JSON object.

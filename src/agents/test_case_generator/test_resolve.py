@@ -1,6 +1,6 @@
 import sys
 sys.path.insert(0, "/home/dotin/Downloads/agents2/agents")
-from src.agents.test_case_generator.swagger_analyzer import (
+from src.agents.test_case_generator.swagger_analyzer import (  # noqa: E402
     SwaggerAnalyzer,
     parse_swagger_fragment,
     filter_endpoints,

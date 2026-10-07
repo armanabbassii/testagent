@@ -1,8 +1,8 @@
 import sys
 sys.path.insert(0, "/home/dotin/Downloads/agents2/agents")
 
-import httpx
-from src.config import LLM_BASE_URL, LLM_MODEL, LLM_API_KEY
+import httpx  # noqa: E402
+from src.config import LLM_BASE_URL, LLM_MODEL, LLM_API_KEY  # noqa: E402
 
 url = LLM_BASE_URL.rstrip("/") + "/chat/completions"
 print("POST", url)

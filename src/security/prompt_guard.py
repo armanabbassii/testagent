@@ -21,7 +21,7 @@ security/prompt_guard.py — محافظت در برابر Prompt Injection
 import os
 import re
 from enum import IntEnum
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 
 
 # ── خطا ──────────────────────────────────────────────────────────────────────

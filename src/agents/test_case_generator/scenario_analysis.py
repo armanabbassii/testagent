@@ -37,6 +37,7 @@ from src.agents.test_case_generator.json_output import (
     JsonExtractionError,
     extract_json_object,
 )
+from src.config import LLM_MAX_OUTPUT_TOKENS
 from src.debug import DebugConfig
 from src.llm_client import LLMClient
 
@@ -845,13 +846,15 @@ class ScenarioAnalysisAgent:
         self,
         debug_config: DebugConfig | None = None,
         temperature: float = 0.0,
-        max_tokens: int = 8192,
+        max_tokens: int | None = None,
         prompt_path: Path | str | None = None,
     ) -> None:
         self._log = (debug_config or DebugConfig.off()).get_logger(self.name)
         self._prompt_path = Path(prompt_path) if prompt_path else _PROMPT_PATH
         self._temperature = temperature
-        self._max_tokens = max_tokens
+        # None یعنی «مقدارِ مشترکِ پروژه»؛ عددِ صریح همیشه برنده است.
+        # مقدارِ مشترک همان ۸۱۹۲ ای است که این قدم از قبل داشت.
+        self._max_tokens = LLM_MAX_OUTPUT_TOKENS if max_tokens is None else max_tokens
 
     def analyze(
         self,
@@ -906,7 +909,7 @@ class Step3ScenarioAnalysisGenerator:
     پارامترها:
         debug_config : تنظیماتِ لاگِ پروژه
         temperature  : دمای LLM — صفر، چون این تحلیل باید تکرارپذیر باشد
-        max_tokens   : سقفِ توکنِ پاسخ
+        max_tokens   : سقفِ توکنِ پاسخ (None یعنی مقدارِ مشترکِ LLM_MAX_OUTPUT_TOKENS)
         prompt_path  : مسیرِ فایلِ پرامپت (برای تست قابلِ جایگزینی است)
     """
 
@@ -916,7 +919,7 @@ class Step3ScenarioAnalysisGenerator:
         self,
         debug_config: DebugConfig | None = None,
         temperature: float = 0.0,
-        max_tokens: int = 8192,
+        max_tokens: int | None = None,
         prompt_path: Path | str | None = None,
     ) -> None:
         self._log = (debug_config or DebugConfig.off()).get_logger(self.name)

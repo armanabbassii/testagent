@@ -5,7 +5,7 @@ base_agent.py — کلاس پایه‌ای که همه ایجنت‌ها از آ
 from abc import ABC, abstractmethod
 from src.agents.state import AgentState
 from src.llm_client import LLMClient
-from src.security.prompt_guard import PromptGuard, PromptInjectionError
+from src.security.prompt_guard import PromptGuard
 
 
 class BaseAgent(ABC):

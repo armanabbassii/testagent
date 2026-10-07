@@ -10,7 +10,6 @@ rotation اختیاری است — اگر max_bytes تعریف شود، فایل
 """
 
 import json
-import os
 import threading
 from pathlib import Path
 from src.debug.base_handler import BaseHandler, LogRecord

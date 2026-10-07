@@ -1,10 +1,10 @@
-test case generator from swagger
+# test case generator from swagger
 
 import sys
 sys.path.insert(0, "/home/dotin/Downloads/agents2/agents")
 
-from langchain_core.messages import HumanMessage
-from src.agents.test_case_generator.agent import TestCaseGeneratorAgent
+from langchain_core.messages import HumanMessage  # noqa: E402
+from src.agents.test_case_generator.agent import TestCaseGeneratorAgent  # noqa: E402
 
 agent = TestCaseGeneratorAgent()
 
@@ -22,12 +22,12 @@ print(result["messages"][-1].content)
 # ------------------------------------
 # test scenarios generator
 #
-import sys
+import sys  # noqa: E402
 
 sys.path.insert(0, "/home/dotin/Downloads/agents2/agents")
 
-from langchain_core.messages import HumanMessage
-from src.agents.test_case_generator.agent import TestCaseGeneratorAgent
+from langchain_core.messages import HumanMessage  # noqa: E402
+from src.agents.test_case_generator.agent import TestCaseGeneratorAgent  # noqa: E402
 
 
 SCENARIO_PATH = (

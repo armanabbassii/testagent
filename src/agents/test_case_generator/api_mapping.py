@@ -35,12 +35,14 @@ from src.agents.test_case_generator.api_discovery import (
     operation_index,
     operation_key,
 )
+from src.agents.test_case_generator.api_relevance import select_candidates
 from src.agents.test_case_generator.json_output import (
     JsonExtractionError,
     extract_json_object,
 )
+from src.config import LLM_MAX_OUTPUT_TOKENS
 from src.debug import DebugConfig
-from src.llm_client import LLMClient
+from src.llm_client import LLMClient, truncation_message
 
 _PROMPT_PATH = Path(__file__).parent / "prompts" / "step2_api_mapping.md"
 
@@ -387,11 +389,37 @@ def build_result(
 
 # ── عاملِ نگاشت ──────────────────────────────────────────────────────────────
 
+def _case_id(test_case: dict) -> str:
+    """شناسه‌ی تست‌کیس با همان قاعده‌ای که اعتبارسنجی به‌کار می‌برد."""
+    return _clean(test_case.get("id"))
+
+
+def _cases_with_ids(test_cases: list[dict], case_ids: list[str]) -> list[dict]:
+    """تست‌کیس‌های مشخص‌شده، به ترتیبِ اصلی — برای تلاشِ دومِ محدود."""
+    wanted = set(case_ids)
+    return [case for case in test_cases if _case_id(case) in wanted]
+
+
+def _merge_mappings(
+    mappings: list[ApiMapping],
+    retried: list[ApiMapping],
+    test_cases: list[dict],
+) -> list[ApiMapping]:
+    """نگاشت‌های تلاشِ دوم را جای نگاشت‌های قبلی می‌گذارد، به ترتیبِ اصلی."""
+    by_id = {mapping["test_case_id"]: mapping for mapping in mappings}
+    for mapping in retried:
+        by_id[mapping["test_case_id"]] = mapping
+    return [by_id[_case_id(case)] for case in test_cases if _case_id(case) in by_id]
+
+
 class ApiMappingAgent:
     """تست‌کیس‌ها را به عملیات‌های کشف‌شده نگاشت می‌کند.
 
     تنها وظیفه‌ی LLM اینجا «فهمِ معنا و انتخابِ عملیات» است؛ ساختارِ Swagger از
     قبل به‌صورتِ قطعی استخراج شده و مدل اجازه‌ی افزودن به آن را ندارد.
+
+    حجمِ پرامپت با یک فیلترِ قطعیِ ارتباط کم می‌شود (api_relevance)، ولی
+    اعتبارسنجی و مسیرِ «حل‌نشده» همیشه در برابرِ کاتالوگِ کاملِ کشف‌شده‌اند.
     """
 
     name = "api_mapping"
@@ -400,13 +428,14 @@ class ApiMappingAgent:
         self,
         debug_config: DebugConfig | None = None,
         temperature: float = 0.0,
-        max_tokens: int = 4096,
+        max_tokens: int | None = None,
         prompt_path: Path | str | None = None,
     ) -> None:
         self._log = (debug_config or DebugConfig.off()).get_logger(self.name)
         self._prompt_path = Path(prompt_path) if prompt_path else _PROMPT_PATH
         self._temperature = temperature
-        self._max_tokens = max_tokens
+        # None یعنی «مقدارِ مشترکِ پروژه»؛ عددِ صریح همیشه برنده است.
+        self._max_tokens = LLM_MAX_OUTPUT_TOKENS if max_tokens is None else max_tokens
 
     def map_test_cases(
         self,
@@ -414,15 +443,62 @@ class ApiMappingAgent:
         services: list[DiscoveredService],
         user_id: str,
     ) -> tuple[list[ApiMapping], list[str]]:
-        """(نگاشت‌ها، ابهام‌های گزارش‌شده) را برمی‌گرداند."""
+        """(نگاشت‌ها، ابهام‌های گزارش‌شده) را برمی‌گرداند.
+
+        نگاشت در برابرِ نامزدهای مرتبط انجام می‌شود تا پرامپت کوچک بماند، ولی:
+
+          * اعتبارسنجی همیشه در برابرِ کاتالوگِ کاملِ کشف‌شده است؛
+          * اگر فیلتر چیزی کم نکرده باشد، هیچ مسیرِ دومی وجود ندارد؛
+          * اگر چیزی کم کرده باشد و چند تست‌کیس با نامزدها قطعی نشده باشند،
+            فقط همان‌ها یک بار دیگر در برابرِ کاتالوگِ کامل بررسی می‌شوند.
+
+        پس فیلتر هیچ تست‌کیسی را بی‌صدا رها نمی‌کند — بدترین حالتش یک فراخوانیِ
+        دومیِ LLM برای همان تست‌کیس‌های حل‌نشده است.
+        """
+        selection = select_candidates(test_cases, services)
+        self._log.info(
+            "فیلترِ قطعیِ ارتباطِ API",
+            total_operations=selection.total_apis,
+            candidate_operations=selection.candidate_apis,
+            filtered=selection.filtered,
+        )
+
+        mappings, clarifications = self._map_once(
+            test_cases, selection.services, services, user_id
+        )
+
+        unresolved = [m["test_case_id"] for m in mappings if m["api"] is None]
+        if not selection.filtered or not unresolved:
+            return mappings, clarifications
+
+        self._log.info(
+            "بررسیِ دوباره‌ی تست‌کیس‌های حل‌نشده در برابرِ کاتالوگِ کامل",
+            test_cases=unresolved,
+        )
+        retry_mappings, retry_clarifications = self._map_once(
+            _cases_with_ids(test_cases, unresolved), services, services, user_id
+        )
+        return (
+            _merge_mappings(mappings, retry_mappings, test_cases),
+            list(clarifications) + list(retry_clarifications),
+        )
+
+    def _map_once(
+        self,
+        test_cases: list[dict],
+        candidates: list[DiscoveredService],
+        full_catalog: list[DiscoveredService],
+        user_id: str,
+    ) -> tuple[list[ApiMapping], list[str]]:
+        """یک فراخوانیِ LLM: پرامپت با نامزدها، اعتبارسنجی با کاتالوگِ کامل."""
         system_prompt, user_message = build_prompt(
-            self._prompt_path, test_cases, services
+            self._prompt_path, test_cases, candidates
         )
         self._log.info(
             "شروع نگاشتِ تست‌کیس به API",
             user_id=user_id,
             test_cases=len(test_cases),
-            operations=sum(len(service.apis) for service in services),
+            operations=sum(len(service.apis) for service in candidates),
         )
         self._log.trace(
             "prompt نگاشت ساخته شد",
@@ -439,13 +515,20 @@ class ApiMappingAgent:
         )
         self._log.trace("پاسخ LLM دریافت شد", response_chars=len(raw or ""))
 
+        # پاسخِ بریده را نه ترمیم می‌کنیم و نه حدس می‌زنیم: خطا با ذکرِ صریحِ
+        # سقفِ توکن برگردانده می‌شود.
+        truncated = truncation_message(raw)
+        if truncated:
+            self._log.error("پاسخِ LLM بریده شد", finish_reason="length")
+            raise ApiMappingError(truncated)
+
         try:
             data = extract_json_object(raw)
         except JsonExtractionError as exc:
             raise ApiMappingError(str(exc)) from exc
 
         return validate_mapping_payload(
-            data, test_cases=test_cases, services=services
+            data, test_cases=test_cases, services=full_catalog
         )
 
 
@@ -455,7 +538,7 @@ class Step2ApiMappingGenerator:
     پارامترها:
         debug_config : تنظیماتِ لاگِ پروژه
         temperature  : دمای LLM — صفر، چون انتخابِ عملیات باید تکرارپذیر باشد
-        max_tokens   : سقفِ توکنِ پاسخ
+        max_tokens   : سقفِ توکنِ پاسخ (None یعنی مقدارِ مشترکِ LLM_MAX_OUTPUT_TOKENS)
         prompt_path  : مسیرِ فایلِ پرامپت (برای تست قابلِ جایگزینی است)
         session      : نشستِ HTTP برای دریافتِ سند (برای تست قابلِ جایگزینی است)
     """
@@ -466,7 +549,7 @@ class Step2ApiMappingGenerator:
         self,
         debug_config: DebugConfig | None = None,
         temperature: float = 0.0,
-        max_tokens: int = 4096,
+        max_tokens: int | None = None,
         prompt_path: Path | str | None = None,
         session: Any = None,
     ) -> None:

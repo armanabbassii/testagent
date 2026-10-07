@@ -32,8 +32,9 @@ from src.agents.test_case_generator.json_output import (
     JsonExtractionError,
     extract_json_object,
 )
+from src.config import LLM_MAX_OUTPUT_TOKENS
 from src.debug import DebugConfig
-from src.llm_client import LLMClient
+from src.llm_client import LLMClient, truncation_message
 
 _PROMPT_PATH = Path(__file__).parent / "prompts" / "step1_task_analysis.md"
 
@@ -447,7 +448,7 @@ class TaskAnalysisGenerator:
     پارامترها:
         debug_config : تنظیماتِ لاگِ پروژه
         temperature  : دمای LLM — پایین، چون خروجی باید ساختاریافته باشد
-        max_tokens   : سقفِ توکنِ پاسخ
+        max_tokens   : سقفِ توکنِ پاسخ (None یعنی مقدارِ مشترکِ LLM_MAX_OUTPUT_TOKENS)
         prompt_path  : مسیرِ فایلِ پرامپت (برای تست قابلِ جایگزینی است)
     """
 
@@ -458,13 +459,14 @@ class TaskAnalysisGenerator:
         self,
         debug_config: DebugConfig | None = None,
         temperature: float = 0.1,
-        max_tokens: int = 4096,
+        max_tokens: int | None = None,
         prompt_path: Path | str | None = None,
     ) -> None:
         self._log = (debug_config or DebugConfig.off()).get_logger(self.name)
         self._prompt_path = Path(prompt_path) if prompt_path else _PROMPT_PATH
         self._temperature = temperature
-        self._max_tokens = max_tokens
+        # None یعنی «مقدارِ مشترکِ پروژه»؛ عددِ صریح همیشه برنده است.
+        self._max_tokens = LLM_MAX_OUTPUT_TOKENS if max_tokens is None else max_tokens
 
     def generate(
         self,
@@ -505,6 +507,13 @@ class TaskAnalysisGenerator:
             max_tokens=self._max_tokens,
         )
         self._log.trace("پاسخ LLM دریافت شد", response_chars=len(raw or ""))
+
+        # پاسخِ بریده را نه ترمیم می‌کنیم و نه حدس می‌زنیم: خطا با ذکرِ صریحِ
+        # سقفِ توکن برگردانده می‌شود.
+        truncated = truncation_message(raw)
+        if truncated:
+            self._log.error("پاسخِ LLM بریده شد", finish_reason="length")
+            raise TaskAnalysisError(truncated)
 
         result = parse_analysis(raw)
 
