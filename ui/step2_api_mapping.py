@@ -46,6 +46,15 @@ from src.agents.test_case_generator.api_mapping import (  # noqa: E402
     Step2ApiMappingGenerator,
     extract_test_cases,
 )
+from src.agents.test_case_generator.swagger_snapshots import (  # noqa: E402
+    DEFAULT_SELECTION,
+    REFRESH_NOT_IMPLEMENTED,
+    SELECTIONS,
+    SWAGGER_SOURCES,
+    expand_selection,
+    selection_label,
+    snapshot_path,
+)
 from src.debug import DebugConfig  # noqa: E402
 from ui.components import render_propagated_inputs  # noqa: E402
 from ui.formatting import (  # noqa: E402
@@ -54,6 +63,7 @@ from ui.formatting import (  # noqa: E402
     service_details,
 )
 from ui.workflow import (  # noqa: E402
+    INPUT_SWAGGER_SELECTION,
     INPUT_SWAGGER_SOURCES,
     RESULT_ARGUMENT,
     WorkflowState,
@@ -80,9 +90,15 @@ _SOURCES_PLACEHOLDER = (
 
 
 def _run(
-    step1_result: dict, services_raw: str
+    step1_result: dict,
+    services_raw: str,
+    snapshot_keys: list[str] | None = None,
 ) -> tuple[dict | None, str | None]:
     """کشف و نگاشت را اجرا می‌کند و (نتیجه، خطا) را برمی‌گرداند.
+
+    ``snapshot_keys`` مسیرِ عادیِ ویزارد است: از snapshotهای محلی خوانده
+    می‌شود و هیچ درخواستی به شبکه زده نمی‌شود. بدونِ آن، همان مسیرِ قبلیِ
+    ``services_raw`` (URL یا مسیرِ فایل) اجرا می‌شود.
 
     هیچ چیزی در session_state نوشته نمی‌شود: نگه‌داشتنِ نتیجه کارِ فراخوان است —
     صفحه‌ی مستقل آن را در session_state می‌گذارد و ویزارد در وضعیتِ جریان.
@@ -97,6 +113,7 @@ def _run(
                 step1_result=step1_result,
                 service_sources=sources,
                 user_id=_UI_USER_ID,
+                snapshot_keys=snapshot_keys,
             )
     except ValueError as exc:
         # ورودیِ نامعتبر — مثلاً فهرستِ خالیِ سرویس‌ها
@@ -161,15 +178,22 @@ def _render_mappings(result: dict, test_cases: list[dict]) -> None:
         st.divider()
 
 
-def _render_result(result: dict, test_cases: list[dict]) -> None:
-    """نتیجه‌ی قدم دوم را برای بازبینیِ انسانی نمایش می‌دهد."""
+def _render_result(result: dict, test_cases: list[dict], selection: str = "") -> None:
+    """نتیجه‌ی قدم دوم را برای بازبینیِ انسانی نمایش می‌دهد.
+
+    اولویتِ نمایش با نگاشت‌هاست: کاربر باید «TC-001 → GET /admin/voucher/{id}»
+    را ببیند، نه هزاران عملیاتِ بی‌ربط. کاتالوگِ کاملِ کشف‌شده عمداً جمع‌شده
+    می‌ماند — برای اعتبارسنجی و اشکال‌زدایی لازم است، ولی خروجیِ اصلی نیست.
+    """
     counts = mapping_counts(result)
     columns = st.columns(3)
     columns[0].metric("Services", len(result["services"]))
     columns[1].metric("Mapped", counts["resolved"])
     columns[2].metric("Not resolved", counts["unresolved"])
 
-    _render_services(result)
+    if selection:
+        st.caption(f"Swagger source: **{selection_label(selection)}**")
+
     _render_mappings(result, test_cases)
 
     if result["clarifications"]:
@@ -180,6 +204,14 @@ def _render_result(result: dict, test_cases: list[dict]) -> None:
         )
         for item in result["clarifications"]:
             st.warning(item)
+
+    st.caption(
+        f"The full discovered catalogue ({sum(len(service['apis']) for service in result['services'])} "
+        "operations) is kept for validation and debugging. It is not part of the "
+        "input for the next step."
+    )
+    with st.expander("Full discovered catalogue (debug)"):
+        _render_services(result)
 
     with st.expander("Raw JSON (input for the next step of the workflow)"):
         st.json(result)
@@ -254,24 +286,67 @@ def _render_standalone() -> None:
         _render_approval()
 
 
-def _render_in_workflow(workflow: WorkflowState) -> None:
-    """قدمِ دوم داخلِ ویزارد: نتیجه‌ی قدم اول خودکار می‌آید، فقط Swagger پرسیده می‌شود.
+def _render_update_buttons() -> None:
+    """دکمه‌ی Update هر منبعِ Swagger — فعلاً فقط جای‌نگهدار.
 
-    منابعِ Swagger یک‌بار در وضعیتِ جریان می‌مانند؛ اجرای دوباره همان‌ها را
-    از قبل پر می‌کند و کاربر فقط در صورت نیاز عوضشان می‌کند.
+    تازه‌سازیِ snapshot از روی نشانیِ اصلی پیاده نشده است و این دکمه هیچ
+    درخواستی نمی‌فرستد. متنِ راهنما و زیرنویس عمداً صریح‌اند تا کسی گمان
+    نکند این دکمه کار می‌کند.
+    """
+    st.caption(
+        "Refreshing a snapshot from its Swagger URL is **not implemented yet**. "
+        "The buttons below are placeholders — the JSON files in `data/swagger/` "
+        "are maintained by hand for now."
+    )
+    columns = st.columns(len(SWAGGER_SOURCES))
+    for column, source in zip(columns, SWAGGER_SOURCES):
+        with column:
+            st.button(
+                f"Update {source.label}",
+                key=f"workflow_update_{source.key}",
+                disabled=True,
+                help=REFRESH_NOT_IMPLEMENTED,
+                use_container_width=True,
+            )
+            st.caption(f"`{source.filename}`")
+
+
+def _stored_selection(workflow: WorkflowState) -> str:
+    """انتخابِ ذخیره‌شده در وضعیت، یا پیش‌فرض — اگر مقدارِ نامعتبری مانده باشد."""
+    stored = workflow.input_value(INPUT_SWAGGER_SELECTION)
+    return stored if stored in SELECTIONS else DEFAULT_SELECTION
+
+
+def _render_in_workflow(workflow: WorkflowState) -> None:
+    """قدمِ دوم داخلِ ویزارد: نتیجه‌ی قدم اول خودکار می‌آید، منبعِ Swagger انتخاب می‌شود.
+
+    فقط snapshotهای انتخاب‌شده خوانده می‌شوند و هیچ درخواستی به شبکه زده
+    نمی‌شود. انتخاب در وضعیتِ جریان می‌ماند و عوض‌کردنش نتیجه را کهنه اعلام
+    می‌کند، پس رفتارِ پایین‌دست قطعی می‌ماند.
     """
     render_propagated_inputs(workflow, 2)
 
-    with st.form("api_mapping_form"):
-        services_raw = st.text_area(
-            "Swagger / OpenAPI sources *",
-            value=workflow.input_value(INPUT_SWAGGER_SOURCES),
-            height=140,
-            placeholder=_SOURCES_PLACEHOLDER,
-        )
-        submitted = st.form_submit_button(run_label(workflow, 2))
+    st.subheader("Swagger source")
+    options = list(SELECTIONS)
+    selection = st.radio(
+        "Swagger source",
+        options=options,
+        index=options.index(_stored_selection(workflow)),
+        format_func=selection_label,
+        horizontal=True,
+        key="workflow_swagger_selection",
+    )
 
-    if submitted:
+    keys = expand_selection(selection)
+    st.caption(
+        "Only the selected snapshot(s) are read: "
+        + ", ".join(f"`data/swagger/{snapshot_path(key).name}`" for key in keys)
+        + ". No request is sent to the Swagger host."
+    )
+
+    _render_update_buttons()
+
+    if st.button(run_label(workflow, 2), key="workflow_run_2"):
         payload = workflow.step_inputs(2)
         upstream = RESULT_ARGUMENT[1]
         if upstream not in payload:
@@ -279,11 +354,14 @@ def _render_in_workflow(workflow: WorkflowState) -> None:
                 "The Step 1 result is not available yet. Run Step 1 and approve "
                 "it first."
             )
-        elif not split_sources(services_raw):
-            st.error("At least one Swagger source is required.")
         else:
-            workflow.set_input(INPUT_SWAGGER_SOURCES, services_raw)
-            result, error = _run(payload[upstream], services_raw)
+            # مسیرهای خوانده‌شده را هم ثبت می‌کنیم تا ورودیِ «منابعِ Swagger»
+            # معنای همیشگی‌اش را نگه دارد و کهنه‌شدن درست گزارش شود.
+            workflow.set_input(INPUT_SWAGGER_SELECTION, selection)
+            workflow.set_input(
+                INPUT_SWAGGER_SOURCES, "\n".join(str(snapshot_path(key)) for key in keys)
+            )
+            result, error = _run(payload[upstream], "", snapshot_keys=keys)
             if error:
                 workflow.record_error(2, error)
             else:
@@ -295,7 +373,9 @@ def _render_in_workflow(workflow: WorkflowState) -> None:
     if result:
         step1_result = workflow.result(1)
         _render_result(
-            result, extract_test_cases(step1_result) if step1_result else []
+            result,
+            extract_test_cases(step1_result) if step1_result else [],
+            _stored_selection(workflow),
         )
 
 

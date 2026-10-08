@@ -20,9 +20,23 @@ You receive two structured results.
 
 2. STEP 2 RESULT
 
-- services: the API operations discovered from the real Swagger/OpenAPI documents, each with its parameters, request body and responses
-- mappings: the operation chosen for each test case, or null when it could not be resolved
+- mappings: one entry per test case, naming the operation chosen for it — test_case_id, service, method, path, operation_id, confidence, reason
 - clarifications: open questions left by Step 2
+
+A resolved mapping also carries an "operation" object: the full definition of the
+operation it refers to, with that operation's parameters, request body and
+responses.
+
+The complete discovered API catalogue is deliberately NOT part of this input.
+Only the operations that some test case is mapped to are included, each one
+inside the mapping that references it. The STEP 2 RESULT is nevertheless complete
+for every operation you are allowed to reason about: if an operation is not
+mentioned there, it is not available to you.
+
+A test case whose mapping could not be resolved has an empty method and path and
+no "operation" object. Such a test case still exists and must still be placed in
+a scenario and in the execution order — it simply cannot be the source of a data
+dependency.
 
 The STEP 2 RESULT is the only technical source of truth about the APIs. You do
 not fetch Swagger, you do not parse Swagger, and you do not discover operations.

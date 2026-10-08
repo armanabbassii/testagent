@@ -50,12 +50,14 @@ STEP_ICONS: dict[int, str] = {1: "🧪", 2: "🔗", 3: "🧩", 4: "📦", 5: "�
 INPUT_TASK_DESCRIPTION = "task_description"
 INPUT_DEVELOPED_SERVICES = "developed_services"
 INPUT_SWAGGER_SOURCES = "swagger_sources"
+INPUT_SWAGGER_SELECTION = "swagger_selection"
 INPUT_COLLECTION_NAME = "collection_name"
 
 INPUT_LABELS: dict[str, str] = {
     INPUT_TASK_DESCRIPTION: "Task Description",
     INPUT_DEVELOPED_SERVICES: "Developed Services",
     INPUT_SWAGGER_SOURCES: "Swagger / OpenAPI sources",
+    INPUT_SWAGGER_SELECTION: "Swagger source selection",
     INPUT_COLLECTION_NAME: "Collection name",
 }
 
@@ -77,9 +79,12 @@ _PROPAGATED: dict[int, tuple[int, ...]] = {
 }
 
 # ورودی‌هایی که کاربر مستقیم وارد می‌کند و به همان قدم تعلق دارند.
+# انتخابِ منبعِ Swagger هم ورودیِ خودِ قدم دوم است: عوض‌کردنش نتیجه را کهنه
+# اعلام می‌کند، ولی عمداً در _REQUIRED_INPUTS نیست — انتخابگر همیشه مقدارِ
+# پیش‌فرض دارد و هرگز «کم» حساب نمی‌شود.
 _OWN_INPUTS: dict[int, tuple[str, ...]] = {
     1: (INPUT_TASK_DESCRIPTION, INPUT_DEVELOPED_SERVICES),
-    2: (INPUT_SWAGGER_SOURCES,),
+    2: (INPUT_SWAGGER_SOURCES, INPUT_SWAGGER_SELECTION),
     4: (INPUT_COLLECTION_NAME,),
 }
 
@@ -422,6 +427,7 @@ __all__ = [
     "INPUT_COLLECTION_NAME",
     "INPUT_DEVELOPED_SERVICES",
     "INPUT_LABELS",
+    "INPUT_SWAGGER_SELECTION",
     "INPUT_SWAGGER_SOURCES",
     "INPUT_TASK_DESCRIPTION",
     "RESULT_ARGUMENT",

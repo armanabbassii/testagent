@@ -40,6 +40,7 @@ from src.agents.test_case_generator.json_output import (
     JsonExtractionError,
     extract_json_object,
 )
+from src.agents.test_case_generator.swagger_snapshots import load_snapshots
 from src.config import LLM_MAX_OUTPUT_TOKENS
 from src.debug import DebugConfig
 from src.llm_client import LLMClient, truncation_message
@@ -88,6 +89,33 @@ class ApiMapping(TypedDict):
 class Step2Result(TypedDict):
     services: list[dict[str, Any]]
     mappings: list[ApiMapping]
+    clarifications: list[str]
+
+
+class CompactMapping(TypedDict):
+    """نگاشتِ فشرده‌ی یک تست‌کیس — همان قراردادِ قدم دوم بدونِ کاتالوگ.
+
+    ``operation`` تعریفِ کاملِ همان عملیاتی است که این نگاشت به آن اشاره
+    می‌کند (و ``None`` وقتی نگاشت حل نشده). فقط عملیات‌هایی که نگاشتی به آن‌ها
+    اشاره دارد اینجا می‌آیند — پس حجمِ این ساختار با تعدادِ تست‌کیس‌ها محدود
+    می‌شود، نه با اندازه‌ی کاتالوگ.
+    """
+
+    test_case_id: str
+    service: str
+    method: str
+    path: str
+    operation_id: str
+    confidence: str
+    reason: str
+    clarification: str
+    operation: dict[str, Any] | None
+
+
+class Step3Contract(TypedDict):
+    """ورودیِ قدم سوم: نگاشت‌های فشرده — بدونِ کاتالوگِ Swagger."""
+
+    mappings: list[CompactMapping]
     clarifications: list[str]
 
 
@@ -387,6 +415,84 @@ def build_result(
     )
 
 
+# ── قراردادِ فشرده‌ی قدم ۲ → قدم ۳ ──────────────────────────────────────────
+
+def _catalog_index(
+    step2_result: dict,
+) -> dict[tuple[str, str], tuple[str, dict[str, Any]]]:
+    """(متد، مسیرِ نرمال‌شده) → (نامِ سرویس، تعریفِ کاملِ عملیات)."""
+    index: dict[tuple[str, str], tuple[str, dict[str, Any]]] = {}
+    for service in step2_result.get("services") or []:
+        if not isinstance(service, dict):
+            continue
+        name = _clean(service.get("name"))
+        for api in service.get("apis") or []:
+            if not isinstance(api, dict):
+                continue
+            key = operation_key(_clean(api.get("method")), _clean(api.get("path")))
+            index.setdefault(key, (name, api))
+    return index
+
+
+def compact_step2_result(step2_result: Any) -> Step3Contract:
+    """نتیجه‌ی قدم دوم را به قراردادِ فشرده‌ی قدم سوم تبدیل می‌کند.
+
+    کاتالوگِ کاملِ کشف‌شده اینجا **حذف** می‌شود: فقط نگاشت‌ها می‌مانند، و از
+    کاتالوگ تنها تعریفِ همان عملیات‌هایی که نگاشتی به آن‌ها اشاره کرده باقی
+    می‌ماند. این همان چیزی است که جلوی بزرگ‌شدنِ پرامپتِ قدم سوم (و خطای
+    «Request Entity Too Large») را می‌گیرد.
+
+    نگاشتِ حل‌نشده حل‌نشده می‌ماند: هیچ API ای حدس زده نمی‌شود.
+
+    پرتاب می‌کند:
+        ApiMappingError : ورودی یک شیءِ JSON نباشد
+    """
+    if not isinstance(step2_result, dict):
+        raise ApiMappingError("Step 2 result must be a JSON object.")
+
+    index = _catalog_index(step2_result)
+    mappings: list[CompactMapping] = []
+
+    for raw in step2_result.get("mappings") or []:
+        if not isinstance(raw, dict):
+            continue
+
+        api = raw.get("api") if isinstance(raw.get("api"), dict) else None
+        method = path = operation_id = ""
+        service_name = ""
+        operation: dict[str, Any] | None = None
+
+        if api is not None:
+            method = _clean(api.get("method")).upper()
+            path = _clean(api.get("path"))
+            operation_id = _clean(api.get("operation_id"))
+            found = index.get(operation_key(method, path))
+            if found is not None:
+                service_name, operation = found
+
+        mappings.append(
+            CompactMapping(
+                test_case_id=_clean(raw.get("test_case_id")),
+                service=service_name,
+                method=method,
+                path=path,
+                operation_id=operation_id,
+                confidence=_clean(raw.get("confidence")),
+                reason=_clean(raw.get("reason")),
+                clarification=_clean(raw.get("clarification")),
+                operation=operation,
+            )
+        )
+
+    clarifications = [
+        item.strip()
+        for item in step2_result.get("clarifications") or []
+        if isinstance(item, str) and item.strip()
+    ]
+
+    return Step3Contract(mappings=mappings, clarifications=clarifications)
+
+
 # ── عاملِ نگاشت ──────────────────────────────────────────────────────────────
 
 def _case_id(test_case: dict) -> str:
@@ -567,8 +673,18 @@ class Step2ApiMappingGenerator:
         step1_result: Any,
         service_sources: list[str],
         user_id: str,
+        *,
+        snapshot_keys: list[str] | None = None,
     ) -> Step2Result:
         """نتیجه‌ی کاملِ قدم دوم را می‌سازد.
+
+        منبعِ کشف یکی از این دو است:
+
+          * ``snapshot_keys`` — مسیرِ عادیِ ویزارد: از فایل‌های محلیِ
+            ``data/swagger/`` خوانده می‌شود و **هیچ درخواستی به شبکه زده
+            نمی‌شود**؛
+          * ``service_sources`` — مسیرِ قبلی (URL یا مسیرِ فایل). برای صفحه‌ی
+            مستقل و برای تازه‌سازیِ snapshot در آینده دست‌نخورده مانده است.
 
         پرتاب می‌کند:
             ValueError      : ورودیِ خالی باشد
@@ -576,14 +692,23 @@ class Step2ApiMappingGenerator:
         """
         test_cases = extract_test_cases(step1_result)
 
-        sources = [source.strip() for source in service_sources if source.strip()]
-        if not sources:
-            raise ValueError("No Swagger source was provided — nothing to discover.")
+        if snapshot_keys:
+            self._log.info(
+                "شروع کشفِ API از snapshotهای محلی",
+                user_id=user_id,
+                snapshots=len(snapshot_keys),
+            )
+            services, load_errors = load_snapshots(snapshot_keys)
+        else:
+            sources = [source.strip() for source in service_sources if source.strip()]
+            if not sources:
+                raise ValueError("No Swagger source was provided — nothing to discover.")
 
-        self._log.info(
-            "شروع کشفِ API", user_id=user_id, sources=len(sources)
-        )
-        services, load_errors = discover_services(sources, session=self._discovery_session)
+            self._log.info("شروع کشفِ API", user_id=user_id, sources=len(sources))
+            services, load_errors = discover_services(
+                sources, session=self._discovery_session
+            )
+
         if not services:
             raise ApiMappingError(
                 "No Swagger document could be loaded:\n  - " + "\n  - ".join(load_errors)
@@ -624,12 +749,15 @@ __all__ = [
     "ApiMapping",
     "ApiMappingAgent",
     "ApiMappingError",
+    "CompactMapping",
     "MappedApi",
     "Step2ApiMappingGenerator",
     "Step2Result",
+    "Step3Contract",
     "SwaggerLoadError",
     "build_prompt",
     "build_result",
+    "compact_step2_result",
     "extract_test_cases",
     "render_prompt",
     "split_prompt",

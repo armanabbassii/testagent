@@ -40,6 +40,10 @@ if str(_REPO_ROOT) not in sys.path:
 
 import streamlit as st  # noqa: E402
 
+from src.agents.test_case_generator.api_mapping import (  # noqa: E402
+    ApiMappingError,
+    compact_step2_result,
+)
 from src.agents.test_case_generator.scenario_analysis import (  # noqa: E402
     ScenarioAnalysisError,
     Step3ScenarioAnalysisGenerator,
@@ -84,16 +88,25 @@ def _run(
 ) -> tuple[dict | None, str | None]:
     """تحلیلِ سناریو را اجرا می‌کند و (نتیجه، خطا) را برمی‌گرداند.
 
+    نتیجه‌ی قدم دوم پیش از ساختِ پرامپت به قراردادِ فشرده تبدیل می‌شود:
+    کاتالوگِ کاملِ Swagger هرگز وارد این قدم نمی‌شود، وگرنه پرامپت به اندازه‌ای
+    بزرگ می‌شود که سرویسِ LLM خطای «Request Entity Too Large» برگرداند.
+
     هیچ چیزی در session_state نوشته نمی‌شود: نگه‌داشتنِ نتیجه کارِ فراخوان است —
     صفحه‌ی مستقل آن را در session_state می‌گذارد و ویزارد در وضعیتِ جریان.
     """
+    try:
+        contract = compact_step2_result(step2_result)
+    except ApiMappingError as exc:
+        return None, f"Scenario analysis failed:\n\n{exc}"
+
     try:
         with st.spinner("Grouping scenarios and analysing dependencies..."):
             result = Step3ScenarioAnalysisGenerator(
                 debug_config=DebugConfig.from_env()
             ).generate(
                 step1_result=step1_result,
-                step2_result=step2_result,
+                step2_result=contract,
                 user_id=_UI_USER_ID,
             )
     except ScenarioAnalysisError as exc:
@@ -284,7 +297,8 @@ def _render_in_workflow(workflow: WorkflowState) -> None:
     render_propagated_inputs(workflow, 3)
     st.caption(
         "This step needs no further input: the Step 1 test cases and the Step 2 "
-        "mapping above are enough."
+        "mapping above are enough. Only the compact Step 2 mapping — not the "
+        "discovered Swagger catalogue — is sent to the model."
     )
 
     if st.button(run_label(workflow, 3), key="workflow_run_3"):

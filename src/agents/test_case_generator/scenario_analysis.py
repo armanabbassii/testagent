@@ -259,31 +259,77 @@ def extract_api_mappings(step2_result: Any) -> list[dict]:
 
 
 def _operation_index(step2_result: Any) -> dict[tuple[str, str], dict]:
-    """(متد، مسیرِ نرمال‌شده) → عملیاتِ کاملِ کشف‌شده در قدم دوم."""
+    """(متد، مسیرِ نرمال‌شده) → عملیاتِ کاملِ کشف‌شده در قدم دوم.
+
+    دو شکلِ ورودی پذیرفته می‌شود:
+
+      * شکلِ کاملِ نتیجه‌ی قدم دوم — ``services`` (کاتالوگِ کشف‌شده)؛
+      * قراردادِ فشرده‌ی قدم ۲ → ۳ — تعریفِ عملیات همراهِ خودِ نگاشت می‌آید و
+        فقط عملیات‌هایی را در بر می‌گیرد که نگاشتی به آن‌ها اشاره کرده است.
+
+    ویزارد شکلِ فشرده را می‌فرستد تا کاتالوگِ کامل به پرامپتِ این قدم نرسد.
+    """
+    result = step2_result or {}
     index: dict[tuple[str, str], dict] = {}
-    for service in (step2_result or {}).get("services") or []:
-        if not isinstance(service, dict):
-            continue
-        for api in service.get("apis") or []:
-            if not isinstance(api, dict):
+
+    services = result.get("services")
+    if isinstance(services, list):
+        for service in services:
+            if not isinstance(service, dict):
                 continue
-            index.setdefault(
-                operation_key(_clean(api.get("method")), _clean(api.get("path"))),
-                api,
-            )
+            for api in service.get("apis") or []:
+                if not isinstance(api, dict):
+                    continue
+                index.setdefault(
+                    operation_key(_clean(api.get("method")), _clean(api.get("path"))),
+                    api,
+                )
+        return index
+
+    for mapping in result.get("mappings") or []:
+        if not isinstance(mapping, dict):
+            continue
+        operation = mapping.get("operation")
+        if not isinstance(operation, dict):
+            continue
+        index.setdefault(
+            operation_key(
+                _clean(operation.get("method")), _clean(operation.get("path"))
+            ),
+            operation,
+        )
     return index
 
 
 def _mapped_operations(step2_result: Any) -> dict[str, dict]:
-    """test_case_id → عملیاتی که قدم دوم برایش انتخاب کرده (فقط نگاشت‌های حل‌شده)."""
+    """test_case_id → عملیاتی که قدم دوم برایش انتخاب کرده (فقط نگاشت‌های حل‌شده).
+
+    شکلِ کاملِ نتیجه‌ی قدم دوم عملیات را زیرِ ``api`` می‌گذارد؛ قراردادِ فشرده
+    آن را روی خودِ نگاشت (``method`` / ``path`` / ``operation_id``) پهن می‌کند.
+    نگاشتِ حل‌نشده در هر دو شکل نادیده گرفته می‌شود.
+    """
     mapped: dict[str, dict] = {}
     for mapping in (step2_result or {}).get("mappings") or []:
         if not isinstance(mapping, dict):
             continue
         case_id = _clean(mapping.get("test_case_id"))
+        if not case_id:
+            continue
         api = mapping.get("api")
-        if case_id and isinstance(api, dict):
+        if isinstance(api, dict):
             mapped.setdefault(case_id, api)
+            continue
+        method = _clean(mapping.get("method"))
+        path = _clean(mapping.get("path"))
+        if method and path:
+            mapped.setdefault(
+                case_id,
+                {
+                    "method": method,
+                    "path": path,
+                    "operation_id": _clean(mapping.get("operation_id")),
+                },
+            )
     return mapped
 
 
