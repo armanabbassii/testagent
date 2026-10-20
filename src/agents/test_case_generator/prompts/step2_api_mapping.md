@@ -129,6 +129,10 @@ Your entire response must be exactly one JSON object, and nothing else.
 - Do not return Markdown.
 - Do not wrap the JSON in ```json.
 - No comments, no code fences and no text before or after the JSON.
+- Every string value must be enclosed in double quotes — including "reason"
+  and "clarification". A bare sentence as a value is invalid JSON. For example,
+  `"reason": The operation matches the requirement.` is invalid; it must be
+  `"reason": "The operation matches the requirement."`.
 - Anything you want to explain belongs inside "reason" and "clarification".
 
 The ids, methods and paths in the examples below are placeholders. Always use the

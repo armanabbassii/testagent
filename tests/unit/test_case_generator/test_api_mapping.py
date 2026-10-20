@@ -11,6 +11,7 @@ from src.agents.test_case_generator.api_discovery import (
 )
 from src.agents.test_case_generator.api_mapping import (
     DEFAULT_MAPPING_BATCH_SIZE,
+    MALFORMED_JSON_RETRIES,
     ApiMappingAgent,
     ApiMappingError,
     Step2ApiMappingGenerator,
@@ -728,3 +729,137 @@ class TestUnresolvedRetriesInBatches:
         assert "invalid JSON" not in message
         assert "test cases 1-10 of 25" in message
         assert "batch 1 of 3" in message
+
+
+def _malformed_mapping_response(finish_reason: str = "stop") -> LLMResponse:
+    """پاسخِ واقعیِ مشاهده‌شده: مقدارِ reason بدونِ نقل‌قول باز شده است.
+
+    ساختارِ شیء بسته می‌شود تا شکست دقیقاً «JSONِ نامعتبر» باشد، نه پاسخی که
+    هیچ شیءِ JSONی در آن نیست — همان تفکیکی که در اجرای واقعی رخ داد.
+    """
+    return LLMResponse(
+        '{\n  "mappings": [\n    {\n      "test_case_id": "TC-011",\n'
+        '      "api": {\n        "method": "PUT",\n'
+        '        "path": "/admin/digitalService/{id}/services/{serviceId}/{field}",\n'
+        '        "operation_id": "toggleWebService"\n      },\n'
+        '      "confidence": "high",\n'
+        '      "reason": The toggleWebService operation on the matching endpoint.\n'
+        '      "clarification": ""\n    }\n  ],\n  "clarifications": []\n}',
+        finish_reason=finish_reason,
+    )
+
+
+class TestMalformedJsonRetry:
+    """JSONِ نامعتبر (نه بریده) یک بارِ محدود دوباره درخواست می‌شود."""
+
+    def test_a_malformed_response_is_retried_once_with_a_correction(self):
+        cases = _test_cases()
+        prompts: list[str] = []
+
+        def respond(**kwargs):
+            prompts.append(kwargs["user_message"])
+            if len(prompts) == 1:
+                return _malformed_mapping_response()
+            return json.dumps(_batch_payload([case["id"] for case in cases]))
+
+        with patch("src.agents.test_case_generator.api_mapping.LLMClient") as mock_cls:
+            mock_cls.return_value.chat.side_effect = respond
+            mappings, _ = ApiMappingAgent().map_test_cases(
+                cases, [_service()], "user-1"
+            )
+
+        # همان تست‌کیس‌ها دوباره فرستاده می‌شوند، فقط با یادآوریِ قراردادِ JSON.
+        assert len(prompts) == 1 + MALFORMED_JSON_RETRIES
+        assert "CORRECTION REQUIRED" in prompts[1]
+        assert "Every string value MUST be enclosed in double quotes" in prompts[1]
+        assert [mapping["test_case_id"] for mapping in mappings] == ["TC-001", "TC-002"]
+
+    def test_retry_exhaustion_fails_and_never_uses_the_bad_response(self):
+        with patch("src.agents.test_case_generator.api_mapping.LLMClient") as mock_cls:
+            mock_cls.return_value.chat.return_value = _malformed_mapping_response()
+
+            with pytest.raises(ApiMappingError) as excinfo:
+                ApiMappingAgent().map_test_cases(
+                    _test_cases(), [_service()], "user-1"
+                )
+
+        message = str(excinfo.value)
+        assert "invalid JSON" in message
+        assert "finish_reason='stop'" in message
+        assert "malformed model output" in message
+        assert f"{1 + MALFORMED_JSON_RETRIES} attempt(s)" in message
+        assert "reached the output token limit" not in message
+        assert mock_cls.return_value.chat.call_count == 1 + MALFORMED_JSON_RETRIES
+
+    def test_a_truncated_response_is_not_retried_as_malformed_json(self):
+        with patch("src.agents.test_case_generator.api_mapping.LLMClient") as mock_cls:
+            mock_cls.return_value.chat.return_value = LLMResponse(
+                '{"mappings": [',
+                finish_reason=FINISH_REASON_LENGTH,
+                completion_tokens=8192,
+                max_tokens=8192,
+            )
+
+            with pytest.raises(ApiMappingError) as excinfo:
+                ApiMappingAgent().map_test_cases(
+                    _test_cases(), [_service()], "user-1"
+                )
+
+        message = str(excinfo.value)
+        assert "output token limit" in message
+        assert "malformed model output" not in message
+        assert mock_cls.return_value.chat.call_count == 1
+
+    def test_a_malformed_second_batch_is_retried_and_every_case_survives(self):
+        """همان شکستِ واقعی: دسته‌ی دوم نامعتبر است، تلاشِ دوم کامل است."""
+        cases = _many_cases(19)
+        prompts: list[list[str]] = []
+
+        def respond(**kwargs):
+            case_ids = _case_ids_in_prompt(kwargs["user_message"])
+            prompts.append(case_ids)
+            is_correction = "CORRECTION REQUIRED" in kwargs["user_message"]
+            if case_ids[0] == "TC-011" and not is_correction:
+                return _malformed_mapping_response()
+            return json.dumps(_batch_payload(case_ids))
+
+        with patch("src.agents.test_case_generator.api_mapping.LLMClient") as mock_cls:
+            mock_cls.return_value.chat.side_effect = respond
+            mappings, _ = ApiMappingAgent(batch_size=10).map_test_cases(
+                cases, [_service()], "user-1"
+            )
+
+        batch_one = [f"TC-{index:03d}" for index in range(1, 11)]
+        batch_two = [f"TC-{index:03d}" for index in range(11, 20)]
+        assert prompts == [batch_one, batch_two, batch_two]
+        assert [mapping["test_case_id"] for mapping in mappings] == [
+            case["id"] for case in cases
+        ]
+        assert len(mappings) == 19
+        assert mock_cls.return_value.chat.call_count == 3
+
+    def test_a_failing_second_batch_reports_its_range_without_a_partial_result(self):
+        cases = _many_cases(19)
+
+        def respond(**kwargs):
+            case_ids = _case_ids_in_prompt(kwargs["user_message"])
+            if case_ids[0] == "TC-011":
+                return _malformed_mapping_response()
+            return json.dumps(_batch_payload(case_ids))
+
+        with patch("src.agents.test_case_generator.api_mapping.LLMClient") as mock_cls:
+            mock_cls.return_value.chat.side_effect = respond
+
+            with pytest.raises(ApiMappingError) as excinfo:
+                ApiMappingAgent(batch_size=10).map_test_cases(
+                    cases, [_service()], "user-1"
+                )
+
+        message = str(excinfo.value)
+        assert "invalid JSON" in message
+        assert "finish_reason='stop'" in message
+        assert "test cases 11-19 of 19" in message
+        assert "batch 2 of 2" in message
+        # دسته‌ی اول موفق بود، ولی هیچ نتیجه‌ی جزئی برنمی‌گردد.
+        assert mock_cls.return_value.chat.call_count == 1 + (1 + MALFORMED_JSON_RETRIES)
+

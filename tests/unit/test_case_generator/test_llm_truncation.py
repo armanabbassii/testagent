@@ -528,6 +528,15 @@ class TestJsonOnlyOutputContract:
             system_prompt
         )
 
+    def test_the_prompt_requires_every_string_value_to_be_quoted(self):
+        """شکستِ واقعی: مدل ``reason`` را بدونِ نقل‌قول نوشت و JSON نامعتبر شد."""
+        system_prompt, _ = split_prompt(
+            STEP2_PROMPT_PATH.read_text(encoding="utf-8")
+        )
+
+        assert "Every string value must be enclosed in double quotes" in system_prompt
+        assert '"reason": The operation matches the requirement.' in system_prompt
+
 
 # ── فیلترِ نامزدها در جریانِ نگاشت ──────────────────────────────────────────
 

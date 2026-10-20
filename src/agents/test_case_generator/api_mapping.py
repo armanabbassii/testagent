@@ -71,6 +71,27 @@ _VALID_METHODS = ("GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "T
 # (مثلاً وقتی max_tokens را پایین‌تر می‌آورید).
 DEFAULT_MAPPING_BATCH_SIZE = 10
 
+# تعدادِ تلاش‌های اضافی وقتی پاسخ، JSONِ معتبر نیست (نه وقتی بریده شده است).
+#
+# چرا لازم است: در یک اجرای واقعی مدل در وسطِ یک مقدارِ رشته‌ای، نقل‌قول را
+# باز نکرد (`"reason": The toggleWebService operation on`) و پاسخ با
+# finish_reason="stop" برگشت. این خطای شکل‌دهی نیست که با ترمیمِ متن درست شود؛
+# یک درخواستِ تازه با یادآوریِ قراردادِ JSON امن‌ترین راه است. بریدگی عمداً
+# دوباره تلاش نمی‌شود: همان درخواست دوباره هم بریده می‌شود و فقط توکن هدر
+# می‌دهد. پاسخِ نامعتبر هرگز ترمیم، حدس یا به‌عنوان نتیجه پذیرفته نمی‌شود.
+MALFORMED_JSON_RETRIES = 1
+
+# یادآوریِ کوتاه که فقط به تلاشِ دوم اضافه می‌شود؛ تست‌کیس‌ها و نامزدها عوض
+# نمی‌شوند تا دامنه‌ی نگاشت دقیقاً همان دامنه‌ی تلاشِ اول بماند.
+_MALFORMED_JSON_RETRY_SUFFIX = (
+    "CORRECTION REQUIRED:\n"
+    "Your previous response was not valid JSON. Return the mapping again as "
+    "exactly one JSON object and nothing else.\n"
+    "Every string value MUST be enclosed in double quotes — including "
+    '"reason" and "clarification". Never start a value with a bare word.\n'
+    "Keep every test_case_id unchanged and return a mapping for every test case."
+)
+
 # بخشِ INPUT در فایلِ پرامپت
 _INPUT_SECTION_RE = re.compile(
     r"^={3,}[ \t]*\nINPUT[ \t]*\n={3,}[ \t]*\n", re.MULTILINE
@@ -533,6 +554,28 @@ def _batches(test_cases: list[dict], size: int) -> list[list[dict]]:
     return [test_cases[start : start + size] for start in range(0, len(test_cases), size)]
 
 
+def _malformed_json_message(
+    exc: JsonExtractionError,
+    raw: object,
+    attempts: int,
+) -> str:
+    """خطای JSON را با علتِ درست و تعدادِ تلاش‌ها گزارش می‌کند.
+
+    بریدگی قبلاً جداگانه بررسی شده است؛ پس رسیدن به این‌جا یعنی پاسخ از نظرِ
+    ارائه‌دهنده «بریده» نبوده. ذکرِ صریحِ finish_reason جلوی این اشتباه را
+    می‌گیرد که یک خطای شکل‌دهی دوباره به سقفِ توکن نسبت داده شود.
+    """
+    finish_reason = getattr(raw, "finish_reason", "") or "not reported"
+    return (
+        f"{exc}\n\n"
+        "The response was not truncated — the provider did not report "
+        f"finish_reason='length' (finish_reason={finish_reason!r}). This is "
+        "malformed model output, not an output-token-limit failure. "
+        f"{attempts} attempt(s) were made; the last response was also not valid "
+        "JSON. No mapping from it was used."
+    )
+
+
 def _merge_mappings(
     mappings: list[ApiMapping],
     retried: list[ApiMapping],
@@ -599,6 +642,11 @@ class ApiMappingAgent:
 
         پس فیلتر هیچ تست‌کیسی را بی‌صدا رها نمی‌کند — بدترین حالتش یک فراخوانیِ
         دومیِ LLM برای همان تست‌کیس‌های حل‌نشده است.
+
+        اگر پاسخ از نظرِ ارائه‌دهنده بریده نباشد ولی JSONِ معتبر هم نباشد،
+        همان دسته یک بارِ محدود (``MALFORMED_JSON_RETRIES``) با یادآوریِ
+        قراردادِ JSON دوباره درخواست می‌شود؛ اگر تلاشِ دوم هم نامعتبر باشد،
+        کلِ عملیات با خطای صریح شکست می‌خورد.
         """
         # ورودیِ خالی نباید «نتیجه‌ی خالیِ موفق» بدهد؛ در مسیرِ عادی
         # extract_test_cases این را از قبل رد می‌کند و این بررسی همان قرارداد
@@ -691,7 +739,16 @@ class ApiMappingAgent:
         full_catalog: list[DiscoveredService],
         user_id: str,
     ) -> tuple[list[ApiMapping], list[str]]:
-        """یک فراخوانیِ LLM: پرامپت با نامزدها، اعتبارسنجی با کاتالوگِ کامل."""
+        """یک نگاشت؛ فقط JSONِ نامعتبر یک بارِ محدود دوباره درخواست می‌شود.
+
+        «بریده‌شدگی» دوباره تلاش نمی‌شود: دوباره فرستادنِ همان درخواست آن را
+        درست نمی‌کند و تصمیم درباره‌ی آن باید صریح بماند. «JSONِ نامعتبر» —
+        با finish_reason غیرِ length — یک بار با همان تست‌کیس‌ها و همان
+        نامزدها و با یادآوریِ قراردادِ JSON دوباره درخواست می‌شود. پاسخِ
+        نامعتبر هرگز ترمیم یا پذیرفته نمی‌شود و هیچ نتیجه‌ای از آن ساخته
+        نمی‌شود؛ پاسخِ تلاشِ دوم هم باید کلِ دسته را پوشش دهد و از همان
+        اعتبارسنجیِ سخت‌گیرانه بگذرد.
+        """
         system_prompt, user_message = build_prompt(
             self._prompt_path, test_cases, candidates
         )
@@ -708,28 +765,58 @@ class ApiMappingAgent:
         )
 
         llm = LLMClient(user_id=user_id, agent_name=self.name)
-        raw = llm.chat(
-            user_message=user_message,
-            system_prompt=system_prompt,
-            temperature=self._temperature,
-            max_tokens=self._max_tokens,
-        )
-        self._log.trace("پاسخ LLM دریافت شد", response_chars=len(raw or ""))
+        attempts = 1 + MALFORMED_JSON_RETRIES
 
-        # پاسخِ بریده را نه ترمیم می‌کنیم و نه حدس می‌زنیم: خطا با ذکرِ صریحِ
-        # سقفِ توکن برگردانده می‌شود.
-        truncated = truncation_message(raw)
-        if truncated:
-            self._log.error("پاسخِ LLM بریده شد", finish_reason="length")
-            raise ApiMappingError(truncated)
+        for attempt in range(1, attempts + 1):
+            message = user_message
+            if attempt > 1:
+                message = f"{user_message}\n\n{_MALFORMED_JSON_RETRY_SUFFIX}"
 
-        try:
-            data = extract_json_object(raw)
-        except JsonExtractionError as exc:
-            raise ApiMappingError(str(exc)) from exc
+            raw = llm.chat(
+                user_message=message,
+                system_prompt=system_prompt,
+                temperature=self._temperature,
+                max_tokens=self._max_tokens,
+            )
+            self._log.trace(
+                "پاسخ LLM دریافت شد",
+                attempt=attempt,
+                response_chars=len(raw or ""),
+            )
 
-        return validate_mapping_payload(
-            data, test_cases=test_cases, services=full_catalog
+            # پاسخِ بریده را نه ترمیم می‌کنیم و نه حدس می‌زنیم: خطا با ذکرِ
+            # صریحِ سقفِ توکن برگردانده می‌شود و دوباره تلاش نمی‌شود.
+            truncated = truncation_message(raw)
+            if truncated:
+                self._log.error("پاسخِ LLM بریده شد", finish_reason="length")
+                raise ApiMappingError(truncated)
+
+            try:
+                data = extract_json_object(raw)
+            except JsonExtractionError as exc:
+                if attempt < attempts:
+                    self._log.warning(
+                        "پاسخِ نگاشت JSON معتبر نبود — تلاشِ دوباره",
+                        attempt=attempt,
+                        max_attempts=attempts,
+                        finish_reason=(
+                            getattr(raw, "finish_reason", "") or "not reported"
+                        ),
+                        response_chars=len(raw or ""),
+                        test_cases=len(test_cases),
+                    )
+                    continue
+                raise ApiMappingError(
+                    _malformed_json_message(exc, raw, attempts)
+                ) from exc
+
+            return validate_mapping_payload(
+                data, test_cases=test_cases, services=full_catalog
+            )
+
+        # هر مسیرِ بالا یا برمی‌گرداند یا خطا می‌دهد؛ این فقط یک تورِ ایمنی است.
+        raise ApiMappingError(
+            "Internal error: the malformed-JSON retry loop ended without a result."
         )
 
 
@@ -845,6 +932,7 @@ class Step2ApiMappingGenerator:
 
 __all__ = [
     "DEFAULT_MAPPING_BATCH_SIZE",
+    "MALFORMED_JSON_RETRIES",
     "ApiMapping",
     "ApiMappingAgent",
     "ApiMappingError",
