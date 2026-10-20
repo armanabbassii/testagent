@@ -7,6 +7,7 @@ import httpx
 from openai import OpenAI
 from src.config import LLM_BASE_URL, LLM_MODEL, LLM_API_KEY, CLIENT_ID
 from src.observability.observability import Observability
+from src.token_usage import report_usage
 
 obs = Observability.from_env()
 
@@ -25,12 +26,16 @@ class LLMResponse(str):
         finish_reason     : دلیلِ پایانِ تولید؛ ``"length"`` یعنی بریده‌شدگی
         prompt_tokens     : توکن‌های ورودی (اگر ارائه‌دهنده گزارش کند)
         completion_tokens : توکن‌های خروجیِ تولیدشده
+        total_tokens      : جمعِ توکن‌های گزارش‌شده (اگر ارائه‌دهنده بدهد)
+        cached_tokens     : توکن‌های ورودیِ کش‌شده (اگر گزارش شود)
         max_tokens        : سقفی که خودمان در درخواست فرستادیم
     """
 
     finish_reason: str
     prompt_tokens: int | None
     completion_tokens: int | None
+    total_tokens: int | None
+    cached_tokens: int | None
     max_tokens: int | None
 
     def __new__(
@@ -40,12 +45,16 @@ class LLMResponse(str):
         finish_reason: str = "",
         prompt_tokens: int | None = None,
         completion_tokens: int | None = None,
+        total_tokens: int | None = None,
+        cached_tokens: int | None = None,
         max_tokens: int | None = None,
     ) -> "LLMResponse":
         response = super().__new__(cls, text or "")
         response.finish_reason = finish_reason or ""
         response.prompt_tokens = prompt_tokens
         response.completion_tokens = completion_tokens
+        response.total_tokens = total_tokens
+        response.cached_tokens = cached_tokens
         response.max_tokens = max_tokens
         return response
 
@@ -91,12 +100,15 @@ def _to_response(response: object, max_tokens: int) -> LLMResponse:
     content = getattr(message, "content", None) or ""
     usage = getattr(response, "usage", None)
     finish_reason = getattr(choice, "finish_reason", None)
+    prompt_details = getattr(usage, "prompt_tokens_details", None)
     return LLMResponse(
         content,
         # str() تا مقایسه‌ی ``truncated`` هرگز روی یک شیءِ ناغافل انجام نشود.
         finish_reason=str(finish_reason) if finish_reason else "",
         prompt_tokens=getattr(usage, "prompt_tokens", None),
         completion_tokens=getattr(usage, "completion_tokens", None),
+        total_tokens=getattr(usage, "total_tokens", None),
+        cached_tokens=getattr(prompt_details, "cached_tokens", None),
         max_tokens=max_tokens,
     )
 
@@ -126,12 +138,18 @@ class LLMClient:
         self.model = LLM_MODEL
         self.agent_name = agent_name
 
-    def chat(self, user_message: str, system_prompt: str = "You are a helpful assistant.", temperature: float = 0.7, max_tokens: int = 1024) -> str:
+    def chat(self, user_message: str, system_prompt: str = "You are a helpful assistant.", temperature: float = 0.7, max_tokens: int = 1024) -> LLMResponse:
         """یک پیام ساده به مدل می‌فرستد و پاسخ متنی برمی‌گرداند.
 
         خروجی از نوعِ ``LLMResponse`` است که خودش یک ``str`` است؛ پس قراردادِ
         قبلی («برگرداندنِ رشته») دست‌نخورده مانده و فراداده‌هایی مثل
         ``finish_reason`` هم در دسترس‌اند (``truncation_message(raw)``).
+
+        مصرفِ پاسخ دقیقاً یک بار — بلافاصله پس از ساختِ ``LLMResponse`` در
+        مسیرِ خام یا مشاهده‌شده — به گیرنده‌ی فعال گزارش می‌شود؛ پس هیچ لایه‌ی
+        بالاتری نباید دوباره حساب کند. ثبت پیش از کارهای بعدی (مثلِ
+        ``gen.update``) انجام می‌شود تا خطای احتمالیِ آن مصرفِ انجام‌شده را از
+        بین نبرد.
         """
 
         if obs.enabled:
@@ -149,7 +167,9 @@ class LLMClient:
             max_tokens=max_tokens,
         )
         print(response)
-        return _to_response(response, max_tokens)
+        parsed = _to_response(response, max_tokens)
+        report_usage(parsed)
+        return parsed
 
     def _chat_observed(self, user_message, system_prompt, temperature, max_tokens) -> LLMResponse:
 
@@ -169,6 +189,7 @@ class LLMClient:
                 max_tokens=max_tokens,
             )
             content = _to_response(response, max_tokens)
+            report_usage(content)
             usage = response.usage
             gen.update(
                 output=content,

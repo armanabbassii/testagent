@@ -49,6 +49,7 @@ from ui.workflow import (  # noqa: E402
     error_retry_message,
     progress_text,
     stale_message,
+    usage_rows,
 )
 
 _STATE_KEY = "workflow_state"
@@ -181,8 +182,25 @@ def _render_footer(state: WorkflowState) -> None:
             )
 
 
+def _render_token_usage(state: WorkflowState) -> None:
+    """مصرفِ توکنِ هر قدم — از فراداده‌ی واقعیِ ارائه‌دهنده، نه تخمینِ متن.
+
+    «—» یعنی قدم هنوز اجرا نشده، «no calls» یعنی اجرا شده ولی LLM صدا زده
+    نشده و «not reported» یعنی فراخوانی بوده ولی ارائه‌دهنده usage نداده است.
+    ستونِ Cached فقط وقتی نمایش داده می‌شود که جایی گزارش شده باشد.
+    """
+    st.divider()
+    st.subheader("LLM Token Usage")
+    st.dataframe(usage_rows(state), hide_index=True, use_container_width=True)
+    st.caption(
+        "Provider-reported usage. Each step's count includes every model call it "
+        "made (batches and retries), and is replaced — not added — when the step "
+        "is run again. A failed run keeps what it already consumed."
+    )
+
+
 def _render_sidebar(state: WorkflowState) -> None:
-    """وضعیتِ کلی و بازنشانیِ جریان (با تأیید، چون همه‌ی پیشرفت را پاک می‌کند)."""
+    """وضعیتِ کلی، مصرفِ توکن و بازنشانیِ جریان (با تأیید)."""
     with st.sidebar:
         st.header("Workflow")
         st.caption(progress_text(state))
@@ -211,6 +229,8 @@ def _render_sidebar(state: WorkflowState) -> None:
             if cancel.button("Cancel", key="workflow_reset_no"):
                 st.session_state[_RESET_ARMED_KEY] = False
                 st.rerun()
+
+        _render_token_usage(state)
 
 
 def main() -> None:

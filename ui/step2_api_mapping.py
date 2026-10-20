@@ -361,7 +361,8 @@ def _render_in_workflow(workflow: WorkflowState) -> None:
             workflow.set_input(
                 INPUT_SWAGGER_SOURCES, "\n".join(str(snapshot_path(key)) for key in keys)
             )
-            result, error = _run(payload[upstream], "", snapshot_keys=keys)
+            with workflow.track_usage(2):
+                result, error = _run(payload[upstream], "", snapshot_keys=keys)
             if error:
                 workflow.record_error(2, error)
             else:

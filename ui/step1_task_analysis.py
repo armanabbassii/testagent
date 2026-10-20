@@ -225,7 +225,10 @@ def _render_in_workflow(workflow: WorkflowState) -> None:
         else:
             workflow.set_input(INPUT_TASK_DESCRIPTION, task_description)
             workflow.set_input(INPUT_DEVELOPED_SERVICES, developed_services)
-            result, error = _run(task_description, developed_services)
+            # مصرفِ توکنِ همین اجرا ثبت می‌شود (همه‌ی دسته‌ها و تلاش‌ها)؛
+            # مصرفِ اجرای قبلی جایگزین می‌شود تا دوباره شمرده نشود.
+            with workflow.track_usage(1):
+                result, error = _run(task_description, developed_services)
             if error:
                 workflow.record_error(1, error)
             else:

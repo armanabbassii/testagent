@@ -310,7 +310,8 @@ def _render_in_workflow(workflow: WorkflowState) -> None:
                 "approve Step 2 first."
             )
         else:
-            result, error = _run(payload[upstream[0]], payload[upstream[1]])
+            with workflow.track_usage(3):
+                result, error = _run(payload[upstream[0]], payload[upstream[1]])
             if error:
                 workflow.record_error(3, error)
             else:

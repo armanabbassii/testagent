@@ -30,8 +30,12 @@ Postman. این ماژول فقط وضعیت را نگه می‌دارد و قو
 
 from __future__ import annotations
 
+from collections.abc import Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any
+
+from src.token_usage import TokenUsage, collect_usage
 
 # تعدادِ قدم‌های جریان. مرزهای ناوبری از همین عدد مشتق می‌شوند.
 STEP_COUNT = 5
@@ -189,6 +193,8 @@ class WorkflowState:
     inputs: dict[str, str] = field(default_factory=dict)
     # ورودی‌هایی که هر قدم در لحظه‌ی آخرین اجرایش دیده بود.
     used_inputs: dict[int, dict[str, str]] = field(default_factory=dict)
+    # مصرفِ توکنِ آخرین اجرای هر قدم — جدا از نتیجه‌های کسب‌وکاری.
+    usage: dict[int, TokenUsage] = field(default_factory=dict)
     notice: str = ""
 
     # ── پرسش‌های پایه ────────────────────────────────────────────────────────
@@ -210,6 +216,35 @@ class WorkflowState:
 
     def input_value(self, name: str) -> str:
         return self.inputs.get(name, "")
+
+    # ── مصرفِ توکن ───────────────────────────────────────────────────────────
+    def usage_for(self, step: int) -> TokenUsage | None:
+        """مصرفِ آخرین اجرای یک قدم، یا ``None`` اگر هنوز اجرا نشده باشد."""
+        return self.usage.get(step)
+
+    def add_usage(self, step: int, usage: TokenUsage) -> None:
+        """یک فراخوانیِ LLM را به مصرفِ همان قدم اضافه می‌کند.
+
+        دسته‌ها، تلاش‌های دوباره و همه‌ی فراخوانی‌های یک اجرا این‌جا جمع
+        می‌شوند. خودِ فراخوانی قبلاً در ``LLMClient.chat`` یک بار شمرده شده
+        است؛ این‌جا فقط جمعِ همان گزارش‌هاست.
+        """
+        current = self.usage.get(step) or TokenUsage()
+        self.usage[step] = current.combine(usage)
+
+    @contextmanager
+    def track_usage(self, step: int) -> Iterator[None]:
+        """مصرفِ یک اجرای این قدم را ثبت می‌کند.
+
+        سیاستِ اجرای دوباره: مصرفِ اجرای قبلیِ همین قدم جایگزین می‌شود، نه
+        جمع — اجرای دوباره نباید مصرفِ قبلی را دوبار حساب کند. اگر اجرای تازه
+        وسطِ کار خطا بدهد، هر چه تا همان لحظه مصرف کرده است می‌ماند (هر
+        فراخوانی بلافاصله نوشته می‌شود)؛ ولی اگر هیچ فراخوانی‌ای نکرده باشد،
+        عددِ اجرای قبلی به آن نسبت داده نمی‌شود.
+        """
+        self.usage.pop(step, None)
+        with collect_usage(lambda usage: self.add_usage(step, usage)):
+            yield
 
     # ── قفل، وضعیت و ناوبری ─────────────────────────────────────────────────
     def is_unlocked(self, step: int) -> bool:
@@ -395,6 +430,7 @@ class WorkflowState:
         self.errors.clear()
         self.inputs.clear()
         self.used_inputs.clear()
+        self.usage.clear()
         self.notice = ""
 
     def _invalidate_after(self, step: int) -> list[int]:
@@ -423,6 +459,98 @@ def progress_text(state: WorkflowState) -> str:
     )
 
 
+# ── نمایشِ مصرفِ توکن ────────────────────────────────────────────────────────
+
+# «گزارش‌نشده» با «صفر» فرق دارد؛ «اجرا نشده» هم با هیچ‌کدام.
+USAGE_NOT_AVAILABLE = "—"
+USAGE_NO_CALLS = "no calls"
+USAGE_NOT_REPORTED = "not reported"
+
+
+def _format_tokens(value: int | None) -> str:
+    """عددِ توکن با جداکننده‌ی هزارگان؛ نبودِ مقدار با خطِ تیره نشان داده می‌شود."""
+    return USAGE_NOT_AVAILABLE if value is None else f"{value:,}"
+
+
+def usage_totals(state: WorkflowState) -> TokenUsage | None:
+    """جمعِ مصرفِ همه‌ی قدم‌ها؛ ``None`` یعنی هنوز هیچ فراخوانی‌ای ثبت نشده."""
+    total = TokenUsage()
+    found = False
+    for usage in state.usage.values():
+        if usage.calls:
+            total = total.combine(usage)
+            found = True
+    return total if found else None
+
+
+def has_cached_usage(state: WorkflowState) -> bool:
+    """آیا جایی توکنِ کش‌شده گزارش شده است؟ (برای نمایشِ ستونِ جدا)"""
+    return any(
+        usage.cached_tokens is not None for usage in state.usage.values()
+    )
+
+
+def _usage_values(usage: TokenUsage | None, executed: bool) -> tuple[str, str, str]:
+    """(prompt، completion، total) برای یک ردیف — با تفکیکِ حالت‌های ممکن."""
+    if not executed:
+        return USAGE_NOT_AVAILABLE, USAGE_NOT_AVAILABLE, USAGE_NOT_AVAILABLE
+    if usage is None or usage.calls == 0:
+        return USAGE_NOT_AVAILABLE, USAGE_NOT_AVAILABLE, USAGE_NO_CALLS
+    if (
+        usage.prompt_tokens is None
+        and usage.completion_tokens is None
+        and usage.total_tokens is None
+    ):
+        return USAGE_NOT_AVAILABLE, USAGE_NOT_AVAILABLE, USAGE_NOT_REPORTED
+    return (
+        _format_tokens(usage.prompt_tokens),
+        _format_tokens(usage.completion_tokens),
+        _format_tokens(usage.total_tokens),
+    )
+
+
+def usage_rows(state: WorkflowState) -> list[dict[str, str]]:
+    """جدولِ مصرف: یک ردیف برای هر قدم و یک ردیفِ جمع برای همه‌ی قدم‌ها.
+
+    حالت‌ها صریح‌اند: «—» یعنی این قدم هنوز اجرا نشده، «no calls» یعنی اجرا
+    شده ولی فراخوانیِ LLM نداشته (مثلِ قدم‌های ۴ و ۵) و «not reported» یعنی
+    فراخوانی بوده ولی ارائه‌دهنده usage نداده است. هیچ‌کدام با صفرِ گمراه‌کننده
+    نمایش داده نمی‌شوند.
+    """
+    show_cached = has_cached_usage(state)
+    rows: list[dict[str, str]] = []
+
+    for step in range(1, STEP_COUNT + 1):
+        usage = state.usage_for(step)
+        executed = (
+            state.has_result(step) or bool(state.error(step)) or usage is not None
+        )
+        prompt, completion, total = _usage_values(usage, executed)
+        row = {
+            "Step": f"Step {step}" + (" ⚠" if state.error(step) else ""),
+            "Prompt": prompt,
+            "Completion": completion,
+            "Total": total,
+        }
+        if show_cached:
+            row["Cached"] = _format_tokens(usage.cached_tokens if usage else None)
+        rows.append(row)
+
+    totals = usage_totals(state)
+    executed = totals is not None
+    prompt, completion, total = _usage_values(totals, executed)
+    total_row = {
+        "Step": "All steps",
+        "Prompt": prompt,
+        "Completion": completion,
+        "Total": total,
+    }
+    if show_cached:
+        total_row["Cached"] = _format_tokens(totals.cached_tokens if totals else None)
+    rows.append(total_row)
+    return rows
+
+
 __all__ = [
     "INPUT_COLLECTION_NAME",
     "INPUT_DEVELOPED_SERVICES",
@@ -441,12 +569,18 @@ __all__ = [
     "STEP_COUNT",
     "STEP_ICONS",
     "STEP_TITLES",
+    "USAGE_NO_CALLS",
+    "USAGE_NOT_AVAILABLE",
+    "USAGE_NOT_REPORTED",
     "WorkflowState",
     "approve_label",
     "error_retry_message",
+    "has_cached_usage",
     "invalidated_message",
     "progress_text",
     "propagated_steps",
     "run_label",
     "stale_message",
+    "usage_rows",
+    "usage_totals",
 ]
