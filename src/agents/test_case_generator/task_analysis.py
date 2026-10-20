@@ -70,6 +70,12 @@ _INPUT_SECTION_RE = re.compile(
 # وقتی کاربر سرویسی معرفی نکرده باشد
 _EMPTY_SERVICES = "(none provided)"
 
+# وقتی پاسخِ کاملِ یک‌فراخوانی هیچ تست‌کیسی ندارد — ورودیِ تولیدِ مرحله‌ای
+_EMPTY_SINGLE_RESPONSE = (
+    "The single-call LLM response was complete but contained no test cases, so "
+    "it could not be used."
+)
+
 # حداکثر تعداد تست‌کیس در هر فراخوانیِ «گسترش» (مسیرِ مرحله‌ای).
 #
 # چرا لازم است: خروجیِ این قدم یک لیستِ باز است و تعدادش را مدل تعیین می‌کند؛
@@ -563,6 +569,17 @@ def parse_analysis(raw: str) -> TaskAnalysisResult:
     return validate_analysis(data)
 
 
+def _has_no_test_cases(data: dict) -> bool:
+    """آیا پاسخِ JSONِ کامل هیچ تست‌کیسِ قابلِ استفاده‌ای ندارد؟
+
+    نبودنِ کلید، مقدارِ غیرلیستی و لیستِ خالی همه «بدونِ تست‌کیس» هستند. این
+    تنها حالتی است که در آن پاسخِ کاملِ یک‌فراخوانی به تولیدِ مرحله‌ای سپرده
+    می‌شود — نه پذیرفته و نه به‌عنوان JSONِ نامعتبر گزارش می‌شود.
+    """
+    cases = data.get("test_cases")
+    return not isinstance(cases, list) or not cases
+
+
 def _validate_planned_case(
     case: object,
     where: str,
@@ -900,10 +917,45 @@ class TaskAnalysisGenerator:
                 llm, task_description, developed_services, truncated
             )
         else:
-            result = parse_analysis(raw)
+            result = self._analyze_single_call(
+                llm, raw, task_description, developed_services
+            )
 
         self._log_result(result)
         return result
+
+    def _analyze_single_call(
+        self,
+        llm: LLMClient,
+        raw: str,
+        task_description: str,
+        developed_services: str,
+    ) -> TaskAnalysisResult:
+        """پاسخِ کاملِ مسیرِ یک‌فراخوانی را اعتبارسنجی می‌کند.
+
+        اگر پاسخ JSONِ کامل باشد ولی هیچ تست‌کیسی نداشته باشد، «نتیجه‌ی خالی»
+        پذیرفته نمی‌شود؛ به‌جای آن همان تولیدِ مرحله‌ای اجرا می‌شود که برای
+        پاسخِ بریده استفاده می‌شد. اگر برنامه‌ی مرحله‌ی اول هم خالی یا نامعتبر
+        باشد، خطای همان مرحله بالا می‌رود و هیچ لیستِ خالی‌ای برنمی‌گردد.
+        """
+        try:
+            data = extract_json_object(raw)
+        except JsonExtractionError as exc:
+            raise TaskAnalysisError(str(exc)) from exc
+
+        if _has_no_test_cases(data):
+            self._log.warning(
+                "پاسخِ یک‌فراخوانی هیچ تست‌کیسی نداشت — تولیدِ مرحله‌ای آغاز می‌شود",
+                reason="empty_test_cases",
+                batch_size=self._batch_size,
+            )
+            return self._generate_staged(
+                llm,
+                task_description,
+                developed_services,
+                _EMPTY_SINGLE_RESPONSE,
+            )
+        return validate_analysis(data)
 
     def _chat(self, llm: LLMClient, system_prompt: str, user_message: str) -> str:
         """همه‌ی فراخوانی‌ها همان temperature و سقفِ توکن را می‌گیرند."""
@@ -919,10 +971,10 @@ class TaskAnalysisGenerator:
         llm: LLMClient,
         task_description: str,
         developed_services: str,
-        first_truncated: str,
+        fallback_reason: str,
     ) -> TaskAnalysisResult:
         """برنامه‌ی فشرده می‌سازد و جزئیات را دسته‌به‌دسته گسترش می‌دهد."""
-        plan = self._plan(llm, task_description, developed_services, first_truncated)
+        plan = self._plan(llm, task_description, developed_services, fallback_reason)
         details = self._expand_all(llm, task_description, plan["test_cases"])
         return _assemble_result(plan, details)
 
@@ -931,7 +983,7 @@ class TaskAnalysisGenerator:
         llm: LLMClient,
         task_description: str,
         developed_services: str,
-        first_truncated: str,
+        fallback_reason: str,
     ) -> TaskAnalysisPlan:
         system_prompt, user_message = build_plan_prompt(
             self._plan_prompt_path, task_description, developed_services
@@ -942,9 +994,9 @@ class TaskAnalysisGenerator:
         if truncated:
             self._log.error("برنامه‌ی تست‌کیس نیز بریده شد", finish_reason="length")
             raise TaskAnalysisError(
-                f"{first_truncated}\n\n"
+                f"{fallback_reason}\n\n"
                 "A staged generation was attempted because the single-call "
-                "response was truncated, but the compact test case plan also "
+                "response could not be used, but the compact test case plan also "
                 "reached the output token limit. No partial test case list was "
                 "used."
             )

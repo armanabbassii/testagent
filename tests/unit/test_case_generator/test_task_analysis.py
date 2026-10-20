@@ -3,6 +3,7 @@
 import json
 import re
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -28,6 +29,7 @@ from src.agents.test_case_generator.task_analysis import (
 )
 from src.config import LLM_MAX_OUTPUT_TOKENS
 from src.llm_client import FINISH_REASON_LENGTH, LLMClient, LLMResponse
+from src.token_usage import TokenUsage, collect_usage
 
 PROMPT_PATH = (
     Path(__file__).parents[3]
@@ -887,6 +889,223 @@ class TestStagedGeneration:
             TaskAnalysisGenerator().generate("Add something", "user-1")
 
         assert mock_cls.return_value.chat.call_count == 1
+
+
+def _generate_with(respond, *, batch_size=None):
+    """اجرای ژنراتور با LLMِ ماک‌شده؛ پاسخ‌ها از ``respond`` می‌آیند."""
+    with patch(
+        "src.agents.test_case_generator.task_analysis.LLMClient"
+    ) as mock_cls:
+        mock_cls.return_value.chat.side_effect = respond
+        result = TaskAnalysisGenerator(batch_size=batch_size).generate(
+            "Add vouchers", "user-1"
+        )
+    return result, mock_cls.return_value.chat
+
+
+class TestEmptySingleCallFallsBackToStagedGeneration:
+    """پاسخِ کاملِ یک‌فراخوانی بدونِ هیچ تست‌کیس نباید پذیرفته یا ترمیم شود.
+
+    این همان حالتی است که خطای «'test_cases' must be a non-empty array» را در
+    مسیرِ عادی می‌داد: JSON معتبر بود ولی تست‌کیسی نداشت. حالا همان تولیدِ
+    مرحله‌ای اجرا می‌شود و اگر آن هم نتواند لیستِ کامل بسازد، خطا بالا می‌رود.
+    """
+
+    def test_an_empty_single_call_is_recovered_by_staged_generation(self):
+        calls = []
+
+        def respond(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return json.dumps(_payload(test_cases=[]))
+            if len(calls) == 2:
+                return json.dumps(_plan_payload(20))
+            return json.dumps(_details_payload(_ids_in(kwargs["user_message"])))
+
+        result, chat = _generate_with(respond)
+
+        # ۱ پاسخِ خالی + ۱ برنامه + ۳ دسته‌ی گسترش (۸، ۸، ۴)
+        assert chat.call_count == 5
+        assert [len(_ids_in(call["user_message"])) for call in calls[2:]] == [8, 8, 4]
+        assert [case["id"] for case in result["test_cases"]] == [
+            f"TC-{index:03d}" for index in range(1, 21)
+        ]
+        first = result["test_cases"][0]
+        assert first["title"] == "Scenario 1"
+        assert first["steps"] == ["Step one for TC-001", "Step two for TC-001"]
+        assert first["expected_result"] == "Expected result for TC-001"
+
+    def test_a_missing_test_cases_key_is_also_treated_as_empty(self):
+        calls = []
+
+        def respond(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return json.dumps(
+                    {
+                        "task_summary": "Add percentage voucher creation.",
+                        "identified_requirements": [],
+                        "clarifications": [],
+                    }
+                )
+            if len(calls) == 2:
+                return json.dumps(_plan_payload(2))
+            return json.dumps(_details_payload(_ids_in(kwargs["user_message"])))
+
+        result, chat = _generate_with(respond)
+
+        assert chat.call_count == 3
+        assert [case["id"] for case in result["test_cases"]] == ["TC-001", "TC-002"]
+
+    def test_an_empty_plan_after_an_empty_single_call_is_rejected(self):
+        calls = []
+
+        def respond(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return json.dumps(_payload(test_cases=[]))
+            return json.dumps(_plan_payload(0))
+
+        with pytest.raises(TaskAnalysisError) as excinfo:
+            _generate_with(respond)
+
+        message = str(excinfo.value)
+        assert "required test case plan format" in message
+        assert "'test_cases' must be a non-empty array." in message
+
+    def test_a_malformed_plan_after_an_empty_single_call_is_rejected(self):
+        calls = []
+
+        def respond(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return json.dumps(_payload(test_cases=[]))
+            return "I cannot produce the plan."
+
+        with pytest.raises(TaskAnalysisError, match="did not return JSON"):
+            _generate_with(respond)
+
+
+class TestStagedValidationStaysStrict:
+    """هر مرحله فقط با قراردادِ خودش سنجیده می‌شود؛ هیچ‌چیز حدس زده نمی‌شود."""
+
+    def test_a_plan_shaped_payload_is_not_a_valid_final_result(self):
+        with pytest.raises(TaskAnalysisError) as excinfo:
+            validate_analysis(_plan_payload(2))
+
+        message = str(excinfo.value)
+        assert "required test case format" in message
+        assert "required test case plan format" not in message
+        assert "test_cases[0] ('TC-001').steps: is required" in message
+        assert "'expected_result' is missing or empty." in message
+
+    def test_an_empty_final_test_case_list_is_never_accepted(self):
+        with pytest.raises(TaskAnalysisError) as excinfo:
+            validate_analysis(_payload(test_cases=[]))
+
+        assert "'test_cases' must be a non-empty array." in str(excinfo.value)
+
+    def test_an_empty_details_response_is_rejected_without_partial_result(self):
+        calls = []
+
+        def respond(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return json.dumps(_payload(test_cases=[]))
+            if len(calls) == 2:
+                return json.dumps(_plan_payload(2))
+            return json.dumps({"test_cases": []})
+
+        with pytest.raises(TaskAnalysisError) as excinfo:
+            _generate_with(respond)
+
+        message = str(excinfo.value)
+        assert "'test_cases' must be a non-empty array." in message
+        assert "missing details for planned test case id(s): 'TC-001', 'TC-002'" in message
+
+    def test_a_malformed_details_response_is_rejected_without_partial_result(self):
+        calls = []
+
+        def respond(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return json.dumps(_payload(test_cases=[]))
+            if len(calls) == 2:
+                return json.dumps(_plan_payload(2))
+            return "I cannot expand these test cases."
+
+        with pytest.raises(TaskAnalysisError, match="did not return JSON"):
+            _generate_with(respond)
+
+    def test_a_failed_batch_reports_its_range_and_yields_no_partial_result(self):
+        calls = []
+
+        def respond(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return json.dumps(_payload(test_cases=[]))
+            if len(calls) == 2:
+                return json.dumps(_plan_payload(20))
+            if len(calls) == 3:
+                return json.dumps(_details_payload(_ids_in(kwargs["user_message"])))
+            return json.dumps({"test_cases": []})
+
+        with pytest.raises(TaskAnalysisError) as excinfo:
+            _generate_with(respond)
+
+        message = str(excinfo.value)
+        assert "planned test cases 9-16 of 20" in message
+        assert "batch 2 of 3" in message
+        assert "No partial result can be used" in message
+
+
+def _provider_response(content: str, prompt: int, completion: int) -> SimpleNamespace:
+    """پاسخِ ارائه‌دهنده با فراداده‌ی مصرف — شکلِ همان چیزی که SDK می‌دهد."""
+    return SimpleNamespace(
+        choices=[
+            SimpleNamespace(
+                finish_reason="stop",
+                message=SimpleNamespace(content=content),
+            )
+        ],
+        usage=SimpleNamespace(
+            prompt_tokens=prompt,
+            completion_tokens=completion,
+            total_tokens=prompt + completion,
+            prompt_tokens_details=None,
+        ),
+    )
+
+
+@pytest.fixture
+def provider():
+    """OpenAI ماک‌شده با کدِ واقعیِ LLMClient؛ خروجی صفِ پاسخ‌هاست."""
+    with patch("src.llm_client.OpenAI") as mock_openai, patch(
+        "src.llm_client._make_http_client"
+    ), patch("src.llm_client.obs", MagicMock(enabled=False)):
+        yield mock_openai.return_value.chat.completions.create
+
+
+class TestStep1UsageSurvivesFailure:
+    """مصرفِ فراخوانی‌هایی که به شکست می‌رسند نباید گم شود."""
+
+    def test_usage_of_the_failed_single_call_and_plan_is_kept(self, provider):
+        provider.side_effect = [
+            _provider_response(json.dumps(_payload(test_cases=[])), 100, 10),
+            _provider_response(json.dumps(_plan_payload(0)), 200, 20),
+        ]
+        records: list[TokenUsage] = []
+
+        with pytest.raises(TaskAnalysisError):
+            with collect_usage(records.append):
+                TaskAnalysisGenerator().generate("Add something", "user-1")
+
+        assert [record.calls for record in records] == [1, 1]
+        aggregate = TokenUsage()
+        for record in records:
+            aggregate = aggregate.combine(record)
+        assert aggregate == TokenUsage(2, 300, 30, 330)
+
 
 
 # ── قراردادِ بازگشتیِ LLMClient.chat() ────────────────────────────────────────
