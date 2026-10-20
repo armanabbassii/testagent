@@ -10,6 +10,7 @@ from src.agents.test_case_generator.api_discovery import (
     DiscoveredService,
 )
 from src.agents.test_case_generator.api_mapping import (
+    DEFAULT_MAPPING_BATCH_SIZE,
     ApiMappingAgent,
     ApiMappingError,
     Step2ApiMappingGenerator,
@@ -20,6 +21,7 @@ from src.agents.test_case_generator.api_mapping import (
     split_prompt,
     validate_mapping_payload,
 )
+from src.llm_client import FINISH_REASON_LENGTH, LLMResponse
 
 PROMPT_PATH = (
     __import__("pathlib").Path(__file__).parents[3]
@@ -71,6 +73,27 @@ def _service(name: str = "admin") -> DiscoveredService:
                 operation_id="updateVoucher",
                 summary="Update voucher",
             ),
+        ],
+    )
+
+
+def _service_with_unrelated_api() -> DiscoveredService:
+    """سرویسی با یک عملیاتِ بی‌ارتباط — تا فیلترِ ارتباط واقعاً چیزی کم کند."""
+    service = _service()
+    return DiscoveredService(
+        name=service.name,
+        source_url=service.source_url,
+        base_url=service.base_url,
+        title=service.title,
+        version=service.version,
+        apis=service.apis
+        + [
+            DiscoveredApi(
+                "DELETE",
+                "/audit/session",
+                operation_id="purgeAuditSession",
+                summary="Purge audit session",
+            )
         ],
     )
 
@@ -459,3 +482,249 @@ class TestStep2ApiMappingGenerator:
     def test_invalid_step1_result_raises_before_any_network_call(self):
         with pytest.raises(ApiMappingError, match="does not contain any test case"):
             Step2ApiMappingGenerator().generate({}, ["https://host/swagger"], "user-1")
+
+
+# ── دسته‌بندیِ تست‌کیس‌ها برای محدودکردنِ حجمِ پاسخ ─────────────────────────
+#
+# ریشه‌ی بریده‌شدگی: پاسخِ این قدم برای هر تست‌کیس یک نگاشت دارد، پس با
+# بزرگ‌شدنِ تعدادِ تست‌کیس‌ها یک پاسخِ واحد از سقفِ توکن رد می‌شود. این تست‌ها
+# قفل می‌کنند که ورودیِ بزرگ به دسته‌های کوچک شکسته شود، هیچ تست‌کیسی گم یا
+# تکراری نشود و ترتیبِ اصلی حفظ شود.
+
+_UPDATE_VOUCHER = {
+    "method": "PUT",
+    "path": "/admin/voucher/{id}",
+    "operation_id": "updateVoucher",
+}
+
+
+def _many_cases(count: int) -> list[dict]:
+    """``count`` تست‌کیسِ هم‌شکل که همه به ``updateVoucher`` نگاشت می‌شوند."""
+    return [
+        {
+            "id": f"TC-{index:03d}",
+            "title": f"Update voucher number {index}",
+            "type": "positive",
+            "priority": "high",
+            "steps": [f"Update voucher {index}"],
+            "expected_result": "The voucher is updated.",
+            "related_service": None,
+        }
+        for index in range(1, count + 1)
+    ]
+
+
+def _case_ids_in_prompt(user_message: str) -> list[str]:
+    """شناسه‌های تست‌کیسی که واقعاً در یک پرامپتِ ساخته‌شده آمده‌اند."""
+    start = user_message.index("TEST CASES:") + len("TEST CASES:")
+    end = user_message.index("CANDIDATE APIS:")
+    return [case["id"] for case in json.loads(user_message[start:end].strip())]
+
+
+def _batch_payload(case_ids: list[str], clarifications: list[str] | None = None) -> dict:
+    return _payload(
+        mappings=[_mapping(case_id, api=dict(_UPDATE_VOUCHER)) for case_id in case_ids],
+        clarifications=clarifications or [],
+    )
+
+
+class TestMappingIsBatched:
+    def _run(self, cases: list[dict], batch_size: int | None):
+        calls: list[list[str]] = []
+
+        def respond(**kwargs):
+            case_ids = _case_ids_in_prompt(kwargs["user_message"])
+            calls.append(case_ids)
+            return json.dumps(_batch_payload(case_ids))
+
+        with patch("src.agents.test_case_generator.api_mapping.LLMClient") as mock_cls:
+            mock_cls.return_value.chat.side_effect = respond
+            mappings, clarifications = ApiMappingAgent(
+                batch_size=batch_size
+            ).map_test_cases(cases, [_service()], "user-1")
+        return mappings, clarifications, calls, mock_cls
+
+    def test_a_large_request_is_split_into_bounded_batches(self):
+        cases = _many_cases(25)
+
+        _, _, calls, _ = self._run(cases, batch_size=10)
+
+        assert [len(call) for call in calls] == [10, 10, 5]
+
+    def test_every_test_case_is_sent_exactly_once_in_original_order(self):
+        cases = _many_cases(25)
+
+        _, _, calls, _ = self._run(cases, batch_size=10)
+
+        sent = [case_id for call in calls for case_id in call]
+        assert sent == [case["id"] for case in cases]
+
+    def test_no_test_case_is_lost_or_duplicated_in_the_result(self):
+        cases = _many_cases(25)
+
+        mappings, _, _, _ = self._run(cases, batch_size=10)
+
+        assert [mapping["test_case_id"] for mapping in mappings] == [
+            case["id"] for case in cases
+        ]
+
+    def test_the_default_batch_size_is_used_when_none_is_given(self):
+        cases = _many_cases(DEFAULT_MAPPING_BATCH_SIZE)
+
+        _, _, calls, _ = self._run(cases, batch_size=None)
+
+        assert len(calls) == 1
+
+    def test_clarifications_from_every_batch_are_combined(self):
+        cases = _many_cases(25)
+
+        def respond(**kwargs):
+            case_ids = _case_ids_in_prompt(kwargs["user_message"])
+            return json.dumps(
+                _batch_payload(case_ids, clarifications=[f"note for {case_ids[0]}"])
+            )
+
+        with patch("src.agents.test_case_generator.api_mapping.LLMClient") as mock_cls:
+            mock_cls.return_value.chat.side_effect = respond
+            _, clarifications = ApiMappingAgent(batch_size=10).map_test_cases(
+                cases, [_service()], "user-1"
+            )
+
+        assert clarifications == ["note for TC-001", "note for TC-011", "note for TC-021"]
+
+    def test_a_single_small_batch_keeps_the_one_call_behavior(self):
+        _, _, calls, _ = self._run(_test_cases(), batch_size=10)
+
+        assert len(calls) == 1
+
+    def test_batch_size_must_be_positive(self):
+        with pytest.raises(ValueError, match="batch_size"):
+            ApiMappingAgent(batch_size=0)
+
+    def test_an_empty_test_case_list_is_rejected(self):
+        """دسته‌بندی نباید ورودیِ خالی را به نتیجه‌ی خالیِ موفق تبدیل کند."""
+        with pytest.raises(ApiMappingError, match="No test case"):
+            ApiMappingAgent().map_test_cases([], [_service()], "user-1")
+
+    def test_a_truncated_later_batch_is_reported_with_its_range(self):
+        cases = _many_cases(25)
+
+        def respond(**kwargs):
+            case_ids = _case_ids_in_prompt(kwargs["user_message"])
+            if case_ids[0] == "TC-011":
+                return LLMResponse(
+                    '{"mappings": [',
+                    finish_reason=FINISH_REASON_LENGTH,
+                    completion_tokens=8192,
+                    max_tokens=8192,
+                )
+            return json.dumps(_batch_payload(case_ids))
+
+        with patch("src.agents.test_case_generator.api_mapping.LLMClient") as mock_cls:
+            mock_cls.return_value.chat.side_effect = respond
+            with pytest.raises(ApiMappingError) as excinfo:
+                ApiMappingAgent(batch_size=10).map_test_cases(
+                    cases, [_service()], "user-1"
+                )
+
+        message = str(excinfo.value)
+        assert "output token limit" in message
+        assert "test cases 11-20 of 25" in message
+        assert "batch 2 of 3" in message
+
+    def test_the_generator_passes_batch_size_to_the_agent(self):
+        cases = _many_cases(3)
+
+        def respond(**kwargs):
+            return json.dumps(_batch_payload(_case_ids_in_prompt(kwargs["user_message"])))
+
+        with patch(
+            "src.agents.test_case_generator.api_mapping.discover_services",
+            return_value=([_service()], []),
+        ), patch("src.agents.test_case_generator.api_mapping.LLMClient") as mock_cls:
+            mock_cls.return_value.chat.side_effect = respond
+            result = Step2ApiMappingGenerator(batch_size=1).generate(
+                {"test_cases": cases}, ["https://host/swagger"], "user-1"
+            )
+
+        assert mock_cls.return_value.chat.call_count == 3
+        assert [mapping["test_case_id"] for mapping in result["mappings"]] == [
+            case["id"] for case in cases
+        ]
+
+
+class TestUnresolvedRetriesInBatches:
+    """تلاشِ دومِ «کاتالوگِ کامل» باید داخلِ هر دسته و بدونِ به‌هم‌ریختنِ ترتیب بماند."""
+
+    def _first_pass(self, case_ids: list[str]) -> str:
+        """همه را نگاشت می‌کند، جز آخرین تست‌کیسِ هر دسته."""
+        mappings = [
+            _mapping(
+                case_id,
+                api=None,
+                confidence="low",
+                clarification="Which operation?",
+            )
+            if case_id == case_ids[-1]
+            else _mapping(case_id, api=dict(_UPDATE_VOUCHER))
+            for case_id in case_ids
+        ]
+        return json.dumps(_payload(mappings=mappings))
+
+    def test_each_batch_retries_its_unresolved_cases_against_the_full_catalog(self):
+        cases = _many_cases(25)
+        retry_prompts: list[str] = []
+
+        def respond(**kwargs):
+            case_ids = _case_ids_in_prompt(kwargs["user_message"])
+            if len(case_ids) == 1:  # تلاشِ دوم فقط برای تست‌کیس‌های حل‌نشده
+                retry_prompts.append(kwargs["user_message"])
+                return json.dumps(_batch_payload(case_ids))
+            return self._first_pass(case_ids)
+
+        with patch("src.agents.test_case_generator.api_mapping.LLMClient") as mock_cls:
+            mock_cls.return_value.chat.side_effect = respond
+            mappings, _ = ApiMappingAgent(batch_size=10).map_test_cases(
+                cases, [_service_with_unrelated_api()], "user-1"
+            )
+
+        # ۳ دسته × (تلاشِ اول + تلاشِ دوم)
+        assert mock_cls.return_value.chat.call_count == 6
+        assert [mapping["test_case_id"] for mapping in mappings] == [
+            case["id"] for case in cases
+        ]
+        # تلاشِ دوم در برابرِ کاتالوگِ کامل است، نه نامزدهای فیلترشده
+        assert all("purgeAuditSession" in prompt for prompt in retry_prompts)
+        retried = {"TC-010", "TC-020", "TC-025"}
+        assert all(
+            mapping["api"] is not None
+            for mapping in mappings
+            if mapping["test_case_id"] in retried
+        )
+
+    def test_a_truncated_retry_fails_explicitly_with_its_batch_range(self):
+        cases = _many_cases(25)
+
+        def respond(**kwargs):
+            case_ids = _case_ids_in_prompt(kwargs["user_message"])
+            if len(case_ids) == 1:
+                return LLMResponse(
+                    '{"mappings": [',
+                    finish_reason=FINISH_REASON_LENGTH,
+                    completion_tokens=8192,
+                    max_tokens=8192,
+                )
+            return self._first_pass(case_ids)
+
+        with patch("src.agents.test_case_generator.api_mapping.LLMClient") as mock_cls:
+            mock_cls.return_value.chat.side_effect = respond
+            with pytest.raises(ApiMappingError) as excinfo:
+                ApiMappingAgent(batch_size=10).map_test_cases(
+                    cases, [_service_with_unrelated_api()], "user-1"
+                )
+
+        message = str(excinfo.value)
+        assert "output token limit" in message
+        assert "invalid JSON" not in message
+        assert "test cases 1-10 of 25" in message
+        assert "batch 1 of 3" in message

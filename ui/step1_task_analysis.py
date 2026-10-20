@@ -96,11 +96,9 @@ def _run(
         # ورودیِ نامعتبر — مثلاً توصیفِ تسکِ خالی که پیش از این‌جا گرفته می‌شود
         return None, f"Invalid input: {exc}"
     except TaskAnalysisError as exc:
-        # خروجیِ مدل با قرارداد نخوانده است — پیامِ کاملِ اعتبارسنجی نشان داده می‌شود
-        return None, (
-            "The model output did not match the required test case format.\n\n"
-            f"{exc}"
-        )
+        # خطا ممکن است بریدگیِ خروجی، JSONِ نامعتبر، یا مغایرت با قرارداد باشد؛
+        # پیامِ خودِ خطا دقیق است و نباید با یک برچسبِ ثابت گمراه‌کننده شود.
+        return None, f"Task analysis failed:\n\n{exc}"
     except Exception as exc:  # noqa: BLE001 — خطای شبکه/سرویس نباید UI را بترکاند
         return None, f"Task analysis failed: {type(exc).__name__}: {exc}"
 

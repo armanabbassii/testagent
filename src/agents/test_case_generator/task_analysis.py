@@ -22,6 +22,7 @@ TaskAnalysisError پرتاب می‌شود تا نتیجه‌ی ناقص بی‌
 
 from __future__ import annotations
 
+import json
 import re
 from collections import Counter
 from pathlib import Path
@@ -37,6 +38,10 @@ from src.debug import DebugConfig
 from src.llm_client import LLMClient, truncation_message
 
 _PROMPT_PATH = Path(__file__).parent / "prompts" / "step1_task_analysis.md"
+
+# پرامپت‌های مسیرِ مرحله‌ای: اول برنامه‌ی فشرده، بعد جزئیات در دسته‌های کوچک.
+_PLAN_PROMPT_PATH = Path(__file__).parent / "prompts" / "step1_task_plan.md"
+_DETAILS_PROMPT_PATH = Path(__file__).parent / "prompts" / "step1_test_case_details.md"
 
 _VALID_TYPES = ("positive", "negative", "boundary", "state_transition")
 _VALID_PRIORITIES = ("high", "medium", "low")
@@ -54,8 +59,8 @@ _UNKNOWN_MARKERS = (
     "tbd",
 )
 
-# جای‌نگهدارهای فایلِ پرامپت
-_PLACEHOLDER_RE = re.compile(r"\{\{\s*(task_description|developed_services)\s*\}\}")
+# جای‌نگهدارهای فایل‌های پرامپت
+_PLACEHOLDER_RE = re.compile(r"\{\{\s*([a-z_]+)\s*\}\}")
 
 # بخشِ INPUT در فایلِ پرامپت: از این‌جا به بعد قالبِ ورودیِ کاربر است
 _INPUT_SECTION_RE = re.compile(
@@ -64,6 +69,18 @@ _INPUT_SECTION_RE = re.compile(
 
 # وقتی کاربر سرویسی معرفی نکرده باشد
 _EMPTY_SERVICES = "(none provided)"
+
+# حداکثر تعداد تست‌کیس در هر فراخوانیِ «گسترش» (مسیرِ مرحله‌ای).
+#
+# چرا لازم است: خروجیِ این قدم یک لیستِ باز است و تعدادش را مدل تعیین می‌کند؛
+# پس برخلافِ قدم دوم نمی‌شود ورودی را از قبل دسته‌بندی کرد. وقتی پاسخِ کامل به
+# سقفِ توکن می‌خورد، اول یک «برنامه‌ی فشرده» ساخته می‌شود و بعد جزئیاتِ هر
+# دسته جداگانه تولید می‌شود. حجمِ هر پاسخِ گسترش با این عدد محدود می‌ماند.
+#
+# چرا ۸: هر تست‌کیسِ کامل (preconditions + چند step + expected_result) حدودِ
+# ۲۰۰–۳۵۰ توکن است؛ ۸ تست‌کیس ≈ ۱٬۶۰۰–۲٬۸۰۰ توکن، با حاشیه‌ی کافی زیرِ
+# ۸٬۱۹۲. مقدار با batch_size در سازنده قابلِ تغییر است.
+DEFAULT_TEST_CASE_BATCH_SIZE = 8
 
 
 class TaskAnalysisError(RuntimeError):
@@ -96,16 +113,48 @@ class TaskAnalysisResult(TypedDict):
     clarifications: list[str]
 
 
+class PlannedTestCase(TypedDict):
+    """یک تست‌کیس در برنامه — فقط «چه چیزی» بدونِ جزئیاتِ اجرایی.
+
+    عنوان و نوع و اولویت همان چیزی است که فراخوانیِ گسترش باید حفظ کند؛
+    preconditions/steps/expected_result عمداً اینجا نیستند تا حجمِ برنامه
+    چند برابر کوچک‌تر از خروجیِ کامل بماند.
+    """
+
+    id: str
+    title: str
+    type: str
+    priority: str
+    related_service: RelatedService
+
+
+class TaskAnalysisPlan(TypedDict):
+    """برنامه‌ی فشرده‌ی تست‌کیس‌ها — مرحله‌ی اولِ تولیدِ مرحله‌ای."""
+
+    task_summary: str
+    identified_requirements: list[str]
+    test_cases: list[PlannedTestCase]
+    clarifications: list[str]
+
+
+class TestCaseDetails(TypedDict):
+    """جزئیاتِ اجراییِ یک تست‌کیسِ برنامه‌ریزی‌شده — مرحله‌ی دوم."""
+
+    id: str
+    preconditions: list[str]
+    steps: list[str]
+    expected_result: str
+
+
 # ── ساختِ prompt ─────────────────────────────────────────────────────────────
 
-def split_prompt(text: str) -> tuple[str, str]:
+def _split_input_section(
+    text: str, placeholders: tuple[str, ...]
+) -> tuple[str, str]:
     """فایلِ پرامپت را به (system prompt، قالبِ پیامِ کاربر) تقسیم می‌کند.
 
     هرچه پیش از بخشِ INPUT است دستورِ سیستم است — یعنی قواعدِ تولید و قراردادِ
     خروجی. از بخشِ INPUT به بعد قالبی است که با ورودیِ کاربر پر می‌شود.
-
-    پرتاب می‌کند:
-        TaskAnalysisError : بخشِ INPUT پیدا نشود، خالی باشد، یا جای‌نگهدارها را نداشته باشد
     """
     matches = list(_INPUT_SECTION_RE.finditer(text))
     if not matches:
@@ -123,13 +172,39 @@ def split_prompt(text: str) -> tuple[str, str]:
         )
 
     found = set(_PLACEHOLDER_RE.findall(user_template))
-    missing = {"task_description", "developed_services"} - found
+    missing = set(placeholders) - found
     if missing:
         raise TaskAnalysisError(
             "Prompt INPUT section is missing placeholder(s): "
             + ", ".join(sorted(f"{{{{{name}}}}}" for name in missing))
         )
     return system_prompt, user_template
+
+
+def _render(template: str, values: dict[str, str]) -> str:
+    """جای‌گذاری در یک پاس؛ جای‌نگهدارِ ناشناخته دست‌نخورده می‌ماند."""
+    return _PLACEHOLDER_RE.sub(
+        lambda match: values.get(match.group(1), match.group(0)), template
+    )
+
+
+def split_prompt(text: str) -> tuple[str, str]:
+    """فایلِ پرامپتِ اصلی را تقسیم می‌کند.
+
+    پرتاب می‌کند:
+        TaskAnalysisError : بخشِ INPUT پیدا نشود، خالی باشد، یا جای‌نگهدارها را نداشته باشد
+    """
+    return _split_input_section(text, ("task_description", "developed_services"))
+
+
+def split_plan_prompt(text: str) -> tuple[str, str]:
+    """فایلِ پرامپتِ «برنامه‌ی تست‌کیس» را تقسیم می‌کند."""
+    return _split_input_section(text, ("task_description", "developed_services"))
+
+
+def split_details_prompt(text: str) -> tuple[str, str]:
+    """فایلِ پرامپتِ «گسترشِ تست‌کیس» را تقسیم می‌کند."""
+    return _split_input_section(text, ("task_description", "test_case_plan"))
 
 
 def render_prompt(
@@ -146,7 +221,29 @@ def render_prompt(
         "task_description": (task_description or "").strip(),
         "developed_services": (developed_services or "").strip() or _EMPTY_SERVICES,
     }
-    return _PLACEHOLDER_RE.sub(lambda m: values[m.group(1)], template)
+    return _render(template, values)
+
+
+def render_plan_prompt(
+    template: str,
+    task_description: str,
+    developed_services: str = "",
+) -> str:
+    """قالبِ پرامپتِ برنامه را پر می‌کند — همان ورودی‌های پرامپتِ اصلی."""
+    return render_prompt(template, task_description, developed_services)
+
+
+def render_details_prompt(
+    template: str,
+    task_description: str,
+    planned_cases: list[PlannedTestCase],
+) -> str:
+    """قالبِ پرامپتِ گسترش را با توصیفِ تسک و دسته‌ی برنامه‌ریزی‌شده پر می‌کند."""
+    values = {
+        "task_description": (task_description or "").strip(),
+        "test_case_plan": json.dumps(planned_cases, ensure_ascii=False, indent=2),
+    }
+    return _render(template, values)
 
 
 def build_prompt(
@@ -159,6 +256,32 @@ def build_prompt(
     system_prompt, template = split_prompt(text)
     return system_prompt, render_prompt(
         template, task_description, developed_services
+    )
+
+
+def build_plan_prompt(
+    prompt_path: Path | str,
+    task_description: str,
+    developed_services: str = "",
+) -> tuple[str, str]:
+    """(system prompt، پیامِ کاربر) برای مرحله‌ی «برنامه‌ی تست‌کیس»."""
+    text = Path(prompt_path).read_text(encoding="utf-8")
+    system_prompt, template = split_plan_prompt(text)
+    return system_prompt, render_plan_prompt(
+        template, task_description, developed_services
+    )
+
+
+def build_details_prompt(
+    prompt_path: Path | str,
+    task_description: str,
+    planned_cases: list[PlannedTestCase],
+) -> tuple[str, str]:
+    """(system prompt، پیامِ کاربر) برای گسترشِ یک دسته از برنامه."""
+    text = Path(prompt_path).read_text(encoding="utf-8")
+    system_prompt, template = split_details_prompt(text)
+    return system_prompt, render_details_prompt(
+        template, task_description, planned_cases
     )
 
 
@@ -440,16 +563,263 @@ def parse_analysis(raw: str) -> TaskAnalysisResult:
     return validate_analysis(data)
 
 
+def _validate_planned_case(
+    case: object,
+    where: str,
+    errors: list[str],
+) -> PlannedTestCase | None:
+    """یک تست‌کیسِ برنامه (بدونِ جزئیاتِ اجرایی) را اعتبارسنجی می‌کند."""
+    if not isinstance(case, dict):
+        errors.append(f"{where}: expected an object, got {type(case).__name__}.")
+        return None
+
+    case_id = _clean(case.get("id"))
+    if not case_id:
+        errors.append(f"{where}: 'id' is missing or empty.")
+    where = f"{where} ('{case_id or '?'}')"
+
+    title = _clean(case.get("title"))
+    if not title:
+        errors.append(f"{where}: 'title' is missing or empty.")
+
+    case_type = _clean(case.get("type")).lower()
+    if case_type not in _VALID_TYPES:
+        errors.append(
+            f"{where}: 'type' must be one of {_VALID_TYPES}, got {case.get('type')!r}."
+        )
+
+    priority = _clean(case.get("priority")).lower()
+    if priority not in _VALID_PRIORITIES:
+        errors.append(
+            f"{where}: 'priority' must be one of {_VALID_PRIORITIES}, "
+            f"got {case.get('priority')!r}."
+        )
+
+    related_service = _validate_related_service(
+        case.get("related_service"), f"{where}.related_service", errors
+    )
+
+    valid = (
+        bool(case_id)
+        and bool(title)
+        and case_type in _VALID_TYPES
+        and priority in _VALID_PRIORITIES
+    )
+    if not valid:
+        return None
+
+    return PlannedTestCase(
+        id=case_id,
+        title=title,
+        type=case_type,
+        priority=priority,
+        related_service=related_service,
+    )
+
+
+def validate_plan(data: dict) -> TaskAnalysisPlan:
+    """خروجیِ JSON مرحله‌ی «برنامه» را اعتبارسنجی و نرمال می‌کند.
+
+    برنامه فقط «چه چیزی» را تعیین می‌کند — شناسه، عنوان، نوع، اولویت و سرویسِ
+    مرتبط. جزئیاتِ اجرایی در مرحله‌ی بعد و در دسته‌های کوچک تولید می‌شوند.
+
+    پرتاب می‌کند:
+        TaskAnalysisError : خروجی با قرارداد نخواند
+    """
+    errors: list[str] = []
+
+    task_summary = _clean(data.get("task_summary"))
+    if not task_summary:
+        errors.append("'task_summary' is missing or empty.")
+
+    requirements = _string_list(
+        data.get("identified_requirements"),
+        "identified_requirements",
+        errors,
+        required=False,
+    )
+    clarifications = _string_list(
+        data.get("clarifications"), "clarifications", errors, required=False
+    )
+
+    raw_cases = data.get("test_cases")
+    cases: list[PlannedTestCase] = []
+    if not isinstance(raw_cases, list) or not raw_cases:
+        errors.append("'test_cases' must be a non-empty array.")
+    else:
+        for index, raw_case in enumerate(raw_cases):
+            case = _validate_planned_case(raw_case, f"test_cases[{index}]", errors)
+            if case is not None:
+                cases.append(case)
+
+    seen_ids: set[str] = set()
+    for case in cases:
+        if case["id"] in seen_ids:
+            errors.append(f"duplicate test case id {case['id']!r} — ids must be unique.")
+        seen_ids.add(case["id"])
+
+    if errors:
+        raise TaskAnalysisError(
+            "LLM output does not match the required test case plan format:\n  - "
+            + "\n  - ".join(errors)
+        )
+
+    return TaskAnalysisPlan(
+        task_summary=task_summary,
+        identified_requirements=requirements,
+        test_cases=cases,
+        clarifications=clarifications,
+    )
+
+
+def validate_details(
+    data: dict,
+    planned: list[PlannedTestCase],
+) -> list[TestCaseDetails]:
+    """جزئیاتِ یک دسته را اعتبارسنجی می‌کند و به ترتیبِ برنامه برمی‌گرداند.
+
+    قرارداد سخت‌گیرانه است: دقیقاً همان شناسه‌های برنامه، هر کدام یک‌بار.
+    شناسه‌ی ناشناخته، تکراری یا گم‌شده خطاست — هیچ تست‌کیسی نه اضافه می‌شود و
+    نه بی‌سروصدا حذف می‌گردد.
+
+    پرتاب می‌کند:
+        TaskAnalysisError : خروجی با قرارداد نخواند
+    """
+    errors: list[str] = []
+    planned_ids = [case["id"] for case in planned]
+    planned_set = set(planned_ids)
+
+    raw_cases = data.get("test_cases")
+    by_id: dict[str, TestCaseDetails] = {}
+    if not isinstance(raw_cases, list) or not raw_cases:
+        errors.append("'test_cases' must be a non-empty array.")
+    else:
+        for index, raw_case in enumerate(raw_cases):
+            if not isinstance(raw_case, dict):
+                errors.append(
+                    f"test_cases[{index}]: expected an object, got "
+                    f"{type(raw_case).__name__}."
+                )
+                continue
+
+            case_id = _clean(raw_case.get("id"))
+            if not case_id:
+                errors.append(f"test_cases[{index}]: 'id' is missing or empty.")
+                continue
+
+            where = f"test_cases[{index}] ('{case_id}')"
+            if case_id not in planned_set:
+                errors.append(
+                    f"{where}: id is not in the planned test cases — do not add "
+                    "or rename test cases."
+                )
+                continue
+            if case_id in by_id:
+                errors.append(f"{where}: duplicate detail for the same id.")
+                continue
+
+            preconditions = _string_list(
+                raw_case.get("preconditions"),
+                f"{where}.preconditions",
+                errors,
+                required=False,
+            )
+            steps = _string_list(
+                raw_case.get("steps"), f"{where}.steps", errors, required=True
+            )
+            expected_result = _clean(raw_case.get("expected_result"))
+            if not expected_result:
+                errors.append(f"{where}: 'expected_result' is missing or empty.")
+
+            if steps and expected_result:
+                by_id[case_id] = TestCaseDetails(
+                    id=case_id,
+                    preconditions=preconditions,
+                    steps=steps,
+                    expected_result=expected_result,
+                )
+
+    missing = [case_id for case_id in planned_ids if case_id not in by_id]
+    if missing:
+        errors.append(
+            "missing details for planned test case id(s): "
+            + ", ".join(repr(case_id) for case_id in missing)
+            + " — every planned test case must be expanded."
+        )
+
+    if errors:
+        raise TaskAnalysisError(
+            "LLM output does not match the required test case format:\n  - "
+            + "\n  - ".join(errors)
+        )
+
+    return [by_id[case_id] for case_id in planned_ids]
+
+
+def _assemble_result(
+    plan: TaskAnalysisPlan,
+    details: list[TestCaseDetails],
+) -> TaskAnalysisResult:
+    """برنامه و جزئیات را به قراردادِ نهاییِ TaskAnalysisResult تبدیل می‌کند."""
+    expected = [case["id"] for case in plan["test_cases"]]
+    actual = [detail["id"] for detail in details]
+    if actual != expected:
+        raise TaskAnalysisError(
+            "Internal error: expanded details do not match the planned test cases "
+            f"({len(actual)} detail(s) for {len(expected)} planned case(s), or "
+            "their order changed). No partial result can be used."
+        )
+
+    details_by_id = {detail["id"]: detail for detail in details}
+    test_cases: list[dict] = []
+    for planned in plan["test_cases"]:
+        detail = details_by_id[planned["id"]]
+        test_cases.append(
+            {
+                "id": planned["id"],
+                "title": planned["title"],
+                "type": planned["type"],
+                "priority": planned["priority"],
+                "preconditions": detail["preconditions"],
+                "steps": detail["steps"],
+                "expected_result": detail["expected_result"],
+                "related_service": planned["related_service"],
+            }
+        )
+
+    return validate_analysis(
+        {
+            "task_summary": plan["task_summary"],
+            "identified_requirements": plan["identified_requirements"],
+            "test_cases": test_cases,
+            "clarifications": plan["clarifications"],
+        }
+    )
+
+
+def _batches(items: list, size: int) -> list[list]:
+    """اقلام را به دسته‌های پیوسته‌ی حداکثر `size`تایی تقسیم می‌کند."""
+    return [items[start : start + size] for start in range(0, len(items), size)]
+
+
 # ── تولید ────────────────────────────────────────────────────────────────────
 
 class TaskAnalysisGenerator:
     """از توصیفِ تسک، تست‌کیس‌های ساختاریافته برای بازبینیِ انسانی می‌سازد.
 
+    مسیرِ عادی یک فراخوانی است. اگر پاسخ به سقفِ توکن بخورد، تولیدِ مرحله‌ای
+    جایگزین می‌شود: اول یک «برنامه‌ی فشرده» (بدونِ preconditions/steps/
+    expected_result) و بعد جزئیات در دسته‌های کوچک. هیچ پاسخِ بریده‌ای ترمیم یا
+    پذیرفته نمی‌شود.
+
     پارامترها:
-        debug_config : تنظیماتِ لاگِ پروژه
-        temperature  : دمای LLM — پایین، چون خروجی باید ساختاریافته باشد
-        max_tokens   : سقفِ توکنِ پاسخ (None یعنی مقدارِ مشترکِ LLM_MAX_OUTPUT_TOKENS)
-        prompt_path  : مسیرِ فایلِ پرامپت (برای تست قابلِ جایگزینی است)
+        debug_config        : تنظیماتِ لاگِ پروژه
+        temperature         : دمای LLM — پایین، چون خروجی باید ساختاریافته باشد
+        max_tokens          : سقفِ توکنِ پاسخ (None یعنی مقدارِ مشترکِ LLM_MAX_OUTPUT_TOKENS)
+        prompt_path         : مسیرِ فایلِ پرامپتِ اصلی (برای تست قابلِ جایگزینی است)
+        plan_prompt_path    : مسیرِ پرامپتِ مرحله‌ی «برنامه‌ی تست‌کیس»
+        details_prompt_path : مسیرِ پرامپتِ مرحله‌ی «گسترشِ تست‌کیس»
+        batch_size          : حداکثر تعداد تست‌کیس در هر فراخوانیِ گسترش
     """
 
     # نامی که در LLMClient و observation استفاده می‌شود
@@ -461,12 +831,26 @@ class TaskAnalysisGenerator:
         temperature: float = 0.1,
         max_tokens: int | None = None,
         prompt_path: Path | str | None = None,
+        plan_prompt_path: Path | str | None = None,
+        details_prompt_path: Path | str | None = None,
+        batch_size: int | None = None,
     ) -> None:
         self._log = (debug_config or DebugConfig.off()).get_logger(self.name)
         self._prompt_path = Path(prompt_path) if prompt_path else _PROMPT_PATH
+        self._plan_prompt_path = (
+            Path(plan_prompt_path) if plan_prompt_path else _PLAN_PROMPT_PATH
+        )
+        self._details_prompt_path = (
+            Path(details_prompt_path) if details_prompt_path else _DETAILS_PROMPT_PATH
+        )
         self._temperature = temperature
         # None یعنی «مقدارِ مشترکِ پروژه»؛ عددِ صریح همیشه برنده است.
         self._max_tokens = LLM_MAX_OUTPUT_TOKENS if max_tokens is None else max_tokens
+        self._batch_size = (
+            DEFAULT_TEST_CASE_BATCH_SIZE if batch_size is None else batch_size
+        )
+        if self._batch_size < 1:
+            raise ValueError("batch_size must be at least 1.")
 
     def generate(
         self,
@@ -500,23 +884,133 @@ class TaskAnalysisGenerator:
 
         llm = LLMClient(user_id=user_id, agent_name=self.name)
         self._log.debug("ارسال تسک به LLM")
-        raw = llm.chat(
+        raw = self._chat(llm, system_prompt, user_message)
+        self._log.trace("پاسخ LLM دریافت شد", response_chars=len(raw or ""))
+
+        # پاسخِ بریده را نه ترمیم می‌کنیم و نه حدس می‌زنیم. به‌جای خطا، تولیدِ
+        # مرحله‌ای اجرا می‌شود؛ خودِ پاسخِ ناقص هرگز خوانده نمی‌شود.
+        truncated = truncation_message(raw)
+        if truncated:
+            self._log.warning(
+                "پاسخِ یک‌مرحله‌ای بریده شد — تولیدِ مرحله‌ای آغاز می‌شود",
+                finish_reason="length",
+                batch_size=self._batch_size,
+            )
+            result = self._generate_staged(
+                llm, task_description, developed_services, truncated
+            )
+        else:
+            result = parse_analysis(raw)
+
+        self._log_result(result)
+        return result
+
+    def _chat(self, llm: LLMClient, system_prompt: str, user_message: str) -> str:
+        """همه‌ی فراخوانی‌ها همان temperature و سقفِ توکن را می‌گیرند."""
+        return llm.chat(
             user_message=user_message,
             system_prompt=system_prompt,
             temperature=self._temperature,
             max_tokens=self._max_tokens,
         )
-        self._log.trace("پاسخ LLM دریافت شد", response_chars=len(raw or ""))
 
-        # پاسخِ بریده را نه ترمیم می‌کنیم و نه حدس می‌زنیم: خطا با ذکرِ صریحِ
-        # سقفِ توکن برگردانده می‌شود.
+    def _generate_staged(
+        self,
+        llm: LLMClient,
+        task_description: str,
+        developed_services: str,
+        first_truncated: str,
+    ) -> TaskAnalysisResult:
+        """برنامه‌ی فشرده می‌سازد و جزئیات را دسته‌به‌دسته گسترش می‌دهد."""
+        plan = self._plan(llm, task_description, developed_services, first_truncated)
+        details = self._expand_all(llm, task_description, plan["test_cases"])
+        return _assemble_result(plan, details)
+
+    def _plan(
+        self,
+        llm: LLMClient,
+        task_description: str,
+        developed_services: str,
+        first_truncated: str,
+    ) -> TaskAnalysisPlan:
+        system_prompt, user_message = build_plan_prompt(
+            self._plan_prompt_path, task_description, developed_services
+        )
+        raw = self._chat(llm, system_prompt, user_message)
+
         truncated = truncation_message(raw)
         if truncated:
-            self._log.error("پاسخِ LLM بریده شد", finish_reason="length")
+            self._log.error("برنامه‌ی تست‌کیس نیز بریده شد", finish_reason="length")
+            raise TaskAnalysisError(
+                f"{first_truncated}\n\n"
+                "A staged generation was attempted because the single-call "
+                "response was truncated, but the compact test case plan also "
+                "reached the output token limit. No partial test case list was "
+                "used."
+            )
+
+        try:
+            data = extract_json_object(raw)
+        except JsonExtractionError as exc:
+            raise TaskAnalysisError(str(exc)) from exc
+        return validate_plan(data)
+
+    def _expand_all(
+        self,
+        llm: LLMClient,
+        task_description: str,
+        planned: list[PlannedTestCase],
+    ) -> list[TestCaseDetails]:
+        batches = _batches(planned, self._batch_size)
+        self._log.info(
+            "تولیدِ مرحله‌ای: گسترشِ برنامه در دسته‌ها",
+            planned=len(planned),
+            batches=len(batches),
+            batch_size=self._batch_size,
+        )
+
+        details: list[TestCaseDetails] = []
+        for number, batch in enumerate(batches, start=1):
+            try:
+                details.extend(self._expand(llm, task_description, batch))
+            except TaskAnalysisError as exc:
+                if len(batches) == 1:
+                    raise
+                first = (number - 1) * self._batch_size + 1
+                last = first + len(batch) - 1
+                raise TaskAnalysisError(
+                    f"{exc}\n\nExpanding the test case plan failed for planned "
+                    f"test cases {first}-{last} of {len(planned)} (batch "
+                    f"{number} of {len(batches)}, batch size "
+                    f"{self._batch_size}). No partial result can be used."
+                ) from exc
+        return details
+
+    def _expand(
+        self,
+        llm: LLMClient,
+        task_description: str,
+        batch: list[PlannedTestCase],
+    ) -> list[TestCaseDetails]:
+        system_prompt, user_message = build_details_prompt(
+            self._details_prompt_path, task_description, batch
+        )
+        raw = self._chat(llm, system_prompt, user_message)
+
+        # ترتیب مهم است: اول بریدگی، بعد JSON. پاسخِ بریده هرگز به‌عنوان
+        # «JSON نامعتبر» گزارش نمی‌شود و هرگز ترمیم نمی‌گردد.
+        truncated = truncation_message(raw)
+        if truncated:
+            self._log.error("پاسخِ گسترش بریده شد", finish_reason="length")
             raise TaskAnalysisError(truncated)
 
-        result = parse_analysis(raw)
+        try:
+            data = extract_json_object(raw)
+        except JsonExtractionError as exc:
+            raise TaskAnalysisError(str(exc)) from exc
+        return validate_details(data, batch)
 
+    def _log_result(self, result: TaskAnalysisResult) -> None:
         counts = Counter(case["type"] for case in result["test_cases"])
         self._log.info(
             "تحلیل تسک کامل شد",
@@ -532,4 +1026,3 @@ class TaskAnalysisGenerator:
                 "هیچ تست‌کیسِ مثبتی تولید نشد — خروجی برای بازبینی انسانی است",
                 total=len(result["test_cases"]),
             )
-        return result

@@ -18,6 +18,7 @@ from __future__ import annotations
 import importlib
 import json
 import os
+import re
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -34,12 +35,14 @@ from src.agents.test_case_generator.api_discovery import (
     DiscoveredService,
 )
 from src.agents.test_case_generator.api_mapping import (
+    DEFAULT_MAPPING_BATCH_SIZE,
     ApiMappingAgent,
     ApiMappingError,
     Step2ApiMappingGenerator,
     split_prompt,
 )
 from src.agents.test_case_generator.task_analysis import (
+    DEFAULT_TEST_CASE_BATCH_SIZE,
     TaskAnalysisError,
     TaskAnalysisGenerator,
 )
@@ -794,3 +797,281 @@ class TestTheStepStillReturnsTheFullCatalog:
         ]
         assert operations == ["updateVoucher", "purgeAuditSession"]
         assert len(result["mappings"]) == 2
+
+
+# ── ورودیِ بزرگ: تقسیم به دسته، نه بریده‌شدن ─────────────────────────────────
+
+def _case_ids_in_prompt(user_message: str) -> list[str]:
+    """شناسه‌های تست‌کیسی که در یک پرامپتِ واقعاً ساخته‌شده آمده‌اند."""
+    start = user_message.index("TEST CASES:") + len("TEST CASES:")
+    end = user_message.index("CANDIDATE APIS:")
+    return [case["id"] for case in json.loads(user_message[start:end].strip())]
+
+
+def _many_cases(count: int) -> list[dict]:
+    return [
+        {
+            "id": f"TC-{index:03d}",
+            "title": f"Update voucher number {index}",
+            "steps": [f"Change voucher {index}"],
+        }
+        for index in range(1, count + 1)
+    ]
+
+
+class TestLargeMappingRequestsAreBatched:
+    def test_a_request_larger_than_one_response_is_split_instead_of_truncated(self):
+        """همان شرایطِ شکست: اگر همه‌ی تست‌کیس‌ها یک‌جا بروند، پاسخ بریده می‌شود."""
+        cases = _many_cases(25)
+
+        def respond(**kwargs):
+            case_ids = _case_ids_in_prompt(kwargs["user_message"])
+            if len(case_ids) > DEFAULT_MAPPING_BATCH_SIZE:
+                return LLMResponse(
+                    '{"mappings": [',
+                    finish_reason=FINISH_REASON_LENGTH,
+                    completion_tokens=LLM_MAX_OUTPUT_TOKENS,
+                    max_tokens=LLM_MAX_OUTPUT_TOKENS,
+                )
+            return json.dumps(
+                _mapping_payload([_mapping(case_id, _voucher_api()) for case_id in case_ids])
+            )
+
+        with patch("src.agents.test_case_generator.api_mapping.LLMClient") as mock_cls:
+            mock_cls.return_value.chat.side_effect = respond
+
+            mappings, _ = ApiMappingAgent().map_test_cases(
+                cases, _catalog(), "user-1"
+            )
+
+        assert [mapping["test_case_id"] for mapping in mappings] == [
+            case["id"] for case in cases
+        ]
+        assert mock_cls.return_value.chat.call_count == 3
+
+    def test_without_batching_the_same_request_reports_truncation(self):
+        """شاهدِ ریشه: یک فراخوانیِ واحد با همان ورودی به سقف می‌خورد."""
+        cases = _many_cases(25)
+
+        def respond(**kwargs):
+            case_ids = _case_ids_in_prompt(kwargs["user_message"])
+            assert len(case_ids) > DEFAULT_MAPPING_BATCH_SIZE
+            return LLMResponse(
+                '{"mappings": [',
+                finish_reason=FINISH_REASON_LENGTH,
+                completion_tokens=LLM_MAX_OUTPUT_TOKENS,
+                max_tokens=LLM_MAX_OUTPUT_TOKENS,
+            )
+
+        with patch("src.agents.test_case_generator.api_mapping.LLMClient") as mock_cls:
+            mock_cls.return_value.chat.side_effect = respond
+
+            with pytest.raises(ApiMappingError, match="output token limit"):
+                ApiMappingAgent(batch_size=len(cases)).map_test_cases(
+                    cases, _catalog(), "user-1"
+                )
+
+        assert mock_cls.return_value.chat.call_count == 1
+
+
+# ── قدم اول: تولیدِ مرحله‌ای وقتی یک پاسخ کافی نیست ─────────────────────────
+
+def _step1_planned(count: int) -> list[dict]:
+    return [
+        {
+            "id": f"TC-{index:03d}",
+            "title": f"Voucher scenario {index}",
+            "type": "positive",
+            "priority": "high",
+            "related_service": {"method": "POST", "path": f"/admin/voucher/{index}"},
+        }
+        for index in range(1, count + 1)
+    ]
+
+
+def _step1_plan(count: int) -> dict:
+    return {
+        "task_summary": "Add voucher creation.",
+        "identified_requirements": ["A voucher can be created."],
+        "test_cases": _step1_planned(count),
+        "clarifications": [],
+    }
+
+
+def _step1_details(case_ids: list[str]) -> dict:
+    return {
+        "test_cases": [
+            {
+                "id": case_id,
+                "preconditions": [],
+                "steps": [f"Submit {case_id}"],
+                "expected_result": f"{case_id} succeeds",
+            }
+            for case_id in case_ids
+        ]
+    }
+
+
+def _step1_ids_in_prompt(user_message: str) -> list[str]:
+    """شناسه‌های تست‌کیسِ برنامه/دسته را از پرامپتِ واقعاً ساخته‌شده می‌خواند."""
+    return re.findall(r'"id":\s*"(TC-\d+)"', user_message)
+
+
+def _step1_truncated(completion_tokens: int = LLM_MAX_OUTPUT_TOKENS) -> LLMResponse:
+    return LLMResponse(
+        '{"task_summary": "Add voucher',
+        finish_reason=FINISH_REASON_LENGTH,
+        completion_tokens=completion_tokens,
+        max_tokens=LLM_MAX_OUTPUT_TOKENS,
+    )
+
+
+class TestLargeStep1RequestsAreStaged:
+    """شبیه‌سازیِ همان شکست: یک پاسخِ واحد برای این حجم از تست‌کیس بریده می‌شود."""
+
+    def test_a_truncated_full_response_is_regenerated_as_plan_plus_batches(self):
+        planned = 20
+        calls = []
+
+        def respond(**kwargs):
+            calls.append(kwargs)
+            system = kwargs["system_prompt"]
+            if "TEST CASE PLAN (COMPACT)" in system:
+                return json.dumps(_step1_plan(planned))
+            if "TEST CASE DETAILS" in system:
+                ids = _step1_ids_in_prompt(kwargs["user_message"])
+                assert len(ids) <= DEFAULT_TEST_CASE_BATCH_SIZE
+                return json.dumps(_step1_details(ids))
+            return _step1_truncated()
+
+        with patch(
+            "src.agents.test_case_generator.task_analysis.LLMClient"
+        ) as mock_cls:
+            mock_cls.return_value.chat.side_effect = respond
+
+            result = TaskAnalysisGenerator().generate("Add vouchers", "user-1")
+
+        assert [case["id"] for case in result["test_cases"]] == [
+            f"TC-{index:03d}" for index in range(1, planned + 1)
+        ]
+        assert len(result["test_cases"]) == planned
+        # ۱ پاسخِ یک‌مرحله‌ایِ بریده + ۱ برنامه + ۳ دسته‌ی گسترش
+        assert len(calls) == 2 + 3
+        batch_sizes = [
+            len(_step1_ids_in_prompt(call["user_message"]))
+            for call in calls
+            if "TEST CASE DETAILS" in call["system_prompt"]
+        ]
+        assert batch_sizes == [8, 8, 4]
+        assert all(call["max_tokens"] == LLM_MAX_OUTPUT_TOKENS for call in calls)
+
+    def test_a_truncated_expansion_batch_fails_explicitly_with_its_range(self):
+        calls = []
+        details_calls = 0
+
+        def respond(**kwargs):
+            nonlocal details_calls
+            calls.append(kwargs)
+            system = kwargs["system_prompt"]
+            if "TEST CASE PLAN (COMPACT)" in system:
+                return json.dumps(_step1_plan(20))
+            if "TEST CASE DETAILS" in system:
+                details_calls += 1
+                if details_calls == 1:
+                    ids = _step1_ids_in_prompt(kwargs["user_message"])
+                    return json.dumps(_step1_details(ids))
+                return _step1_truncated()
+            return _step1_truncated()
+
+        with patch(
+            "src.agents.test_case_generator.task_analysis.LLMClient"
+        ) as mock_cls:
+            mock_cls.return_value.chat.side_effect = respond
+
+            with pytest.raises(TaskAnalysisError) as excinfo:
+                TaskAnalysisGenerator(batch_size=8).generate("Add vouchers", "user-1")
+
+        message = str(excinfo.value)
+        assert "output token limit" in message
+        assert "invalid JSON" not in message
+        assert "planned test cases 9-16 of 20" in message
+        assert "batch 2 of 3" in message
+
+    def test_the_truncated_partial_json_is_never_parsed(self):
+        """حتی اگر متن تا وسطِ JSON آمده باشد، هرگز ترمیم یا پذیرفته نمی‌شود."""
+        calls = []
+
+        def respond(**kwargs):
+            calls.append(kwargs)
+            system = kwargs["system_prompt"]
+            if "TEST CASE PLAN (COMPACT)" in system:
+                return json.dumps(_step1_plan(2))
+            if "TEST CASE DETAILS" in system:
+                ids = _step1_ids_in_prompt(kwargs["user_message"])
+                return json.dumps(_step1_details(ids))
+            # JSONِ معتبر تا نیمه، ولی finish_reason=length
+            return _step1_truncated()
+
+        with patch(
+            "src.agents.test_case_generator.task_analysis.LLMClient"
+        ) as mock_cls:
+            mock_cls.return_value.chat.side_effect = respond
+
+            result = TaskAnalysisGenerator().generate("Add vouchers", "user-1")
+
+        assert [case["id"] for case in result["test_cases"]] == ["TC-001", "TC-002"]
+
+
+class TestTruncationReachesTheUi:
+    """خطای بریدگی باید همان‌طور که هست به کاربر برسد — نه با برچسبِ گمراه‌کننده."""
+
+    def test_step1_ui_does_not_relabel_a_truncation_as_a_format_error(self):
+        streamlit = pytest.importorskip("streamlit")
+        from ui import step1_task_analysis as step1_ui  # noqa: E402
+
+        truncated = _step1_truncated().truncation_message()
+
+        with patch.object(
+            step1_ui, "TaskAnalysisGenerator"
+        ) as generator_cls, patch.object(streamlit, "spinner", MagicMock()):
+            generator_cls.return_value.generate.side_effect = TaskAnalysisError(
+                truncated
+            )
+            result, error = step1_ui._run("Add a voucher", "")
+
+        assert result is None
+        assert error is not None
+        assert error.startswith("Task analysis failed:")
+        assert "output token limit" in error
+        # پیامِ خطا نباید ادعا کند خروجی با «فرمت» نخوانده است.
+        assert "does not match the required test case format" not in error
+
+    def test_step2_ui_propagates_the_batch_range_and_the_cause(self):
+        streamlit = pytest.importorskip("streamlit")
+        from ui import step2_api_mapping as step2_ui  # noqa: E402
+
+        truncated = LLMResponse(
+            '{"mappings": [',
+            finish_reason=FINISH_REASON_LENGTH,
+            completion_tokens=LLM_MAX_OUTPUT_TOKENS,
+            max_tokens=LLM_MAX_OUTPUT_TOKENS,
+        ).truncation_message()
+        message = (
+            f"{truncated}\n\nMapping failed for test cases 1-10 of 25 "
+            "(batch 1 of 3, batch size 10)."
+        )
+
+        with patch.object(
+            step2_ui, "Step2ApiMappingGenerator"
+        ) as generator_cls, patch.object(streamlit, "spinner", MagicMock()):
+            generator_cls.return_value.generate.side_effect = ApiMappingError(message)
+            result, error = step2_ui._run(
+                {"test_cases": _cases()}, "https://host/swagger"
+            )
+
+        assert result is None
+        assert error is not None
+        assert error.startswith("API mapping failed:")
+        assert "output token limit" in error
+        assert "test cases 1-10 of 25" in error
+        assert "invalid JSON" not in error

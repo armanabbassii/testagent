@@ -35,7 +35,10 @@ from src.agents.test_case_generator.api_discovery import (
     operation_index,
     operation_key,
 )
-from src.agents.test_case_generator.api_relevance import select_candidates
+from src.agents.test_case_generator.api_relevance import (
+    RelevanceSelection,
+    select_candidates,
+)
 from src.agents.test_case_generator.json_output import (
     JsonExtractionError,
     extract_json_object,
@@ -52,6 +55,21 @@ _VALID_CONFIDENCE = ("high", "medium", "low")
 
 # متدهای HTTP ای که یک نگاشت مجاز است به آن‌ها اشاره کند
 _VALID_METHODS = ("GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS", "TRACE")
+
+# حداکثر تعداد تست‌کیس در هر فراخوانیِ LLM.
+#
+# چرا لازم است: پاسخِ این قدم برای هر تست‌کیس یک نگاشت دارد، پس حجمِ خروجی با
+# تعدادِ تست‌کیس‌ها خطی رشد می‌کند و یک درخواستِ بزرگ در هر سقفِ توکنی دیر یا
+# زود می‌شکند (بریده‌شدگی با سقفِ ۴۰۹۶ مشاهده شده است؛ بالا بردنِ سقف فقط
+# آستانه را جابه‌جا می‌کند، چون رشد خروجی خطی است). تقسیم به دسته حجمِ هر
+# پاسخ را مستقل از تعدادِ کلِ تست‌کیس‌ها محدود می‌کند.
+#
+# چرا ۱۰: هر نگاشت (شناسه + متد/مسیر/operation_id + اطمینان + دلیل + ابهام)
+# حدودِ ۱۵۰–۲۵۰ توکن است؛ ۱۰ نگاشت ≈ ۱٬۵۰۰–۲٬۵۰۰ توکن، یعنی کمتر از یک‌سومِ
+# بودجه‌ی پیش‌فرضِ ۸٬۱۹۲. بقیه‌ی بودجه برای مقدمه‌ی احتمالی و بلوکِ
+# clarifications می‌ماند. مقدار با batch_size در سازنده قابلِ تغییر است
+# (مثلاً وقتی max_tokens را پایین‌تر می‌آورید).
+DEFAULT_MAPPING_BATCH_SIZE = 10
 
 # بخشِ INPUT در فایلِ پرامپت
 _INPUT_SECTION_RE = re.compile(
@@ -506,6 +524,15 @@ def _cases_with_ids(test_cases: list[dict], case_ids: list[str]) -> list[dict]:
     return [case for case in test_cases if _case_id(case) in wanted]
 
 
+def _batches(test_cases: list[dict], size: int) -> list[list[dict]]:
+    """تست‌کیس‌ها را به دسته‌های پیوسته و بدونِ هم‌پوشانی می‌شکند.
+
+    ترتیبِ دسته‌ها و درونِ هر دسته همان ترتیبِ ورودی است؛ پس چسباندنِ
+    نگاشت‌ها به همان ترتیب، دقیقاً ترتیبِ اصلی را می‌دهد.
+    """
+    return [test_cases[start : start + size] for start in range(0, len(test_cases), size)]
+
+
 def _merge_mappings(
     mappings: list[ApiMapping],
     retried: list[ApiMapping],
@@ -536,12 +563,18 @@ class ApiMappingAgent:
         temperature: float = 0.0,
         max_tokens: int | None = None,
         prompt_path: Path | str | None = None,
+        batch_size: int | None = None,
     ) -> None:
         self._log = (debug_config or DebugConfig.off()).get_logger(self.name)
         self._prompt_path = Path(prompt_path) if prompt_path else _PROMPT_PATH
         self._temperature = temperature
         # None یعنی «مقدارِ مشترکِ پروژه»؛ عددِ صریح همیشه برنده است.
         self._max_tokens = LLM_MAX_OUTPUT_TOKENS if max_tokens is None else max_tokens
+        # هر فراخوانی حداکثر این تعداد تست‌کیس می‌گیرد؛ پاسخِ هر دسته مستقل از
+        # تعدادِ کلِ تست‌کیس‌ها زیرِ سقفِ توکن می‌ماند.
+        self._batch_size = DEFAULT_MAPPING_BATCH_SIZE if batch_size is None else batch_size
+        if self._batch_size < 1:
+            raise ValueError("batch_size must be at least 1.")
 
     def map_test_cases(
         self,
@@ -558,9 +591,21 @@ class ApiMappingAgent:
           * اگر چیزی کم کرده باشد و چند تست‌کیس با نامزدها قطعی نشده باشند،
             فقط همان‌ها یک بار دیگر در برابرِ کاتالوگِ کامل بررسی می‌شوند.
 
+        تست‌کیس‌ها به دسته‌های کوچک (``batch_size``) شکسته می‌شوند تا حجمِ
+        پاسخِ هر فراخوانی با تعدادِ کلِ تست‌کیس‌ها رشد نکند و از سقفِ توکنِ
+        خروجی رد نشود. نگاشت‌ها به ترتیبِ اصلی و بدونِ تکرار چسبانده می‌شوند؛
+        هیچ تست‌کیسی حذف نمی‌شود، چون اعتبارسنجیِ هر دسته حضورِ همه‌ی اعضای
+        همان دسته را الزام می‌کند.
+
         پس فیلتر هیچ تست‌کیسی را بی‌صدا رها نمی‌کند — بدترین حالتش یک فراخوانیِ
         دومیِ LLM برای همان تست‌کیس‌های حل‌نشده است.
         """
+        # ورودیِ خالی نباید «نتیجه‌ی خالیِ موفق» بدهد؛ در مسیرِ عادی
+        # extract_test_cases این را از قبل رد می‌کند و این بررسی همان قرارداد
+        # را برای فراخوانیِ مستقیم هم نگه می‌دارد.
+        if not test_cases:
+            raise ApiMappingError("No test case was provided for API mapping.")
+
         selection = select_candidates(test_cases, services)
         self._log.info(
             "فیلترِ قطعیِ ارتباطِ API",
@@ -569,6 +614,56 @@ class ApiMappingAgent:
             filtered=selection.filtered,
         )
 
+        batches = _batches(test_cases, self._batch_size)
+        self._log.info(
+            "نگاشت در دسته‌های محدود",
+            test_cases=len(test_cases),
+            batches=len(batches),
+            batch_size=self._batch_size,
+        )
+
+        mappings: list[ApiMapping] = []
+        clarifications: list[str] = []
+
+        for number, batch in enumerate(batches, start=1):
+            try:
+                batch_mappings, batch_clarifications = self._map_batch(
+                    batch, selection, services, user_id
+                )
+            except ApiMappingError as exc:
+                if len(batches) == 1:
+                    raise
+                first = (number - 1) * self._batch_size + 1
+                last = first + len(batch) - 1
+                raise ApiMappingError(
+                    f"{exc}\n\nMapping failed for test cases {first}-{last} of "
+                    f"{len(test_cases)} (batch {number} of {len(batches)}, "
+                    f"batch size {self._batch_size})."
+                ) from exc
+
+            mappings.extend(batch_mappings)
+            clarifications.extend(batch_clarifications)
+
+        # چسباندنِ دسته‌ها باید دقیقاً ترتیبِ ورودی را بدهد. این بررسی یک
+        # تورِ ایمنی است: هرگونه گم‌شدن/تکرار/جابه‌جایی پیش از بازگشت دیده شود.
+        expected = [_case_id(case) for case in test_cases]
+        actual = [mapping["test_case_id"] for mapping in mappings]
+        if actual != expected:
+            raise ApiMappingError(
+                "Internal error: batched mapping returned "
+                f"{len(actual)} mapping(s) for {len(expected)} test case(s), or "
+                "changed their order. No partial result can be used."
+            )
+        return mappings, clarifications
+
+    def _map_batch(
+        self,
+        test_cases: list[dict],
+        selection: RelevanceSelection,
+        services: list[DiscoveredService],
+        user_id: str,
+    ) -> tuple[list[ApiMapping], list[str]]:
+        """یک دسته را نگاشت می‌کند، با همان قاعده‌ی تلاشِ دومِ محدود."""
         mappings, clarifications = self._map_once(
             test_cases, selection.services, services, user_id
         )
@@ -645,6 +740,7 @@ class Step2ApiMappingGenerator:
         debug_config : تنظیماتِ لاگِ پروژه
         temperature  : دمای LLM — صفر، چون انتخابِ عملیات باید تکرارپذیر باشد
         max_tokens   : سقفِ توکنِ پاسخ (None یعنی مقدارِ مشترکِ LLM_MAX_OUTPUT_TOKENS)
+        batch_size   : حداکثر تست‌کیس در هر فراخوانیِ LLM (None یعنی مقدارِ پیش‌فرض)
         prompt_path  : مسیرِ فایلِ پرامپت (برای تست قابلِ جایگزینی است)
         session      : نشستِ HTTP برای دریافتِ سند (برای تست قابلِ جایگزینی است)
     """
@@ -658,6 +754,7 @@ class Step2ApiMappingGenerator:
         max_tokens: int | None = None,
         prompt_path: Path | str | None = None,
         session: Any = None,
+        batch_size: int | None = None,
     ) -> None:
         self._log = (debug_config or DebugConfig.off()).get_logger(self.name)
         self._discovery_session = session
@@ -666,6 +763,7 @@ class Step2ApiMappingGenerator:
             temperature=temperature,
             max_tokens=max_tokens,
             prompt_path=prompt_path,
+            batch_size=batch_size,
         )
 
     def generate(
@@ -746,6 +844,7 @@ class Step2ApiMappingGenerator:
 
 
 __all__ = [
+    "DEFAULT_MAPPING_BATCH_SIZE",
     "ApiMapping",
     "ApiMappingAgent",
     "ApiMappingError",

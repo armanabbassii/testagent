@@ -1,6 +1,7 @@
 """تست‌های تحلیل تسک و تولید تست‌کیس ساختاریافته (قدم اول جریان HITL)."""
 
 import json
+import re
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -13,13 +14,20 @@ from src.agents.test_case_generator.task_analysis import (
     REQUIRES_MAPPING,
     TaskAnalysisError,
     TaskAnalysisGenerator,
+    build_details_prompt,
+    build_plan_prompt,
     build_prompt,
     parse_analysis,
     render_prompt,
+    split_details_prompt,
+    split_plan_prompt,
     split_prompt,
     validate_analysis,
+    validate_details,
+    validate_plan,
 )
-from src.llm_client import LLMClient
+from src.config import LLM_MAX_OUTPUT_TOKENS
+from src.llm_client import FINISH_REASON_LENGTH, LLMClient, LLMResponse
 
 PROMPT_PATH = (
     Path(__file__).parents[3]
@@ -29,6 +37,9 @@ PROMPT_PATH = (
     / "prompts"
     / "step1_task_analysis.md"
 )
+
+PLAN_PROMPT_PATH = PROMPT_PATH.with_name("step1_task_plan.md")
+DETAILS_PROMPT_PATH = PROMPT_PATH.with_name("step1_test_case_details.md")
 
 
 def _case(**overrides) -> dict:
@@ -55,6 +66,54 @@ def _payload(**overrides) -> dict:
     }
     payload.update(overrides)
     return payload
+
+
+def _planned_case(index: int, **overrides) -> dict:
+    """یک تست‌کیس در «برنامه» — بدونِ جزئیاتِ اجرایی."""
+    case = {
+        "id": f"TC-{index:03d}",
+        "title": f"Scenario {index}",
+        "type": "positive" if index % 2 else "negative",
+        "priority": "high" if index <= 10 else "medium",
+        "related_service": {
+            "method": "POST",
+            "path": f"/admin/voucher/{index}",
+        },
+    }
+    case.update(overrides)
+    return case
+
+
+def _plan_payload(count: int, **overrides) -> dict:
+    payload = {
+        "task_summary": "Add percentage voucher creation.",
+        "identified_requirements": ["A voucher can be created with a percentage value."],
+        "test_cases": [_planned_case(index) for index in range(1, count + 1)],
+        "clarifications": ["Requires clarification: maximum percentage is not stated."],
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _details_payload(case_ids: list[str], **overrides) -> dict:
+    payload = {
+        "test_cases": [
+            {
+                "id": case_id,
+                "preconditions": [f"Precondition for {case_id}"],
+                "steps": [f"Step one for {case_id}", f"Step two for {case_id}"],
+                "expected_result": f"Expected result for {case_id}",
+            }
+            for case_id in case_ids
+        ]
+    }
+    payload.update(overrides)
+    return payload
+
+
+def _ids_in(message: str) -> list[str]:
+    """شناسه‌های تست‌کیس را از متنِ پیامِ کاربر بیرون می‌کشد."""
+    return re.findall(r'"id":\s*"(TC-\d+)"', message)
 
 
 # ── prompt ───────────────────────────────────────────────────────────────────
@@ -136,6 +195,62 @@ class TestBuildPrompt:
         assert "test cases" in system_prompt
         assert "Add percentage voucher creation" in user_message
         assert "POST /admin/voucher/percent" in user_message
+
+
+class TestStagedPrompts:
+    def test_the_plan_prompt_splits_and_excludes_details_fields(self):
+        text = PLAN_PROMPT_PATH.read_text(encoding="utf-8")
+        system_prompt, user_template = split_plan_prompt(text)
+
+        assert "TEST CASE PLAN" in system_prompt
+        assert "{{task_description}}" in user_template
+        assert "{{developed_services}}" in user_template
+        # مرحله‌ی برنامه نباید جزئیاتِ اجرایی بخواهد
+        assert '"steps"' not in system_prompt
+        assert '"expected_result"' not in system_prompt
+
+    def test_the_details_prompt_splits_with_its_own_placeholders(self):
+        text = DETAILS_PROMPT_PATH.read_text(encoding="utf-8")
+        system_prompt, user_template = split_details_prompt(text)
+
+        assert "TEST CASE DETAILS" in system_prompt
+        assert "{{task_description}}" in user_template
+        assert "{{test_case_plan}}" in user_template
+        # این مرحله سرویس‌ها را نمی‌گیرد؛ فقط برنامه را گسترش می‌دهد
+        assert "{{developed_services}}" not in user_template
+
+    def test_details_split_requires_the_plan_placeholder(self):
+        text = (
+            "Rules here.\n"
+            "==================================================\n"
+            "INPUT\n"
+            "==================================================\n"
+            "TASK DESCRIPTION:\n{{task_description}}\n"
+        )
+        with pytest.raises(TaskAnalysisError, match="test_case_plan"):
+            split_details_prompt(text)
+
+    def test_build_plan_prompt_renders_task_and_services(self):
+        system_prompt, user_message = build_plan_prompt(
+            PLAN_PROMPT_PATH, "Add a voucher", "POST /admin/voucher"
+        )
+
+        assert "Add a voucher" in user_message
+        assert "POST /admin/voucher" in user_message
+        assert "Add a voucher" not in system_prompt
+        assert "{{" not in user_message
+
+    def test_build_details_prompt_renders_the_planned_cases_as_json(self):
+        planned = [_planned_case(1), _planned_case(2)]
+        system_prompt, user_message = build_details_prompt(
+            DETAILS_PROMPT_PATH, "Add a voucher", planned
+        )
+
+        assert "Add a voucher" in user_message
+        assert "TC-001" in user_message and "TC-002" in user_message
+        assert '"title": "Scenario 1"' in user_message
+        assert "{{" not in user_message
+        assert "Add a voucher" not in system_prompt
 
 
 # ── اعتبارسنجی ───────────────────────────────────────────────────────────────
@@ -371,6 +486,118 @@ class TestParseAnalysis:
             parse_analysis(json.dumps(_payload(test_cases=[])))
 
 
+class TestValidatePlan:
+    def test_a_complete_plan_passes(self):
+        plan = validate_plan(_plan_payload(3))
+
+        assert plan["task_summary"] == "Add percentage voucher creation."
+        assert [case["id"] for case in plan["test_cases"]] == [
+            "TC-001",
+            "TC-002",
+            "TC-003",
+        ]
+        assert plan["clarifications"]
+
+    def test_details_fields_are_not_required(self):
+        plan = validate_plan(_plan_payload(1))
+        assert set(plan["test_cases"][0]) == {
+            "id",
+            "title",
+            "type",
+            "priority",
+            "related_service",
+        }
+
+    def test_ids_must_be_unique(self):
+        payload = _plan_payload(
+            2, test_cases=[_planned_case(1), _planned_case(1, title="Another")]
+        )
+        with pytest.raises(TaskAnalysisError, match="duplicate test case id 'TC-001'"):
+            validate_plan(payload)
+
+    def test_an_empty_plan_is_rejected(self):
+        with pytest.raises(TaskAnalysisError, match="'test_cases' must be a non-empty array"):
+            validate_plan(_plan_payload(0))
+
+    def test_invalid_type_is_rejected(self):
+        with pytest.raises(TaskAnalysisError, match="'type' must be one of"):
+            validate_plan(_plan_payload(1, test_cases=[_planned_case(1, type="smoke")]))
+
+    def test_missing_related_service_becomes_requires_mapping(self):
+        case = _planned_case(1)
+        del case["related_service"]
+        plan = validate_plan(_plan_payload(1, test_cases=[case]))
+
+        service = plan["test_cases"][0]["related_service"]
+        assert service["method"] == REQUIRES_MAPPING
+        assert service["path"] == REQUIRES_MAPPING
+
+    def test_error_names_the_plan_contract(self):
+        with pytest.raises(TaskAnalysisError, match="test case plan format"):
+            validate_plan(_plan_payload(1, task_summary=""))
+
+
+class TestValidateDetails:
+    def _planned(self, count: int):
+        return validate_plan(_plan_payload(count))["test_cases"]
+
+    def test_details_are_returned_in_plan_order(self):
+        planned = self._planned(3)
+        details = validate_details(
+            _details_payload(["TC-003", "TC-001", "TC-002"]), planned
+        )
+
+        assert [detail["id"] for detail in details] == ["TC-001", "TC-002", "TC-003"]
+        assert details[0]["steps"] == [
+            "Step one for TC-001",
+            "Step two for TC-001",
+        ]
+
+    def test_a_missing_planned_case_is_rejected(self):
+        planned = self._planned(3)
+        with pytest.raises(TaskAnalysisError, match="missing details"):
+            validate_details(_details_payload(["TC-001", "TC-003"]), planned)
+
+    def test_an_unknown_case_is_rejected(self):
+        planned = self._planned(2)
+        with pytest.raises(TaskAnalysisError, match="not in the planned test cases"):
+            validate_details(_details_payload(["TC-001", "TC-002", "TC-999"]), planned)
+
+    def test_a_duplicate_case_is_rejected(self):
+        planned = self._planned(2)
+        with pytest.raises(TaskAnalysisError, match="duplicate detail"):
+            validate_details(_details_payload(["TC-001", "TC-001", "TC-002"]), planned)
+
+    def test_a_missing_id_is_rejected(self):
+        planned = self._planned(1)
+        payload = _details_payload(["TC-001"])
+        payload["test_cases"][0]["id"] = ""
+        with pytest.raises(TaskAnalysisError, match="'id' is missing"):
+            validate_details(payload, planned)
+
+    def test_empty_steps_are_rejected(self):
+        planned = self._planned(1)
+        payload = _details_payload(["TC-001"])
+        payload["test_cases"][0]["steps"] = []
+        with pytest.raises(TaskAnalysisError, match=r"steps: must contain at least one"):
+            validate_details(payload, planned)
+
+    def test_missing_expected_result_is_rejected(self):
+        planned = self._planned(1)
+        payload = _details_payload(["TC-001"])
+        payload["test_cases"][0]["expected_result"] = "  "
+        with pytest.raises(TaskAnalysisError, match="'expected_result' is missing"):
+            validate_details(payload, planned)
+
+    def test_preconditions_are_optional(self):
+        planned = self._planned(1)
+        payload = _details_payload(["TC-001"])
+        del payload["test_cases"][0]["preconditions"]
+
+        details = validate_details(payload, planned)
+        assert details[0]["preconditions"] == []
+
+
 # ── تولیدکننده ───────────────────────────────────────────────────────────────
 
 class TestTaskAnalysisGenerator:
@@ -478,6 +705,188 @@ class TestTaskAnalysisGenerator:
         text = json.dumps(result)
         assert "postman" not in text.lower()
         assert "swagger" not in text.lower()
+
+
+class TestStagedGeneration:
+    """مسیرِ جایگزین وقتی پاسخِ یک‌مرحله‌ای به سقفِ توکن می‌خورد."""
+
+    _PATCH = "src.agents.test_case_generator.task_analysis.LLMClient"
+
+    def _truncated(self, text: str = '{"task_summary": "Add percent') -> LLMResponse:
+        return LLMResponse(
+            text,
+            finish_reason=FINISH_REASON_LENGTH,
+            prompt_tokens=1000,
+            completion_tokens=LLM_MAX_OUTPUT_TOKENS,
+            max_tokens=LLM_MAX_OUTPUT_TOKENS,
+        )
+
+    def _run(self, respond, *, batch_size=None, task_description="Add vouchers"):
+        with patch(self._PATCH) as mock_cls:
+            mock_cls.return_value.chat.side_effect = respond
+            result = TaskAnalysisGenerator(batch_size=batch_size).generate(
+                task_description, "user-1"
+            )
+        return result, mock_cls.return_value.chat
+
+    def test_a_truncated_response_is_expanded_in_ordered_batches(self):
+        calls = []
+
+        def respond(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return self._truncated()
+            if len(calls) == 2:
+                return json.dumps(_plan_payload(20))
+            return json.dumps(_details_payload(_ids_in(kwargs["user_message"])))
+
+        result, chat = self._run(respond)
+
+        # ۱ پاسخِ بریده + ۱ برنامه + ۳ دسته‌ی گسترش (۸، ۸، ۴)
+        assert chat.call_count == 5
+        assert [len(_ids_in(call["user_message"])) for call in calls[2:]] == [8, 8, 4]
+        assert [case["id"] for case in result["test_cases"]] == [
+            f"TC-{index:03d}" for index in range(1, 21)
+        ]
+        assert all(
+            call["max_tokens"] == LLM_MAX_OUTPUT_TOKENS
+            and call["temperature"] == 0.1
+            for call in calls
+        )
+
+    def test_plan_fields_and_details_are_merged_without_loss(self):
+        calls = []
+
+        def respond(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return self._truncated()
+            if len(calls) == 2:
+                return json.dumps(_plan_payload(3))
+            return json.dumps(_details_payload(_ids_in(kwargs["user_message"])))
+
+        result, _ = self._run(respond)
+
+        assert result["task_summary"] == "Add percentage voucher creation."
+        assert result["identified_requirements"] == [
+            "A voucher can be created with a percentage value."
+        ]
+        assert result["clarifications"] == [
+            "Requires clarification: maximum percentage is not stated."
+        ]
+
+        first = result["test_cases"][0]
+        # از برنامه
+        assert first["id"] == "TC-001"
+        assert first["title"] == "Scenario 1"
+        assert first["type"] == "positive"
+        assert first["priority"] == "high"
+        assert first["related_service"] == {
+            "method": "POST",
+            "path": "/admin/voucher/1",
+        }
+        # از مرحله‌ی گسترش
+        assert first["preconditions"] == ["Precondition for TC-001"]
+        assert first["steps"] == [
+            "Step one for TC-001",
+            "Step two for TC-001",
+        ]
+        assert first["expected_result"] == "Expected result for TC-001"
+
+    def test_the_configured_batch_size_is_used(self):
+        calls = []
+
+        def respond(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return self._truncated()
+            if len(calls) == 2:
+                return json.dumps(_plan_payload(7))
+            return json.dumps(_details_payload(_ids_in(kwargs["user_message"])))
+
+        result, _ = self._run(respond, batch_size=3)
+
+        assert [len(_ids_in(call["user_message"])) for call in calls[2:]] == [3, 3, 1]
+        assert [case["id"] for case in result["test_cases"]] == [
+            f"TC-{index:03d}" for index in range(1, 8)
+        ]
+
+    def test_batch_size_must_be_positive(self):
+        with pytest.raises(ValueError, match="batch_size must be at least 1"):
+            TaskAnalysisGenerator(batch_size=0)
+
+    def test_a_truncated_expansion_batch_reports_its_range(self):
+        calls = []
+
+        def respond(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return self._truncated()
+            if len(calls) == 2:
+                return json.dumps(_plan_payload(20))
+            if len(calls) == 3:
+                return json.dumps(_details_payload(_ids_in(kwargs["user_message"])))
+            return self._truncated('{"test_cases": [{"id": "TC-009"')
+
+        with pytest.raises(TaskAnalysisError) as excinfo:
+            self._run(respond, batch_size=8)
+
+        message = str(excinfo.value)
+        assert "output token limit" in message
+        # بریدگی نباید به‌عنوان «JSON نامعتبر» گزارش شود
+        assert "invalid JSON" not in message
+        assert "planned test cases 9-16 of 20" in message
+        assert "batch 2 of 3" in message
+
+    def test_a_truncated_plan_is_reported_explicitly(self):
+        def respond(**kwargs):
+            return self._truncated()
+
+        with pytest.raises(TaskAnalysisError) as excinfo:
+            self._run(respond)
+
+        message = str(excinfo.value)
+        assert "truncated because it reached the output token limit" in message
+        assert "A staged generation was attempted" in message
+        assert "compact test case plan also reached the output token limit" in message
+        assert "No partial test case list was used" in message
+
+    def test_a_truncated_response_is_never_accepted_even_if_it_is_valid_json(self):
+        leaked = json.dumps(
+            _payload(test_cases=[_case(id="LEAK-1", title="Leaked case")])
+        )
+        calls = []
+
+        def respond(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return self._truncated(leaked)
+            if len(calls) == 2:
+                return json.dumps(_plan_payload(2))
+            return json.dumps(_details_payload(_ids_in(kwargs["user_message"])))
+
+        result, _ = self._run(respond)
+
+        assert [case["id"] for case in result["test_cases"]] == ["TC-001", "TC-002"]
+
+    def test_a_malformed_plan_with_a_normal_finish_reason_is_a_json_error(self):
+        calls = []
+
+        def respond(**kwargs):
+            calls.append(kwargs)
+            if len(calls) == 1:
+                return self._truncated()
+            return "I cannot produce the plan."
+
+        with pytest.raises(TaskAnalysisError, match="did not return JSON"):
+            self._run(respond)
+
+    def test_a_complete_response_still_uses_a_single_call(self):
+        with patch(self._PATCH) as mock_cls:
+            mock_cls.return_value.chat.return_value = json.dumps(_payload())
+            TaskAnalysisGenerator().generate("Add something", "user-1")
+
+        assert mock_cls.return_value.chat.call_count == 1
 
 
 # ── قراردادِ بازگشتیِ LLMClient.chat() ────────────────────────────────────────
