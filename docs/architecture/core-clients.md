@@ -95,6 +95,10 @@ LLM_BASE_URL=http://localhost:11434/v1
 LLM_MODEL=llama3.2
 LLM_API_KEY=ollama
 
+# اختیاری — پیش‌فرض true. فقط برای عیب‌یابیِ موقت false شود؛
+# با false، ترافیکِ LLM در برابر man-in-the-middle محافظت نمی‌شود.
+# LLM_SSL_VERIFY=true
+
 # Embedding
 EMBEDDING_BASE_URL=http://localhost:11434/v1
 EMBEDDING_MODEL=nomic-embed-text
@@ -103,6 +107,11 @@ EMBEDDING_API_KEY=ollama
 # هدر ثابت (user_id از کد می‌آید)
 CLIENT_ID=my-client-id
 ```
+
+`LLM_BASE_URL` باید base URLِ APIِ سازگار با OpenAI باشد (معمولاً با پیشوندِ
+`/v1`)، نه ریشه‌ی دامنه یا آدرسِ داشبورد. OpenAI SDK خودش `/chat/completions`
+را به این مقدار می‌چسباند؛ اگر ریشه‌ی یک فرانت‌اند باشد، پاسخِ HTML 404
+برمی‌گردد.
 
 ## هدرهای HTTP
 

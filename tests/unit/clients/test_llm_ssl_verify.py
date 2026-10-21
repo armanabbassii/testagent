@@ -9,11 +9,14 @@ from __future__ import annotations
 
 import importlib
 import os
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
+import httpx
 import pytest
+from openai import NotFoundError, OpenAI
 
 from src import config as config_module
+from src.config import LLM_BASE_URL
 from src.llm_client import LLMClient, _make_http_client
 
 _ENV_KEY = "LLM_SSL_VERIFY"
@@ -130,3 +133,114 @@ class TestEmbeddingIsUnaffected:
             EmbeddingClient(user_id="user-2")
 
         assert client_cls.call_args.kwargs.get("verify", True) is True
+
+
+def _chat_completion_payload() -> dict:
+    return {
+        "id": "chatcmpl-test",
+        "object": "chat.completion",
+        "created": 0,
+        "model": "test-model",
+        "choices": [
+            {
+                "index": 0,
+                "message": {"role": "assistant", "content": "ok"},
+                "finish_reason": "stop",
+            }
+        ],
+    }
+
+
+def _openai_with_transport(base_url: str, handler) -> OpenAI:
+    """OpenAI واقعی با transport ماک — هیچ درخواستِ شبکه‌ای انجام نمی‌شود."""
+    return OpenAI(
+        base_url=base_url,
+        api_key="test-key",
+        http_client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+
+class TestVerifyDoesNotChangeTheRequestUrl:
+    """``LLM_SSL_VERIFY`` فقط TLS را عوض می‌کند؛ URL را نه.
+
+    خطای HTML 404 از «Token Usage Dashboard» در واقع نشان می‌داد
+    ``LLM_BASE_URL`` پیشوندِ API (``/v1``) را ندارد: OpenAI SDK همیشه
+    ``/chat/completions`` را به همان base URL می‌چسباند. خاموش‌کردنِ تأییدِ
+    گواهی فقط اجازه داد درخواست از مرحله‌ی TLS رد شود و آن 404 دیده شود.
+    """
+
+    @pytest.mark.parametrize("verify", [True, False])
+    def test_verify_does_not_change_the_final_request_url(self, monkeypatch, verify):
+        monkeypatch.setattr("src.llm_client.LLM_SSL_VERIFY", verify)
+        seen_verify = []
+        seen_url = {}
+
+        def handler(request):
+            seen_url["url"] = str(request.url)
+            return httpx.Response(200, json=_chat_completion_payload())
+
+        def make_client(user_id, *, verify=True):
+            seen_verify.append(verify)
+            return httpx.Client(transport=httpx.MockTransport(handler))
+
+        with patch("src.llm_client.obs", MagicMock(enabled=False)), patch(
+            "src.llm_client._make_http_client", side_effect=make_client
+        ):
+            client = LLMClient(user_id="user-1", agent_name="test")
+            raw = client.chat(user_message="hi", system_prompt="sys")
+
+        assert seen_verify == [verify]
+        assert seen_url["url"] == LLM_BASE_URL.rstrip("/") + "/chat/completions"
+        assert raw == "ok"
+
+    @pytest.mark.parametrize(
+        ("base_url", "expected"),
+        [
+            (
+                "https://aifa-chatbot.dev.dotin.ir/",
+                "https://aifa-chatbot.dev.dotin.ir/chat/completions",
+            ),
+            (
+                "https://aifa-chatbot.dev.dotin.ir/v1",
+                "https://aifa-chatbot.dev.dotin.ir/v1/chat/completions",
+            ),
+        ],
+    )
+    def test_the_base_url_alone_decides_the_api_path(self, base_url, expected):
+        urls = []
+
+        def handler(request):
+            urls.append(str(request.url))
+            return httpx.Response(200, json=_chat_completion_payload())
+
+        client = _openai_with_transport(base_url, handler)
+        client.chat.completions.create(
+            model="developer-model",
+            messages=[{"role": "user", "content": "hi"}],
+        )
+
+        assert urls == [expected]
+
+    def test_an_html_404_is_surfaced_as_not_found_error(self):
+        """توضیحِ مشاهده: بدنه‌ی HTML همان چیزی است که در پیامِ خطا دیده شد."""
+        html = (
+            "<!DOCTYPE html><html><head>"
+            "<title>Token Usage Dashboard</title>"
+            "</head></html>"
+        )
+
+        def handler(request):
+            return httpx.Response(
+                404, headers={"content-type": "text/html"}, text=html
+            )
+
+        client = _openai_with_transport("https://aifa-chatbot.dev.dotin.ir/", handler)
+
+        with pytest.raises(NotFoundError) as excinfo:
+            client.chat.completions.create(
+                model="developer-model",
+                messages=[{"role": "user", "content": "hi"}],
+            )
+
+        assert "Token Usage Dashboard" in str(excinfo.value)
+
