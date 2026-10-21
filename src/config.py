@@ -21,10 +21,36 @@ def _require(key: str, default: str | None = None) -> str:
 
     return value
 
+
+def _env_bool(key: str, default: bool) -> bool:
+    """خواندنِ سخت‌گیرانه‌ی یک بولین از محیط.
+
+    مقدارِ نبوده/خالی ``default`` را برمی‌گرداند. مقدارِ ناشناخته خطاست تا
+    هرگز به «خاموش» تعبیر نشود — این برای امنیتِ SSL مهم است: یک غلطِ تایپی
+    نباید بی‌صدا تأییدِ گواهی را خاموش کند.
+    """
+    raw = os.getenv(key)
+    if raw is None or not raw.strip():
+        return default
+    value = raw.strip().lower()
+    if value in ("true", "1", "yes"):
+        return True
+    if value in ("false", "0", "no"):
+        return False
+    raise ValueError(
+        f"Invalid boolean value for '{key}': {raw!r} — use true or false."
+    )
+
 # ── LLM ──────────────────────────────────────────────────────────────────────
 LLM_BASE_URL: str = _require("LLM_BASE_URL")
 LLM_MODEL: str = _require("LLM_MODEL")
 LLM_API_KEY: str = _require("LLM_API_KEY")
+
+# تأییدِ گواهیِ SSL فقط برای درخواست‌های LLM.
+# پیش‌فرض true است تا رفتارِ قبلی دست‌نخورده بماند. اگر صریحاً false شود،
+# ترافیکِ LLM در برابر حمله‌ی man-in-the-middle محافظت نمی‌شود و این فقط
+# یک راهِ عیب‌یابیِ موقت است. Embedding از این تنظیم اثر نمی‌گیرد.
+LLM_SSL_VERIFY: bool = _env_bool("LLM_SSL_VERIFY", default=True)
 
 # سقفِ توکنِ خروجی — یک مقدارِ مشترک برای همه‌ی قدم‌های جریانِ test_case_generator
 # تا هر generator عددِ سرخودِ خودش را نداشته باشد.

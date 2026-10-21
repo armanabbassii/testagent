@@ -5,7 +5,7 @@ llm_client.py — کلاینت برای ارتباط با LLM لوکال (OpenAI
 import uuid
 import httpx
 from openai import OpenAI
-from src.config import LLM_BASE_URL, LLM_MODEL, LLM_API_KEY, CLIENT_ID
+from src.config import LLM_BASE_URL, LLM_MODEL, LLM_API_KEY, LLM_SSL_VERIFY, CLIENT_ID
 from src.observability.observability import Observability
 from src.token_usage import report_usage
 
@@ -113,18 +113,23 @@ def _to_response(response: object, max_tokens: int) -> LLMResponse:
     )
 
 
-def _make_http_client(user_id: str) -> httpx.Client:
+def _make_http_client(user_id: str, *, verify: bool = True) -> httpx.Client:
     """یک httpx client با هدرهای مورد نیاز سرویس می‌سازد.
     - x-client-id  : ثابت، از .env
     - x-user-id    : از کد فراخوان پاس می‌شود
     - x-request-id : هر بار UUID تازه تولید می‌شود
+
+    ``verify`` پیش‌فرض ``True`` است تا فراخوان‌های موجود بدونِ تغییر همان
+    رفتارِ قبلی را داشته باشند. فقط ``LLMClient`` آن را از ``LLM_SSL_VERIFY``
+    مقدار می‌دهد؛ Embedding از کارخانه‌ی جداگانه‌ی خودش استفاده می‌کند.
     """
     return httpx.Client(
         headers={
             "x-client-id": CLIENT_ID,
             "x-user-id": user_id,
             "x-request-id": str(uuid.uuid4()),
-        }
+        },
+        verify=verify,
     )
 
 
@@ -133,7 +138,7 @@ class LLMClient:
         self._client = OpenAI(
             base_url=LLM_BASE_URL,
             api_key=LLM_API_KEY,
-            http_client=_make_http_client(user_id),
+            http_client=_make_http_client(user_id, verify=LLM_SSL_VERIFY),
         )
         self.model = LLM_MODEL
         self.agent_name = agent_name
