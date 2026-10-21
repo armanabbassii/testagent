@@ -1,9 +1,9 @@
 """پیامِ خطا وقتی endpointِ LLM به‌جای JSON، HTML برمی‌گرداند.
 
-مشاهده‌ی واقعی: ``LLM_BASE_URL`` پیشوندِ API را نداشت، OpenAI SDK مسیرِ
-``/chat/completions`` را به همان base URL چسباند و فرانت‌اندِ Next.js با
-HTML 404 پاسخ داد. انتظار: نوعِ خطا (``NotFoundError``) و بدنه‌ی اصلی حفظ
-شود، ولی پیام کوتاه، بدونِ HTML و بدونِ credentials باشد.
+مشاهده‌ی واقعی: OpenAI SDK مسیرِ ``/chat/completions`` را به base URL
+چسباند و سرویسِ مقصد به‌جای JSON، صفحه‌ی HTML برگرداند. انتظار: نوعِ خطا
+(``NotFoundError``) و بدنه‌ی اصلی حفظ شود، ولی پیام کوتاه، بدونِ HTML و
+بدونِ credentials باشد.
 """
 
 from __future__ import annotations

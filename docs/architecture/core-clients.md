@@ -108,14 +108,15 @@ EMBEDDING_API_KEY=ollama
 CLIENT_ID=my-client-id
 ```
 
-`LLM_BASE_URL` باید base URLِ APIِ سازگار با OpenAI باشد (معمولاً با پیشوندِ
-`/v1`)، نه ریشه‌ی دامنه یا آدرسِ داشبورد. OpenAI SDK خودش `/chat/completions`
-را به این مقدار می‌چسباند؛ اگر ریشه‌ی یک فرانت‌اند باشد، پاسخِ HTML 404
-برمی‌گردد.
+OpenAI SDK مسیرِ `/chat/completions` را خودش به `LLM_BASE_URL` می‌چسباند و
+`LLMClient` این مقدار را بدونِ تغییر به SDK می‌دهد (بدونِ نرمال‌سازی یا
+افزودنِ پیشوند). اگر سرویسِ مقصد این مسیر را به APIِ سازگار با OpenAI
+مسیردهی نکند، پاسخِ HTML (مثلاً 404) می‌آید؛ این یک موضوعِ routingِ سرویسِ
+مقصد است، نه تغییرِ URL توسطِ این کلاینت.
 
-اگر با این حال پاسخِ HTML برگردد، `LLMClient` همان نوعِ خطای OpenAI (مثلاً
+اگر پاسخِ HTML برگردد، `LLMClient` همان نوعِ خطای OpenAI (مثلاً
 `NotFoundError`) را با پیامی کوتاه شاملِ وضعیت، URLِ نهایی (بدونِ
-credentials/query) و راهنمای بررسیِ `LLM_BASE_URL` بالا می‌فرستد. بدنه‌ی اصلی
+credentials/query) و مسیرِ درخواست بالا می‌فرستد. بدنه‌ی اصلی
 در `exc.body` و استثنای اصلی در `exc.__cause__` باقی می‌ماند.
 
 ## هدرهای HTTP
