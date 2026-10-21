@@ -3,8 +3,10 @@ llm_client.py — کلاینت برای ارتباط با LLM لوکال (OpenAI
 """
 
 import uuid
+from urllib.parse import urlsplit, urlunsplit
+
 import httpx
-from openai import OpenAI
+from openai import APIStatusError, OpenAI
 from src.config import LLM_BASE_URL, LLM_MODEL, LLM_API_KEY, LLM_SSL_VERIFY, CLIENT_ID
 from src.observability.observability import Observability
 from src.token_usage import report_usage
@@ -133,6 +135,54 @@ def _make_http_client(user_id: str, *, verify: bool = True) -> httpx.Client:
     )
 
 
+def _redacted_url(url: str) -> str:
+    """URLِ امن برای پیامِ خطا: بدونِ userinfo، query و fragment."""
+    parts = urlsplit(url)
+    host = parts.hostname or ""
+    if parts.port is not None:
+        host = f"{host}:{parts.port}"
+    return urlunsplit((parts.scheme, host, parts.path, "", ""))
+
+
+def _actionable_html_error(exc: APIStatusError) -> APIStatusError | None:
+    """اگر پاسخِ خطا HTML بود، همان نوعِ خطا را با پیامی کوتاه و قابلِ‌اقدام برمی‌گرداند.
+
+    ریشه‌ی مشاهده‌شده: ``LLM_BASE_URL`` بدونِ پیشوندِ API بود و OpenAI SDK
+    مسیرِ ``/chat/completions`` را به همان base URL چسباند؛ فرانت‌اندِ Next.js
+    با HTML 404 پاسخ داد و بدنه‌ی HTML به‌صورتِ خام در پیامِ خطا ظاهر شد. اینجا
+    نوعِ خطا (مثلاً ``NotFoundError``) و بدنه‌ی اصلی در ``body``/``__cause__``
+    حفظ می‌شود، ولی پیام کوتاه و بدونِ HTML است تا علت قابلِ‌تشخیص باشد.
+    """
+    response = getattr(exc, "response", None)
+    if response is None:
+        return None
+
+    content_type = (response.headers.get("content-type") or "").lower()
+    if not content_type.startswith("text/html"):
+        return None
+
+    request = getattr(exc, "request", None)
+    method = getattr(request, "method", "POST")
+    request_id = request.headers.get("x-request-id", "") if request is not None else ""
+    suffix = f" (x-request-id: {request_id})" if request_id else ""
+    body_length = len(exc.body) if isinstance(exc.body, str) else 0
+    message = (
+        f"LLM endpoint returned HTTP {exc.status_code} with content-type 'text/html' "
+        f"for {method} {_redacted_url(str(response.url))}{suffix}. "
+        "The endpoint answered with an HTML page instead of an OpenAI-compatible "
+        "JSON response, so LLM_BASE_URL most likely points to a web UI or a gateway "
+        "root rather than the API base. The OpenAI SDK appends '/chat/completions' "
+        "to LLM_BASE_URL, so the base must include the service's API prefix "
+        "(for example '/v1') when the service requires one. No endpoint was changed "
+        f"automatically. The original HTML body ({body_length} characters) was omitted."
+    )
+
+    try:
+        return type(exc)(message, response=response, body=exc.body)
+    except TypeError:  # pragma: no cover - امضای متفاوت در نسخه‌های دیگرِ SDK
+        return None
+
+
 class LLMClient:
     def __init__(self, user_id: str, agent_name: str) -> None:
         self._client = OpenAI(
@@ -142,6 +192,21 @@ class LLMClient:
         )
         self.model = LLM_MODEL
         self.agent_name = agent_name
+
+    def _create_completion(self, **kwargs):
+        """تنها مسیرِ فراخوانیِ chat completions در این کلاس.
+
+        خطاهای HTTPِ دارای بدنه‌ی HTML با پیامِ کوتاه و قابلِ‌اقدام دوباره پرتاب
+        می‌شوند (نوعِ خطا و بدنه‌ی اصلی حفظ می‌شود). سایرِ خطاها دست‌نخورده
+        بالا می‌روند.
+        """
+        try:
+            return self._client.chat.completions.create(**kwargs)
+        except APIStatusError as exc:
+            improved = _actionable_html_error(exc)
+            if improved is None:
+                raise
+            raise improved from exc
 
     def chat(self, user_message: str, system_prompt: str = "You are a helpful assistant.", temperature: float = 0.7, max_tokens: int = 1024) -> LLMResponse:
         """یک پیام ساده به مدل می‌فرستد و پاسخ متنی برمی‌گرداند.
@@ -162,7 +227,7 @@ class LLMClient:
         return self._chat_raw(user_message, system_prompt, temperature, max_tokens)
 
     def _chat_raw(self, user_message, system_prompt, temperature, max_tokens) -> LLMResponse:
-        response = self._client.chat.completions.create(
+        response = self._create_completion(
             model=self.model,
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -184,7 +249,7 @@ class LLMClient:
             input={"system": system_prompt, "user": user_message},
             model_parameters={"temperature": temperature, "max_tokens": max_tokens},
         ) as gen:
-            response = self._client.chat.completions.create(
+            response = self._create_completion(
                 model=self.model,
                 messages=[
                     {"role": "system", "content": system_prompt},
@@ -220,7 +285,7 @@ class LLMClient:
         max_tokens: int = 1024,
     ):
         """پاسخ را به صورت streaming (chunk به chunk) برمی‌گرداند."""
-        stream = self._client.chat.completions.create(
+        stream = self._create_completion(
             model=self.model,
             messages=[
                 {"role": "system", "content": system_prompt},
