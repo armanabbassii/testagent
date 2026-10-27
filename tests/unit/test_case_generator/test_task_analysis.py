@@ -11,6 +11,12 @@ from openai.types.chat import ChatCompletion
 from openai.types.chat.chat_completion import Choice
 from openai.types.chat.chat_completion_message import ChatCompletionMessage
 
+from src.agents.test_case_generator.auth_intent import (
+    AUTH_INTENT_AUTHENTICATED,
+    AUTH_INTENT_INHERIT,
+    AUTH_INTENT_INVALID,
+    AUTH_INTENT_UNAUTHENTICATED,
+)
 from src.agents.test_case_generator.task_analysis import (
     REQUIRES_MAPPING,
     TaskAnalysisError,
@@ -466,6 +472,69 @@ class TestDuplicates:
         assert len(result["test_cases"]) == 2
 
 
+class TestAuthIntent:
+    def test_missing_auth_intent_defaults_to_inherit(self):
+        result = validate_analysis(_payload(test_cases=[_case()]))
+
+        assert result["test_cases"][0]["auth_intent"] == AUTH_INTENT_INHERIT
+
+    @pytest.mark.parametrize(
+        "intent",
+        [
+            AUTH_INTENT_INHERIT,
+            AUTH_INTENT_AUTHENTICATED,
+            AUTH_INTENT_UNAUTHENTICATED,
+            AUTH_INTENT_INVALID,
+        ],
+    )
+    def test_canonical_auth_intents_are_preserved(self, intent):
+        result = validate_analysis(_payload(test_cases=[_case(auth_intent=intent)]))
+
+        assert result["test_cases"][0]["auth_intent"] == intent
+
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("valid_token", AUTH_INTENT_AUTHENTICATED),
+            ("authorized", AUTH_INTENT_AUTHENTICATED),
+            ("no_auth", AUTH_INTENT_UNAUTHENTICATED),
+            ("missing credentials", AUTH_INTENT_UNAUTHENTICATED),
+            ("expired_token", AUTH_INTENT_INVALID),
+            ("invalid token", AUTH_INTENT_INVALID),
+            ("default", AUTH_INTENT_INHERIT),
+            ("not_required", AUTH_INTENT_INHERIT),
+        ],
+    )
+    def test_aliases_are_normalized(self, raw, expected):
+        result = validate_analysis(_payload(test_cases=[_case(auth_intent=raw)]))
+
+        assert result["test_cases"][0]["auth_intent"] == expected
+
+    def test_an_unknown_auth_intent_is_rejected(self):
+        with pytest.raises(TaskAnalysisError, match="auth_intent must be one of"):
+            validate_analysis(_payload(test_cases=[_case(auth_intent="sometimes")]))
+
+    def test_a_non_string_auth_intent_is_rejected(self):
+        with pytest.raises(TaskAnalysisError, match="auth_intent must be a string"):
+            validate_analysis(_payload(test_cases=[_case(auth_intent=1)]))
+
+    def test_the_plan_carries_auth_intent_to_the_final_result(self):
+        planned = _planned_case(1, auth_intent=AUTH_INTENT_INVALID)
+        plan = validate_plan(_plan_payload(1, test_cases=[planned]))
+
+        assert plan["test_cases"][0]["auth_intent"] == AUTH_INTENT_INVALID
+
+    def test_cases_for_the_same_endpoint_with_different_intents_are_kept(self):
+        cases = [
+            _case(id="TC-001", auth_intent=AUTH_INTENT_AUTHENTICATED),
+            _case(id="TC-002", auth_intent=AUTH_INTENT_UNAUTHENTICATED),
+        ]
+
+        result = validate_analysis(_payload(test_cases=cases))
+
+        assert [case["id"] for case in result["test_cases"]] == ["TC-001", "TC-002"]
+
+
 class TestParseAnalysis:
     def test_parses_plain_json(self):
         result = parse_analysis(json.dumps(_payload()))
@@ -508,6 +577,7 @@ class TestValidatePlan:
             "type",
             "priority",
             "related_service",
+            "auth_intent",
         }
 
     def test_ids_must_be_unique(self):
@@ -786,7 +856,10 @@ class TestStagedGeneration:
         assert first["related_service"] == {
             "method": "POST",
             "path": "/admin/voucher/1",
+            "service": "",
         }
+        # قصدِ احراز هویت هم از برنامه می‌آید و در ادغام گم نمی‌شود.
+        assert first["auth_intent"] == AUTH_INTENT_INHERIT
         # از مرحله‌ی گسترش
         assert first["preconditions"] == ["Precondition for TC-001"]
         assert first["steps"] == [

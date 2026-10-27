@@ -34,8 +34,10 @@ from src.agents.test_case_generator.swagger_analyzer import (
 
 # قراردادِ احراز هویتِ شناخته‌شده‌ی پروژه. توکنِ واقعی هرگز اینجا ساخته نمی‌شود
 # و هیچ درخواستی با آن ارسال نمی‌شود — فقط برای ساختِ Postman در قدمِ بعد.
-AUTHORIZATION_HEADER = "Authorization"
-AUTHORIZATION_VALUE = "Bearer {{token}}"
+# مقدار عمداً خودِ متغیر است (بدونِ «Bearer »):Tokenِ محیطِ Postman ممکن است
+# از قبل شاملِ پیشوند باشد، و قراردادِ این جریان دقیقاً ``{{token}}`` است.
+AUTHORIZATION_HEADER = "authorization"
+AUTHORIZATION_VALUE = "{{token}}"
 
 # نامِ پارامترِ مسیر به شکلِ {name} — برای تطبیقِ مسیرها بدونِ وابستگی به نام
 _PATH_PLACEHOLDER_RE = re.compile(r"\{[^{}]*\}")
@@ -75,6 +77,9 @@ class DiscoveredApi:
             "parameters": list(self.parameters),
             "request_body": self.request_body,
             "responses": dict(self.responses),
+            # تصمیمِ auth در سطحِ همان عملیات می‌ماند؛ یک سرویس می‌تواند
+            # عملیاتِ عمومی و محافظت‌شده را هم‌زمان داشته باشد.
+            "requires_auth": self.requires_auth,
         }
 
 

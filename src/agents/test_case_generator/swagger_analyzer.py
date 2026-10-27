@@ -27,6 +27,11 @@ _HTTP_METHODS = ("get", "post", "put", "delete", "patch", "head", "options", "tr
 # محل‌های استانداردی که یک اپلیکیشن springdoc/OpenAPI ممکن است spec را در آن سِرو کند
 _SPEC_CANDIDATES = ("/v3/api-docs", "/v2/api-docs", "/openapi.json", "/swagger.json")
 
+AUTH_CONTRACT_REQUIRED = "required"
+AUTH_CONTRACT_OPTIONAL = "optional"
+AUTH_CONTRACT_PUBLIC = "public"
+AUTH_CONTRACT_UNKNOWN = "unknown"
+
 # پارامترِ مسیر به شکلِ {name} — برای مقایسه‌ی مسیرها بدونِ وابستگی به نامِ پارامتر
 _PATH_PLACEHOLDER_RE = re.compile(r"\{[^{}]*\}")
 
@@ -62,7 +67,12 @@ class EndpointSpec:
     success_status: int = 200                    # اولین کد 2xx تعریف‌شده
     error_statuses: list[int] = field(default_factory=list)
     response_fields: list[str] = field(default_factory=list)
-    security: bool = False                        # آیا این عملیات auth می‌خواهد؟
+    auth_contract: str = AUTH_CONTRACT_UNKNOWN
+
+    @property
+    def security(self) -> bool:
+        """سازگاری با مصرف‌کننده‌های قدیمیِ مدلِ bool امنیت."""
+        return self.auth_contract == AUTH_CONTRACT_REQUIRED
 
     @property
     def controller(self) -> str:
@@ -116,6 +126,7 @@ class SwaggerAnalyzer:
 
         base_url = self._derive_base_url(spec, source_url)
         global_security = bool(spec.get("security"))
+        global_auth_contract = self._global_auth_contract(spec)
 
         endpoints: list[EndpointSpec] = []
         for path, path_item in (spec.get("paths") or {}).items():
@@ -135,7 +146,7 @@ class SwaggerAnalyzer:
                         operation=operation,
                         shared_params=shared_params,
                         schemas=schemas,
-                        global_security=global_security,
+                        global_auth_contract=global_auth_contract,
                     )
                 )
 
@@ -281,6 +292,50 @@ class SwaggerAnalyzer:
             return f"{p.scheme}://{p.netloc}"
         return ""
 
+    @staticmethod
+    def _global_auth_contract(spec: dict) -> str:
+        """قرارداد پیش‌فرض سند را با حفظِ تفاوتِ «public» و «unknown» می‌خواند."""
+        if "security" in spec:
+            return (
+                AUTH_CONTRACT_REQUIRED
+                if bool(spec.get("security"))
+                else AUTH_CONTRACT_PUBLIC
+            )
+        return AUTH_CONTRACT_UNKNOWN
+
+    @staticmethod
+    def _operation_auth_contract(
+        operation: dict,
+        raw_params: list,
+        global_auth_contract: str,
+    ) -> str:
+        """قرارداد auth عملیات را طبقِ تقدم OpenAPI و metadata مستند تعیین می‌کند."""
+        if "security" in operation:
+            return (
+                AUTH_CONTRACT_REQUIRED
+                if bool(operation.get("security"))
+                else AUTH_CONTRACT_PUBLIC
+            )
+
+        if global_auth_contract != AUTH_CONTRACT_UNKNOWN:
+            return global_auth_contract
+
+        auth_parameters = [
+            param
+            for param in raw_params
+            if isinstance(param, dict)
+            and str(param.get("in") or "").lower() in {"header", "cookie"}
+            and str(param.get("name") or "").strip().lower()
+            in {"authorization", "cookie"}
+        ]
+        if any(bool(param.get("required")) for param in auth_parameters):
+            return AUTH_CONTRACT_REQUIRED
+        if auth_parameters:
+            # بعضی سندهای تولیدشده securitySchemes ندارند، اما قرارداد runtime را
+            # به‌صورت پارامتر Authorization/Cookie روی تمام عملیات منتشر می‌کنند.
+            return AUTH_CONTRACT_OPTIONAL
+        return AUTH_CONTRACT_UNKNOWN
+
     def _parse_operation(
         self,
         method: str,
@@ -288,7 +343,7 @@ class SwaggerAnalyzer:
         operation: dict,
         shared_params: list,
         schemas: dict,
-        global_security: bool,
+        global_auth_contract: str,
     ) -> EndpointSpec:
         raw_params = list(shared_params) + list(operation.get("parameters", []))
         params: list[ParamSpec] = []
@@ -319,12 +374,11 @@ class SwaggerAnalyzer:
             operation, schemas
         )
 
-        # امنیت: یا در سطح عملیات تعریف شده یا از سطح global ارث می‌برد
-        op_security = operation.get("security")
-        if op_security is None:
-            security = global_security
-        else:
-            security = bool(op_security)
+        auth_contract = self._operation_auth_contract(
+            operation,
+            raw_params,
+            global_auth_contract,
+        )
 
         return EndpointSpec(
             method=method,
@@ -342,7 +396,7 @@ class SwaggerAnalyzer:
             success_status=success_status,
             error_statuses=error_statuses,
             response_fields=response_fields,
-            security=security,
+            auth_contract=auth_contract,
         )
 
     def _parse_request_body(

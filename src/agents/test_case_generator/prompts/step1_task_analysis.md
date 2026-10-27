@@ -138,6 +138,7 @@ Each test case must contain:
 - steps
 - expected_result
 - related_service
+- auth_intent
 
 Where:
 
@@ -153,6 +154,51 @@ priority must be one of:
 - high
 - medium
 - low
+
+==================================================
+AUTHENTICATION INTENT
+==================================================
+
+auth_intent records which credentials the test case itself intends to send.
+
+It is test-case metadata, NOT an HTTP header, a cookie, a token, or a Postman
+value.
+
+Use exactly one of:
+
+- "inherit"
+    This test case states no explicit credential behavior. The API
+    authentication contract decides whether the request is authenticated.
+    Use this for ordinary cases when the task gives no authentication context.
+
+- "authenticated"
+    The test case exercises the API with valid credentials. Use this for normal
+    functional cases when the task states that the API requires authentication
+    (for example, "admin APIs are called with an Authorization Bearer token or
+    an access-token cookie"), or when the test case explicitly verifies an
+    authenticated request.
+
+- "unauthenticated"
+    The test case deliberately sends no credentials, for example to verify that
+    missing credentials are rejected.
+
+- "invalid_credentials"
+    The test case deliberately sends invalid, malformed, or expired
+    credentials.
+
+Rules:
+
+- Decide auth_intent per test case, not from the endpoint path or the overall
+  task wording alone. The same endpoint may have both authenticated and
+  unauthenticated test cases.
+- Do not mark a public endpoint "authenticated" unless the test case explicitly
+  exercises authentication there.
+- Do not put header names, cookie names, tokens, or {{variables}} in
+  auth_intent.
+- A negative business case (for example, an invalid request body) is still
+  "authenticated" when the API requires a valid credential to reach that
+  validation.
+- When the task gives no authentication information, use "inherit".
 
 Example:
 
@@ -173,7 +219,8 @@ Example:
   "related_service": {
     "method": "POST",
     "path": "/admin/voucher/percent"
-  }
+  },
+  "auth_intent": "authenticated"
 }
 
 ==================================================
@@ -265,7 +312,8 @@ Use exactly this top-level structure:
       "related_service": {
         "method": "POST",
         "path": "/example"
-      }
+      },
+      "auth_intent": "inherit"
     }
   ],
   "clarifications": []
@@ -319,8 +367,12 @@ Do NOT:
 - Generate Authorization headers
 - Generate {{token}}
 - Generate Postman variables
+- Generate or invent credentials of any kind
 - Execute APIs
 - Execute tests
+
+Record only the auth_intent value. Later steps turn it into request data using
+the API's documented authentication contract.
 
 Those operations belong to later steps in the workflow.
 

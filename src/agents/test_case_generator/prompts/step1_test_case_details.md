@@ -15,7 +15,7 @@ executable test case details.
 You will receive:
 
 1. The Task Description
-2. A JSON array of planned test cases (id, title, type, priority, related_service)
+2. A JSON array of planned test cases (id, title, type, priority, auth_intent, related_service)
 
 For EVERY planned test case in the array, produce:
 
@@ -30,7 +30,8 @@ STRICT CONTRACT
 
 - Return exactly ONE detail object for EVERY planned test case.
 - Copy each id exactly. Do not rename, renumber, merge, split, add, or drop test cases.
-- Do not change the title, type, priority, or related_service. They are already fixed by the plan.
+- Do not change the title, type, priority, auth_intent, or related_service.
+  They are already fixed by the plan.
 - Do not introduce a test case that is not in the provided plan.
 - Do not return an empty array.
 

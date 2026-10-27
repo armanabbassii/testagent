@@ -899,6 +899,9 @@ class Step2ApiMappingGenerator:
                 "No Swagger document could be loaded:\n  - " + "\n  - ".join(load_errors)
             )
 
+        # هیچ fallbackِ سطحِ تسک اینجا اعمال نمی‌شود: قراردادِ احراز هویت فقط از
+        # خودِ سند می‌آید. رفتارِ اعتبارنامه‌ی هر تست‌کیس جداگانه در Step 1
+        # (``auth_intent``) ثبت شده و Step 4 آن را با همین قرارداد ترکیب می‌کند.
         operations = sum(len(service.apis) for service in services)
         self._log.info(
             "کشفِ API کامل شد",

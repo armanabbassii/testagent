@@ -15,7 +15,7 @@ You receive two structured results.
 
 - task_summary: what the development task is about
 - identified_requirements: the business requirements that were identified
-- test_cases: the business test cases, each with id, title, type, priority, preconditions, steps, expected_result and related_service
+- test_cases: the business test cases, each with id, title, type, priority, preconditions, steps, expected_result, related_service and auth_intent
 - clarifications: open questions left by Step 1
 
 2. STEP 2 RESULT
@@ -56,6 +56,11 @@ You do NOT:
 - Produce Postman syntax such as {{variable}}
 - Extract runtime values
 - Generate authorization headers or credentials
+
+auth_intent is test-case metadata owned by Step 1. Do not change it, reinterpret
+it, or copy it into the Step 3 output. Step 4 combines it with the API's
+documented authentication contract. Two test cases for the same operation may
+have different auth_intent values and must remain distinct.
 
 You describe the scenarios, the execution order and the dependencies. A later
 step turns that description into Postman artifacts.

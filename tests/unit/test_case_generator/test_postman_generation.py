@@ -11,6 +11,12 @@ from __future__ import annotations
 import pytest
 
 from src.agents.test_case_generator import postman_generation
+from src.agents.test_case_generator.auth_intent import (
+    AUTH_INTENT_AUTHENTICATED,
+    AUTH_INTENT_INHERIT,
+    AUTH_INTENT_INVALID,
+    AUTH_INTENT_UNAUTHENTICATED,
+)
 from src.agents.test_case_generator.postman_generation import (
     PostmanGenerationError,
     Step4PostmanGenerator,
@@ -75,7 +81,7 @@ def _admin_service() -> dict:
         "name": "Admin",
         "source_url": "http://swagger.local/admin.json",
         "base_url": "https://admin.example.com/api/",
-        "authorization": {"header": "Authorization", "value": "Bearer {{token}}"},
+        "authorization": {"header": "authorization", "value": "{{token}}"},
         "apis": [
             {
                 "method": "POST",
@@ -225,6 +231,58 @@ def _step3_result() -> dict:
     }
 
 
+def _intent_case(
+    case_id: str,
+    title: str,
+    intent: str | None,
+    *,
+    case_type: str = "positive",
+) -> dict:
+    """یک تست‌کیسِ مینیمال برای سناریوهای اعتبارنامه."""
+    case = {
+        "id": case_id,
+        "title": title,
+        "type": case_type,
+        "priority": "high",
+        "preconditions": [],
+        "steps": [f"Send the request described by: {title}"],
+        "expected_result": "The response matches the intended credential behaviour.",
+    }
+    if intent is not None:
+        case["auth_intent"] = intent
+    return case
+
+
+def _add_mapped_case(
+    step1: dict,
+    step2: dict,
+    step3: dict,
+    case: dict,
+    *,
+    method: str,
+    path: str,
+    operation_id: str,
+) -> None:
+    """تست‌کیس را به هر سه نتیجه‌ی قبلی اضافه می‌کند."""
+    step1["test_cases"].append(case)
+    step2["mappings"].append(
+        {
+            "test_case_id": case["id"],
+            "api": {"method": method, "path": path, "operation_id": operation_id},
+            "confidence": "high",
+            "reason": "Test fixture mapping.",
+            "clarification": "",
+        }
+    )
+    step3["execution_order"].append(
+        {
+            "test_case_id": case["id"],
+            "order": len(step3["execution_order"]) + 1,
+            "depends_on": [],
+        }
+    )
+
+
 def _generate(step1=None, step2=None, step3=None, **kwargs) -> dict:
     return Step4PostmanGenerator(**kwargs).generate(
         step1_result=step1 if step1 is not None else _step1_result(),
@@ -328,22 +386,32 @@ class TestBasicGeneration:
 # ── احراز هویت ───────────────────────────────────────────────────────────────
 
 class TestAuthentication:
-    def test_authorized_requests_carry_the_bearer_variable(self):
+    def test_authorized_requests_carry_the_token_variable(self):
         collection = _generate()["collection"]
         for case_id in ("TC-001", "TC-002", "TC-003"):
             _, item = _find(collection, case_id)
-            assert _headers(item)["Authorization"] == "Bearer {{token}}"
+            assert _headers(item)["authorization"] == "{{token}}"
+
+    def test_the_serialized_header_has_exactly_the_project_contract(self):
+        """شکلِ نهاییِ کالکشن — همان چیزی که در فایلِ Postman دیده می‌شود."""
+        _, item = _find(_generate()["collection"], "TC-001")
+        auth = [
+            header
+            for header in item["request"]["header"]
+            if header["key"].lower() == "authorization"
+        ]
+        assert auth == [{"key": "authorization", "value": "{{token}}"}]
 
     def test_a_negative_business_case_is_still_authenticated(self):
         """کیسِ منفیِ اعتبارسنجی یک درخواستِ مجاز است، نه یک درخواستِ بی‌هویت."""
         collection = _generate()["collection"]
         _, item = _find(collection, "TC-002")
-        assert "Authorization" in _headers(item)
+        assert "authorization" in _headers(item)
 
     def test_a_case_that_describes_a_request_without_a_token_omits_the_header(self):
         collection = _generate()["collection"]
         _, item = _find(collection, "TC-004")
-        assert "Authorization" not in _headers(item)
+        assert "authorization" not in _headers(item)
         assert "intentionally not sent" in item["request"]["description"]
 
     def test_the_word_unauthorized_alone_does_not_drop_the_header(self):
@@ -364,8 +432,8 @@ class TestAuthentication:
     def test_no_real_token_is_ever_written(self):
         collection = _generate()["collection"]
         for _, item in _iter_requests(collection):
-            value = _headers(item).get("Authorization", "")
-            assert value in ("", "Bearer {{token}}")
+            value = _headers(item).get("authorization", "")
+            assert value in ("", "{{token}}")
 
     def test_a_service_that_needs_no_auth_gets_no_authorization_header(self):
         step2 = _step2_result()
@@ -376,7 +444,328 @@ class TestAuthentication:
         }
         result = _generate(step2=step2)
         _, item = _find(result["collection"], "TC-003")
-        assert "Authorization" not in _headers(item)
+        assert "authorization" not in _headers(item)
+
+    def test_the_legacy_contract_normalizes_to_the_same_serialized_shape(self):
+        """نتیجه‌ی ذخیره‌شده‌ی قدیمی (Authorization: Bearer {{token}}) هنوز کار می‌کند."""
+        step2 = _step2_result()
+        step2["services"][0]["authorization"] = {
+            "header": "Authorization",
+            "value": "Bearer {{token}}",
+        }
+
+        _, item = _find(_generate(step2=step2)["collection"], "TC-001")
+
+        auth = [
+            header
+            for header in item["request"]["header"]
+            if header["key"].lower() == "authorization"
+        ]
+        assert auth == [{"key": "authorization", "value": "{{token}}"}]
+
+    def test_a_public_operation_in_a_secured_service_gets_no_header(self):
+        """تصمیم در سطحِ عملیات است، نه سرویس."""
+        step2 = _step2_result()
+        step2["services"][0]["apis"][1]["requires_auth"] = False
+        step2["services"][0]["apis"][0]["requires_auth"] = True
+
+        collection = _generate(step2=step2)["collection"]
+
+        assert "authorization" in _headers(_find(collection, "TC-001")[1])
+        assert "authorization" not in _headers(_find(collection, "TC-003")[1])
+
+    def test_a_secured_operation_in_an_unsecured_service_gets_the_header(self):
+        step2 = _step2_result()
+        step2["services"][1]["authorization"] = None
+        step2["services"][1]["apis"][0]["requires_auth"] = True
+        step2["mappings"][2]["api"] = {
+            "method": "GET",
+            "path": "/report/voucher/{id}",
+            "operation_id": "voucherReport",
+        }
+
+        _, item = _find(_generate(step2=step2)["collection"], "TC-003")
+
+        assert _headers(item)["authorization"] == "{{token}}"
+
+    def test_cookie_based_authentication_is_preserved_without_an_authorization_header(self):
+        step2 = _step2_result()
+        step2["services"][0]["authorization"] = {
+            "header": "Cookie",
+            "value": "PODIUM_ACCESS_TOKEN={{token}}",
+        }
+
+        collection = _generate(step2=step2)["collection"]
+
+        for case_id in ("TC-001", "TC-002", "TC-003"):
+            headers = _headers(_find(collection, case_id)[1])
+            assert headers["Cookie"] == "PODIUM_ACCESS_TOKEN={{token}}"
+            assert "authorization" not in headers
+
+    def test_content_type_is_kept_alongside_the_authorization_header(self):
+        headers = _headers(_find(_generate()["collection"], "TC-001")[1])
+        assert headers["Content-Type"] == "application/json"
+        assert headers["authorization"] == "{{token}}"
+
+    def test_authorization_is_never_serialized_twice(self):
+        step2 = _step2_result()
+        # یک وابستگیِ داده هم همان هدر را با حروفِ متفاوت اضافه می‌کند.
+        step3 = _step3_result()
+        step3["data_dependencies"][0]["targets"].append(
+            {"test_case_id": "TC-003", "location": "header", "parameter": "Authorization"}
+        )
+
+        result = _generate(step2=step2, step3=step3)
+        _, item = _find(result["collection"], "TC-003")
+        keys = [header["key"].lower() for header in item["request"]["header"]]
+        assert keys.count("authorization") == 1
+
+
+# ── قصدِ احراز هویت در سطحِ تست‌کیس ───────────────────────────────────────────
+
+class TestTestCaseAuthIntent:
+    def _collection_with(self, case: dict, *, service_auth=None, public=False) -> dict:
+        step1, step2, step3 = _step1_result(), _step2_result(), _step3_result()
+        if public:
+            _add_mapped_case(
+                step1,
+                step2,
+                step3,
+                case,
+                method="GET",
+                path="/report/voucher/{id}",
+                operation_id="voucherReport",
+            )
+        else:
+            _add_mapped_case(
+                step1,
+                step2,
+                step3,
+                case,
+                method="GET",
+                path="/admin/voucher/{id}",
+                operation_id="getVoucher",
+            )
+        if service_auth is not None:
+            step2["services"][0]["authorization"] = service_auth
+        return _generate(step1=step1, step2=step2, step3=step3)["collection"]
+
+    @pytest.mark.parametrize(
+        ("case_id", "title"),
+        [
+            ("TC-010", "Read a voucher with a valid id"),
+            ("TC-011", "Read a voucher with an invalid id"),
+        ],
+    )
+    def test_a_valid_authenticated_request_uses_the_token_variable(self, case_id, title):
+        collection = self._collection_with(
+            _intent_case(case_id, title, AUTH_INTENT_AUTHENTICATED)
+        )
+
+        _, item = _find(collection, case_id)
+        auth = [
+            header
+            for header in item["request"]["header"]
+            if header["key"].lower() == "authorization"
+        ]
+        assert auth == [{"key": "authorization", "value": "{{token}}"}]
+
+    def test_unauthenticated_intent_omits_the_header_even_if_the_title_implies_a_token(self):
+        collection = self._collection_with(
+            _intent_case(
+                "TC-012",
+                "Read a voucher with a valid token",
+                AUTH_INTENT_UNAUTHENTICATED,
+            )
+        )
+
+        _, item = _find(collection, "TC-012")
+        assert "authorization" not in _headers(item)
+        assert "intentionally not sent" in item["request"]["description"]
+
+    def test_authenticated_intent_wins_over_unauthenticated_wording(self):
+        """قصدِ ساختاریافته مقدم است؛ fallbackِ متنی برای نتیجه‌های قدیمی است."""
+        collection = self._collection_with(
+            _intent_case(
+                "TC-013",
+                "Read a voucher without authentication",
+                AUTH_INTENT_AUTHENTICATED,
+            )
+        )
+
+        assert _headers(_find(collection, "TC-013")[1])["authorization"] == "{{token}}"
+
+    def test_explicit_inherit_defers_to_the_contract_not_to_the_title(self):
+        collection = self._collection_with(
+            _intent_case(
+                "TC-014",
+                "Read a voucher without authentication",
+                AUTH_INTENT_INHERIT,
+            )
+        )
+
+        assert _headers(_find(collection, "TC-014")[1])["authorization"] == "{{token}}"
+
+    def test_invalid_credentials_keep_the_header_with_the_invalid_token_variable(self):
+        collection = self._collection_with(
+            _intent_case(
+                "TC-015",
+                "Read a voucher with an expired token",
+                AUTH_INTENT_INVALID,
+            )
+        )
+
+        _, item = _find(collection, "TC-015")
+        auth = [
+            header
+            for header in item["request"]["header"]
+            if header["key"].lower() == "authorization"
+        ]
+        assert auth == [{"key": "authorization", "value": "{{invalidToken}}"}]
+
+        variables = {v["key"]: v["value"] for v in collection["variable"]}
+        assert variables["invalidToken"] == ""
+        assert variables["token"] == ""
+
+    def test_invalid_credentials_on_a_cookie_contract_keep_the_cookie_mechanism(self):
+        collection = self._collection_with(
+            _intent_case(
+                "TC-016",
+                "Read a voucher with malformed credentials",
+                AUTH_INTENT_INVALID,
+            ),
+            service_auth={
+                "header": "Cookie",
+                "value": "PODIUM_ACCESS_TOKEN={{token}}",
+            },
+        )
+
+        headers = _headers(_find(collection, "TC-016")[1])
+        assert headers["Cookie"] == "PODIUM_ACCESS_TOKEN={{invalidToken}}"
+        assert "authorization" not in headers
+
+    def test_a_public_operation_gets_no_header_by_default(self):
+        collection = self._collection_with(
+            _intent_case("TC-017", "Read the public report", AUTH_INTENT_INHERIT),
+            public=True,
+        )
+
+        assert "authorization" not in _headers(_find(collection, "TC-017")[1])
+
+    def test_a_public_operation_gets_a_header_when_the_case_explicitly_asks_for_one(self):
+        collection = self._collection_with(
+            _intent_case(
+                "TC-018",
+                "Read the public report with credentials",
+                AUTH_INTENT_AUTHENTICATED,
+            ),
+            public=True,
+        )
+
+        assert _headers(_find(collection, "TC-018")[1])["authorization"] == "{{token}}"
+
+    def test_each_case_for_the_same_endpoint_gets_its_own_decision(self):
+        step1, step2, step3 = _step1_result(), _step2_result(), _step3_result()
+        for case in (
+            _intent_case("TC-019", "Read with a valid token", AUTH_INTENT_AUTHENTICATED),
+            _intent_case("TC-020", "Read without credentials", AUTH_INTENT_UNAUTHENTICATED),
+            _intent_case("TC-021", "Read with an expired token", AUTH_INTENT_INVALID),
+        ):
+            _add_mapped_case(
+                step1,
+                step2,
+                step3,
+                case,
+                method="GET",
+                path="/admin/voucher/{id}",
+                operation_id="getVoucher",
+            )
+
+        collection = _generate(step1=step1, step2=step2, step3=step3)["collection"]
+
+        assert _headers(_find(collection, "TC-019")[1])["authorization"] == "{{token}}"
+        assert "authorization" not in _headers(_find(collection, "TC-020")[1])
+        assert (
+            _headers(_find(collection, "TC-021")[1])["authorization"]
+            == "{{invalidToken}}"
+        )
+
+    def test_a_data_dependency_cannot_reintroduce_withheld_credentials(self):
+        step1, step2, step3 = _step1_result(), _step2_result(), _step3_result()
+        _add_mapped_case(
+            step1,
+            step2,
+            step3,
+            _intent_case(
+                "TC-023",
+                "Read a voucher without credentials",
+                AUTH_INTENT_UNAUTHENTICATED,
+            ),
+            method="GET",
+            path="/admin/voucher/{id}",
+            operation_id="getVoucher",
+        )
+        step3["data_dependencies"].append(
+            {
+                "variable_name": "borrowedToken",
+                "source": {
+                    "test_case_id": "TC-001",
+                    "location": "response.body",
+                    "path": "$.id",
+                },
+                "targets": [
+                    {
+                        "test_case_id": "TC-023",
+                        "location": "header",
+                        "parameter": "Authorization",
+                    }
+                ],
+                "confidence": "high",
+                "reason": "Test fixture dependency.",
+            }
+        )
+
+        collection = _generate(step1=step1, step2=step2, step3=step3)["collection"]
+
+        assert "authorization" not in _headers(_find(collection, "TC-023")[1])
+
+    def test_the_invalid_token_variable_is_not_declared_when_unused(self):
+        collection = _generate()["collection"]
+
+        variables = {v["key"] for v in collection["variable"]}
+        assert "invalidToken" not in variables
+
+    def test_a_legacy_expired_token_case_keeps_an_invalid_credential(self):
+        """نتیجه‌ی قدیمی بدونِ auth_intent نباید توکنِ نامعتبر را به {{token}} تبدیل کند."""
+        step1, step2, step3 = _step1_result(), _step2_result(), _step3_result()
+        _add_mapped_case(
+            step1,
+            step2,
+            step3,
+            _intent_case(
+                "TC-022",
+                "Read a voucher with an expired token",
+                None,
+                case_type="negative",
+            ),
+            method="GET",
+            path="/admin/voucher/{id}",
+            operation_id="getVoucher",
+        )
+
+        collection = _generate(step1=step1, step2=step2, step3=step3)["collection"]
+
+        assert (
+            _headers(_find(collection, "TC-022")[1])["authorization"]
+            == "{{invalidToken}}"
+        )
+
+    def test_an_unknown_auth_intent_is_rejected(self):
+        step1 = _step1_result()
+        step1["test_cases"][0]["auth_intent"] = "sometimes"
+
+        with pytest.raises(PostmanGenerationError, match="invalid auth_intent"):
+            _generate(step1=step1)
 
 
 # ── کدهای وضعیت ──────────────────────────────────────────────────────────────

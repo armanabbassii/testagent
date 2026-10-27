@@ -22,7 +22,7 @@ postman_generation.py — ساختِ قطعیِ Postman Collection از نتیج
 نکته‌ی معماری: ساختارِ Postman اینجا دوباره پیاده نشده است. این ماژول یک
 `TestCaseSuite` می‌سازد — همان قراردادی که `PostmanBuilder` از قبل می‌شناسد —
 و ساختِ خودِ کالکشن را به آن می‌سپارد. بنابراین رفتارهای موجود (متغیرهای
-baseUrl/token، «Authorization: Bearer {{token}}»، تبدیلِ {id} به :id،
+baseUrl/token، هدرِ authorization با مقدارِ {{token}}، تبدیلِ {id} به :id،
 assertionهای وضعیت، و استخراجِ متغیر از پاسخ) همه دست‌نخورده باقی می‌مانند.
 """
 
@@ -37,6 +37,14 @@ from typing import Any
 from typing_extensions import TypedDict
 
 from src.agents.test_case_generator.api_discovery import operation_key
+from src.agents.test_case_generator.auth_intent import (
+    AUTH_INTENT_AUTHENTICATED,
+    AUTH_INTENT_INHERIT,
+    AUTH_INTENT_INVALID,
+    AUTH_INTENT_UNAUTHENTICATED,
+    AuthIntentError,
+    normalize_auth_intent,
+)
 from src.agents.test_case_generator.postman_builder import (
     SCHEMA_V21,
     PostmanBuildError,
@@ -57,9 +65,21 @@ _DEFAULT_COLLECTION_NAME = "Generated API Test Collection"
 # نامِ پوشه‌ای که تست‌کیس‌های خارج از هر سناریو را نگه می‌دارد
 _UNASSIGNED_FOLDER = "Unassigned test cases"
 
-# قراردادِ احراز هویتِ موجودِ پروژه — توکنِ واقعی هرگز ساخته نمی‌شود
-_AUTH_HEADER = "Authorization"
-_AUTH_VALUE = "Bearer {{token}}"
+# قراردادِ احراز هویتِ پروژه — توکنِ واقعی هرگز ساخته نمی‌شود.
+# مقدار دقیقاً خودِ متغیرِ کالکشن است (بدونِ «Bearer »)؛ کلید هم مطابقِ
+# قراردادِ این جریان با حروفِ کوچک نوشته می‌شود.
+_AUTH_HEADER = "authorization"
+_AUTH_VALUE = "{{token}}"
+
+# متغیرِ قابلِ تنظیم برای تست‌های «توکنِ نامعتبر/منقضی». مقدارِ واقعی هرگز
+# ساخته نمی‌شود؛ تستر آن را در محیطِ Postman تعیین می‌کند.
+_AUTH_INVALID_VARIABLE = "invalidToken"
+_AUTH_INVALID_VALUE = "{{invalidToken}}"
+
+# شکل‌های قدیمیِ همان قرارداد که ممکن است در نتیجه‌ی قدم دومِ ذخیره‌شده یا
+# snapshotهای قبلی باقی مانده باشند. هنگامِ ساختِ کالکشن به قراردادِ فعلی
+# نرمال می‌شوند تا خروجی همیشه یکسان باشد.
+_LEGACY_BEARER_RE = re.compile(r"^\s*bearer\s+\{\{\s*token\s*\}\}\s*$", re.IGNORECASE)
 
 _COLLECTION_SCOPE = "collection"
 _BODY_SOURCE = "body"
@@ -93,6 +113,23 @@ _UNAUTHENTICATED_PHRASES = (
     "unauthenticated",
     "not authenticated",
     "anonymous",
+)
+
+# عبارت‌هایی که نشان می‌دهند تست‌کیس عمداً اعتبارنامه‌ی نامعتبر/منقضی می‌فرستد.
+# این فقط برای نتیجه‌های ذخیره‌شده‌ی قدیمی است که هنوز ``auth_intent`` ندارند؛
+# نتیجه‌های جدید قصد را به‌صورتِ ساختاریافته در همان فیلد می‌آورند.
+_INVALID_CREDENTIAL_PHRASES = (
+    "invalid token",
+    "invalid access token",
+    "invalid credential",
+    "invalid credentials",
+    "malformed token",
+    "malformed credential",
+    "malformed credentials",
+    "expired token",
+    "expired access token",
+    "expired credential",
+    "expired credentials",
 )
 
 # {{variable}} داخل url/header/body
@@ -209,7 +246,19 @@ def extract_test_cases(step1_result: Any) -> list[dict]:
                 f"Step 1 result contains duplicate test case id {case_id!r}."
             )
         seen.add(case_id)
-        normalized.append({**case, "id": case_id})
+        normalized_case = {**case, "id": case_id}
+        if "auth_intent" in case:
+            try:
+                intent = normalize_auth_intent(case["auth_intent"])
+            except AuthIntentError as exc:
+                raise PostmanGenerationError(
+                    f"test case {case_id!r} has an invalid auth_intent: {exc}"
+                ) from exc
+            if intent is None:
+                normalized_case.pop("auth_intent", None)
+            else:
+                normalized_case["auth_intent"] = intent
+        normalized.append(normalized_case)
     return normalized
 
 
@@ -361,9 +410,103 @@ def case_expects_no_authentication(case: dict) -> bool:
 
     فقط عبارت‌هایی که «نبودِ» احراز هویت را می‌گویند اینجا مؤثرند. یک کیسِ منفیِ
     کسب‌وکاری (مثلاً اعتبارسنجیِ بدنه) همچنان هدرِ معتبر می‌فرستد.
+
+    این تابع فقط برای نتیجه‌های ذخیره‌شده‌ی قدیمی است؛ نتیجه‌های جدید قصد را در
+    ``auth_intent`` دارند و همان مقدار مقدم است.
     """
     text = case_text(case)
     return any(phrase in text for phrase in _UNAUTHENTICATED_PHRASES)
+
+
+def case_expects_invalid_credentials(case: dict) -> bool:
+    """آیا متنِ تست‌کیس صریحاً اعتبارنامه‌ی نامعتبر/منقضی را توصیف می‌کند؟
+
+    مثلِ ``case_expects_no_authentication`` این هم فقط fallbackِ نتیجه‌های
+    ذخیره‌شده‌ی قدیمی است. «unauthorized» عمداً اینجا نیست، چون می‌تواند هم
+    نبودِ اعتبارنامه و هم نامعتبر بودنِ آن را معنا دهد.
+    """
+    text = case_text(case)
+    return any(phrase in text for phrase in _INVALID_CREDENTIAL_PHRASES)
+
+
+def case_auth_intent(case: dict) -> str | None:
+    """قصدِ ساختاریافته‌ی احراز هویتِ تست‌کیس را برمی‌گرداند.
+
+    ``None`` یعنی نتیجه‌ی ذخیره‌شده‌ی قدیمی و بدونِ فیلدِ ``auth_intent``؛ در
+    این حالت فقط برای سازگاریِ عقب‌رو، نشانه‌های متنیِ تست‌کیس استفاده می‌شوند.
+    """
+    if "auth_intent" not in case:
+        return None
+    try:
+        return normalize_auth_intent(case.get("auth_intent"))
+    except AuthIntentError as exc:
+        raise PostmanGenerationError(str(exc)) from exc
+
+
+def operation_requires_auth(operation: dict, service: dict) -> bool:
+    """آیا همین عملیات به احراز هویت نیاز دارد؟
+
+    تصمیمِ دقیق در سطحِ عملیات است: یک سرویس می‌تواند هم عملیاتِ عمومی و هم
+    عملیاتِ محافظت‌شده داشته باشد. اگر قدم دومِ ذخیره‌شده فیلدِ
+    ``requires_auth`` را نداشته باشد (نتیجه‌ی قدیمی)، به قراردادِ سطحِ سرویس
+    برمی‌گردیم تا رفتارِ قبلی حفظ شود.
+    """
+    declared = operation.get("requires_auth")
+    if isinstance(declared, bool):
+        return declared
+    authorization = service.get("authorization")
+    return isinstance(authorization, dict) and bool(_clean(authorization.get("value")))
+
+
+def normalize_authorization(header: object, value: object) -> tuple[str, str] | None:
+    """قراردادِ احراز هویت را به شکلِ سریال‌شده‌ی دقیقِ پروژه درمی‌آورد.
+
+    فقط هدرِ Authorization نرمال می‌شود: کلید با حروفِ کوچک و مقدارِ
+    ``Bearer {{token}}`` (شکلِ قدیمی) به ``{{token}}`` تبدیل می‌شود. هر
+    مکانیزمِ دیگری — مثلاً ``Cookie: PODIUM_ACCESS_TOKEN={{token}}`` یا یک
+    مقدارِ documentedِ غیرِ placeholder — دست‌نخورده می‌ماند؛ چون قراردادِ
+    خودِ سرویس است، نه چیزی که این ماژول بسازد.
+    """
+    key = _clean(header) or _AUTH_HEADER
+    val = _clean(value)
+    if not val:
+        return None
+    if key.lower() == _AUTH_HEADER:
+        if _LEGACY_BEARER_RE.match(val):
+            val = _AUTH_VALUE
+        return _AUTH_HEADER, val
+    return key, val
+
+
+def valid_auth_header(service: dict) -> tuple[str, str] | None:
+    """اعتبارنامه‌ی معتبر را مطابقِ قراردادِ اعلام‌شده‌ی API می‌سازد."""
+    authorization = service.get("authorization")
+    declared = authorization if isinstance(authorization, dict) else {}
+    return normalize_authorization(
+        declared.get("header") or _AUTH_HEADER,
+        declared.get("value") or _AUTH_VALUE,
+    )
+
+
+def invalid_auth_header(service: dict) -> tuple[str, str] | None:
+    """همان مکانیزمِ قرارداد، ولی با متغیرِ نامعتبر/منقضی.
+
+    تستِ «توکنِ نامعتبر» باید هدر را حفظ کند و فقط مقدارش نامعتبر باشد. نامِ
+    هدر/کوکی از قرارداد می‌آید تا مکانیزمِ احراز هویت عوض نشود. هیچ مقدارِ
+    واقعی ساخته نمی‌شود؛ فقط placeholder به ``{{invalidToken}}`` تغییر می‌کند.
+    """
+    normalized = valid_auth_header(service)
+    if normalized is None:
+        return _AUTH_HEADER, _AUTH_INVALID_VALUE
+
+    header, value = normalized
+    if _AUTH_VALUE in value:
+        value = value.replace(_AUTH_VALUE, _AUTH_INVALID_VALUE)
+    else:
+        # مقدارِ documented یک placeholderِ اعتبارنامه نیست؛ برای تستِ نامعتبر
+        # نمی‌توان همان مقدارِ واقعی را فرستاد.
+        value = _AUTH_INVALID_VALUE
+    return header, value
 
 
 def operation_index(services: list[dict]) -> dict[tuple[str, str], tuple[dict, dict]]:
@@ -540,17 +683,78 @@ def _build_request_case(
     notes: list[str] = []
 
     # ── احراز هویت ──────────────────────────────────────────────────────────
+    # دو منبعِ مستقل با هم ترکیب می‌شوند:
+    #   * auth_intentِ همین تست‌کیس: با اعتبارنامه‌ی معتبر، بدونِ اعتبارنامه، یا
+    #     با اعتبارنامه‌ی نامعتبر/منقضی؛
+    #   * قراردادِ احراز هویتِ API: نامِ هدر/کوکی و نامِ متغیر.
+    # هیچ‌کدام جای دیگری را نمی‌گیرد و هیچ هدری فقط به‌خاطرِ مسیر یا متنِ کلِ
+    # تسک اضافه نمی‌شود.
     headers: dict[str, str] = {}
-    authorization = service.get("authorization")
-    if isinstance(authorization, dict) and _clean(authorization.get("value")):
-        if case_expects_no_authentication(case):
+    intent = case_auth_intent(case)
+    requires_auth = operation_requires_auth(operation, service)
+    credentials_withheld = False
+
+    if intent == AUTH_INTENT_UNAUTHENTICATED:
+        credentials_withheld = True
+        # حتی وقتی API عمومی است، این یادداشت ثبت می‌شود تا بازبین ببیند نبودِ
+        # هدر تصمیمِ همین تست‌کیس بوده، نه یک omission.
+        notes.append(
+            "Authentication credentials are intentionally not sent: this test "
+            "case describes a request made without authentication."
+        )
+    elif intent == AUTH_INTENT_INVALID:
+        invalid = invalid_auth_header(service)
+        if invalid is not None:
+            header, value = invalid
+            headers[header] = value
+        notes.append(
+            "This test case intentionally uses invalid or expired credentials "
+            "through {{invalidToken}}; the runtime value is supplied by the tester "
+            "and is never generated."
+        )
+    elif intent == AUTH_INTENT_AUTHENTICATED:
+        if not requires_auth:
             notes.append(
-                "The Authorization header is intentionally not sent: this test case "
-                "describes a request made without authentication."
+                "The API documents this operation as public, but this test case "
+                "explicitly exercises an authenticated request."
             )
-        else:
-            header = _clean(authorization.get("header")) or _AUTH_HEADER
-            headers[header] = _clean(authorization.get("value")) or _AUTH_VALUE
+        valid = valid_auth_header(service)
+        if valid is not None:
+            header, value = valid
+            headers[header] = value
+    elif intent == AUTH_INTENT_INHERIT:
+        if requires_auth:
+            valid = valid_auth_header(service)
+            if valid is not None:
+                header, value = valid
+                headers[header] = value
+    else:
+        # نتیجه‌ی ذخیره‌شده‌ی قدیمی — بدونِ auth_intent. رفتارِ قبلی حفظ می‌شود،
+        # ولی اعتبارنامه‌ی نامعتبر هرگز بی‌صدا به {{token}} تبدیل نمی‌شود.
+        # «بدونِ اعتبارنامه» بر «نامعتبر» مقدم است: اگر تست صریحاً می‌گوید هدر
+        # فرستاده نمی‌شود، نباید یک توکنِ نامعتبر تزریق شود.
+        if case_expects_no_authentication(case):
+            credentials_withheld = True
+            if requires_auth:
+                notes.append(
+                    "Authentication credentials are intentionally not sent: this "
+                    "test case describes a request made without authentication."
+                )
+        elif case_expects_invalid_credentials(case):
+            invalid = invalid_auth_header(service)
+            if invalid is not None:
+                header, value = invalid
+                headers[header] = value
+            notes.append(
+                "This test case intentionally uses invalid or expired credentials "
+                "through {{invalidToken}}; the runtime value is supplied by the "
+                "tester and is never generated."
+            )
+        elif requires_auth:
+            valid = valid_auth_header(service)
+            if valid is not None:
+                header, value = valid
+                headers[header] = value
 
     # ── بدنه ────────────────────────────────────────────────────────────────
     documented_body = operation.get("request_body")
@@ -560,7 +764,28 @@ def _build_request_case(
     references = target_references(dependencies, case_id)
     path_params = dict(references["path"])
     query_params = dict(references["query"])
+    protected_auth_header = next(iter(headers), None)
+    if protected_auth_header is None and credentials_withheld:
+        # حتی وقتی هدر عمداً فرستاده نمی‌شود، یک dependencyِ داده‌ای نباید آن را
+        # دوباره تزریق کند. نامِ هدر از قرارداد می‌آید (پیش‌فرض authorization).
+        contract = valid_auth_header(service)
+        if contract is not None:
+            protected_auth_header = contract[0]
     for header, value in references["header"].items():
+        # قصدِ اعتبارنامه‌ی همین تست‌کیس بر یک dependencyِ داده‌ای مقدم است؛
+        # وگرنه ممکن بود توکنِ نامعتبر یا «بدونِ اعتبارنامه» بازنویسی شود.
+        if (
+            protected_auth_header is not None
+            and header.lower() == protected_auth_header.lower()
+        ):
+            note = (
+                f"The data dependency targets the authentication header '{header}', "
+                f"but this test case's credential intent takes precedence; the "
+                f"dependency value was not applied."
+            )
+            notes.append(note)
+            warnings.append(f"{case_id}: {note}")
+            continue
         headers[header] = value
 
     if references["body"]:
@@ -781,6 +1006,18 @@ def _plan(
             {"key": var_of[id(service)], "value": _clean(service.get("base_url"))}
             for service in used_services[1:]
         ]
+
+    # متغیرِ نامعتبر فقط وقتی declare می‌شود که واقعاً در درخواستی استفاده شده
+    # باشد؛ کالکشنِ بدونِ تستِ نامعتبر متغیرِ بی‌استفاده نمی‌گیرد.
+    uses_invalid_credentials = any(
+        _AUTH_INVALID_VALUE in value
+        for request_case, _ in built.values()
+        for value in request_case["headers"].values()
+    )
+    if uses_invalid_credentials:
+        outcome.extra_variables.append(
+            {"key": _AUTH_INVALID_VARIABLE, "value": ""}
+        )
 
     for request_case, service in built.values():
         request_case["base_url_var"] = var_of[id(service)]
@@ -1225,6 +1462,8 @@ __all__ = [
     "Step4Result",
     "Step4Scenario",
     "Step4Unresolved",
+    "case_auth_intent",
+    "case_expects_invalid_credentials",
     "case_expects_no_authentication",
     "case_text",
     "check_variables_are_available",
@@ -1234,7 +1473,9 @@ __all__ = [
     "extract_test_cases",
     "iter_collection_requests",
     "mapping_for",
+    "normalize_authorization",
     "operation_index",
+    "operation_requires_auth",
     "source_variables",
     "status_assertions",
     "target_references",

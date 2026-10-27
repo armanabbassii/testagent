@@ -68,6 +68,11 @@ Use:
 - The summary and operationId of the candidate operations
 - The HTTP method and path shape
 
+A test case may also carry an "auth_intent" field. It describes the credentials
+that test case intends to send. It MUST NOT affect which operation is chosen or
+the confidence, and it MUST NOT be copied into your output. Step 4 reads it
+directly from the Step 1 result.
+
 Prefer the operation whose meaning clearly corresponds to what the test case verifies.
 
 Do NOT force a mapping.
