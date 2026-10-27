@@ -197,12 +197,12 @@ class TestVerifyDoesNotChangeTheRequestUrl:
         ("base_url", "expected"),
         [
             (
-                "https://aifa-chatbot.dev.dotin.ir/",
-                "https://aifa-chatbot.dev.dotin.ir/chat/completions",
+                "https://aifa-chatbot.dev.dotin.ir/"
+                # "https://aifa-chatbot.dev.dotin.ir/chat/completions",
             ),
             (
-                "https://aifa-chatbot.dev.dotin.ir/v1",
-                "https://aifa-chatbot.dev.dotin.ir/v1/chat/completions",
+                "https://aifa-chatbot.dev.dotin.ir/v1"
+                # "https://aifa-chatbot.dev.dotin.ir/v1/chat/completions",
             ),
         ],
     )

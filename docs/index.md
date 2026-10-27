@@ -13,6 +13,7 @@
 | [installation.md](installation.md) | نصب و راه‌اندازی |
 | [how-to/new-agent.md](how-to/new-agent.md) | ایجاد ایجنت جدید |
 | [how-to/new-log-driver.md](how-to/new-log-driver.md) | ایجاد درایور لاگ جدید |
+| [architecture/project-architecture.md](architecture/project-architecture.md) | معماری پروژه و جریانِ پنج‌قدمیِ Test Case Generator (از Swagger تا Postman) |
 | [architecture/core-clients.md](architecture/core-clients.md) | LLMClient و EmbeddingClient |
 | [architecture/checkpointer.md](architecture/checkpointer.md) | Redis Checkpointer — نحوه کار و تنظیم |
 | [architecture/observability.md](architecture/observability.md) | Observability |

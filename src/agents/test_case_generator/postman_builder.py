@@ -44,6 +44,12 @@ _CONTENT_TYPE_JSON = "application/json"
 _BASE_URL_VAR = DEFAULT_BASE_URL_VAR
 _TOKEN_VAR = "token"
 
+# قاعده‌ی سراسریِ احراز هویت: هر درخواستِ ساخته‌شده دقیقاً همین یک هدر را دارد —
+# مستقل از اینکه سندِ Swagger یا نتیجه‌ی قدم‌های قبلی چیزی درباره‌ی auth بگویند.
+# توکنِ واقعی هرگز ساخته نمی‌شود؛ مقدار همان متغیرِ کالکشنِ {{token}} است.
+AUTHORIZATION_HEADER = "Authorization"
+AUTHORIZATION_VALUE = "{{" + _TOKEN_VAR + "}}"
+
 # منبعِ مقدار در save_variable — بدنه‌ی JSON (پیش‌فرض) یا هدرِ پاسخ
 _BODY_SOURCE = "body"
 _HEADER_SOURCE = "header"
@@ -259,13 +265,20 @@ class PostmanBuilder:
     def _build_headers(headers: dict, has_body: bool) -> list[dict]:
         """dictِ هدرها را به لیستِ Postman تبدیل می‌کند و از تکرار جلوگیری می‌کند.
 
+        هدرِ «Authorization: {{token}}» همیشه اولین هدر است، بی‌قید و شرط. هر
+        Authorization ای که از قبل (با هر حروف و هر مقداری) در تست‌کیس آمده باشد
+        با همین هدر جایگزین می‌شود، نه تکرار — این تنها نقطه‌ای است که هر دو
+        جریان (ویزارد و agent.py) از آن می‌گذرند.
+
         اگر بدنه‌ی JSON وجود داشته باشد و Content-Type از قبل نیامده باشد، آن را
-        اضافه می‌کند. مقدارِ {{token}} دست‌نخورده باقی می‌ماند.
+        اضافه می‌کند. بقیه‌ی هدرها دست‌نخورده می‌مانند.
         """
-        result: list[dict] = []
-        seen: set[str] = set()
+        result: list[dict] = [
+            {"key": AUTHORIZATION_HEADER, "value": AUTHORIZATION_VALUE, "type": "text"}
+        ]
+        seen: set[str] = {AUTHORIZATION_HEADER.lower()}
         for key, value in headers.items():
-            lower = str(key).lower()
+            lower = str(key).strip().lower()
             if lower in seen:  # از هدرِ تکراری جلوگیری می‌شود
                 continue
             seen.add(lower)

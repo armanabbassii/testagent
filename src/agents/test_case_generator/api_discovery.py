@@ -32,8 +32,8 @@ from src.agents.test_case_generator.swagger_analyzer import (
     SwaggerAnalyzer,
 )
 
-# قراردادِ احراز هویتِ شناخته‌شده‌ی پروژه. توکنِ واقعی هرگز اینجا ساخته نمی‌شود
-# و هیچ درخواستی با آن ارسال نمی‌شود — فقط برای ساختِ Postman در قدمِ بعد.
+# قراردادِ احراز هویتی که سند اعلام می‌کند — فقط برای نمایش در قدم دوم. توکنِ
+# واقعی هرگز اینجا ساخته نمی‌شود و هدرِ Postman از این مقدار ساخته نمی‌شود.
 AUTHORIZATION_HEADER = "Authorization"
 AUTHORIZATION_VALUE = "Bearer {{token}}"
 
@@ -93,7 +93,12 @@ class DiscoveredService:
 
     @property
     def authorization(self) -> dict[str, str] | None:
-        """قراردادِ احراز هویت — فقط وقتی سند واقعاً auth می‌خواهد."""
+        """قراردادِ احراز هویت — فقط وقتی سند واقعاً auth می‌خواهد.
+
+        فقط برای نمایش در بازبینیِ قدم دوم است. هدرِ درخواست‌های Postman از این
+        فیلد ساخته نمی‌شود: PostmanBuilder «Authorization: {{token}}» را روی هر
+        درخواست می‌گذارد، چه سند security داشته باشد چه نه.
+        """
         if not self.requires_auth:
             return None
         return {"header": AUTHORIZATION_HEADER, "value": AUTHORIZATION_VALUE}

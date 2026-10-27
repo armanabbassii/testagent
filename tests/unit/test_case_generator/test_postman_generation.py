@@ -14,7 +14,6 @@ from src.agents.test_case_generator import postman_generation
 from src.agents.test_case_generator.postman_generation import (
     PostmanGenerationError,
     Step4PostmanGenerator,
-    case_expects_no_authentication,
     check_variables_are_available,
     extract_step3_sections,
     extract_test_cases,
@@ -328,46 +327,24 @@ class TestBasicGeneration:
 # ── احراز هویت ───────────────────────────────────────────────────────────────
 
 class TestAuthentication:
-    def test_authorized_requests_carry_the_bearer_variable(self):
-        collection = _generate()["collection"]
-        for case_id in ("TC-001", "TC-002", "TC-003"):
-            _, item = _find(collection, case_id)
-            assert _headers(item)["Authorization"] == "Bearer {{token}}"
+    """قاعده‌ی سراسری: هر درخواست دقیقاً یک «Authorization: {{token}}» دارد.
 
-    def test_a_negative_business_case_is_still_authenticated(self):
-        """کیسِ منفیِ اعتبارسنجی یک درخواستِ مجاز است، نه یک درخواستِ بی‌هویت."""
-        collection = _generate()["collection"]
-        _, item = _find(collection, "TC-002")
-        assert "Authorization" in _headers(item)
+    تست‌های کامل‌ترِ این قاعده (Swagger بدونِ auth، کالکشنِ سریال‌شده، حروفِ
+    مختلف و …) در test_authorization_header.py هستند.
+    """
 
-    def test_a_case_that_describes_a_request_without_a_token_omits_the_header(self):
-        collection = _generate()["collection"]
-        _, item = _find(collection, "TC-004")
-        assert "Authorization" not in _headers(item)
-        assert "intentionally not sent" in item["request"]["description"]
-
-    def test_the_word_unauthorized_alone_does_not_drop_the_header(self):
-        """«unauthorized» یعنی انتظارِ رد شدن، نه اینکه هدر فرستاده نشود."""
-        case = {
-            "title": "An unauthorized token is rejected",
-            "expected_result": "The API returns 401 for an unauthorized token.",
-        }
-        assert case_expects_no_authentication(case) is False
-
-    def test_a_negative_case_without_a_token_still_counts_as_unauthenticated(self):
-        case = {
-            "title": "Missing token",
-            "preconditions": ["The request is sent without credentials"],
-        }
-        assert case_expects_no_authentication(case) is True
-
-    def test_no_real_token_is_ever_written(self):
+    def test_every_request_carries_the_token_variable(self):
         collection = _generate()["collection"]
         for _, item in _iter_requests(collection):
-            value = _headers(item).get("Authorization", "")
-            assert value in ("", "Bearer {{token}}")
+            assert _headers(item)["Authorization"] == "{{token}}"
 
-    def test_a_service_that_needs_no_auth_gets_no_authorization_header(self):
+    def test_a_case_that_describes_a_request_without_a_token_still_sends_it(self):
+        """قاعده بی‌قید و شرط است — حتی متنِ «without authentication» آن را حذف نمی‌کند."""
+        collection = _generate()["collection"]
+        _, item = _find(collection, "TC-004")
+        assert _headers(item)["Authorization"] == "{{token}}"
+
+    def test_a_service_that_declares_no_auth_still_gets_the_header(self):
         step2 = _step2_result()
         step2["mappings"][2]["api"] = {
             "method": "GET",
@@ -376,7 +353,7 @@ class TestAuthentication:
         }
         result = _generate(step2=step2)
         _, item = _find(result["collection"], "TC-003")
-        assert "Authorization" not in _headers(item)
+        assert _headers(item)["Authorization"] == "{{token}}"
 
 
 # ── کدهای وضعیت ──────────────────────────────────────────────────────────────

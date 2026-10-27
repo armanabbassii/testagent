@@ -76,6 +76,18 @@ LLM_SSL_VERIFY: bool = _env_bool("LLM_SSL_VERIFY", default=True)
 # دیگر یک پاسخِ واحد را از این سقف رد نمی‌کند.
 LLM_MAX_OUTPUT_TOKENS: int = int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "8192"))
 
+# ── Swagger snapshot refresh ──────────────────────────────────────────────────
+# timeoutِ دکمه‌های Update قدم دوم (دریافتِ تازه‌ی سندِ Swagger و جایگزینیِ
+# data/swagger/*.json). اتصال کوتاه است تا میزبانِ ازدسترس‌خارج زود گزارش شود؛
+# خواندن بلندتر است: سرور سند را در اولین درخواستِ بعد از راه‌اندازی می‌سازد و
+# در آزمونِ واقعی بیش از ۶۰ ثانیه طول کشید؛ بعد از آن زیرِ یک ثانیه است.
+SWAGGER_CONNECT_TIMEOUT_SECONDS: float = float(
+    os.getenv("SWAGGER_CONNECT_TIMEOUT_SECONDS", "10")
+)
+SWAGGER_READ_TIMEOUT_SECONDS: float = float(
+    os.getenv("SWAGGER_READ_TIMEOUT_SECONDS", "120")
+)
+
 # ── Embedding ─────────────────────────────────────────────────────────────────
 EMBEDDING_BASE_URL: str = _require("EMBEDDING_BASE_URL")
 EMBEDDING_MODEL: str = _require("EMBEDDING_MODEL")

@@ -144,8 +144,9 @@ class TestUrl:
 # ── هدرها و بدنه ─────────────────────────────────────────────────────────────
 
 class TestHeadersAndBody:
-    def test_the_authorization_contract_is_preserved_verbatim(self):
-        assert _headers(_item(_build()))["Authorization"] == "Bearer {{token}}"
+    def test_an_existing_authorization_value_is_normalized_to_the_token_variable(self):
+        """جریانِ agent.py هنوز «Bearer {{token}}» می‌فرستد؛ خروجی همیشه {{token}} است."""
+        assert _headers(_item(_build()))["Authorization"] == "{{token}}"
 
     def test_content_type_is_added_when_a_body_exists(self):
         assert _headers(_item(_build()))["Content-Type"] == "application/json"

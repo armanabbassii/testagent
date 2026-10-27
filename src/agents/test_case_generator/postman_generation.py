@@ -22,8 +22,14 @@ postman_generation.py — ساختِ قطعیِ Postman Collection از نتیج
 نکته‌ی معماری: ساختارِ Postman اینجا دوباره پیاده نشده است. این ماژول یک
 `TestCaseSuite` می‌سازد — همان قراردادی که `PostmanBuilder` از قبل می‌شناسد —
 و ساختِ خودِ کالکشن را به آن می‌سپارد. بنابراین رفتارهای موجود (متغیرهای
-baseUrl/token، «Authorization: Bearer {{token}}»، تبدیلِ {id} به :id،
-assertionهای وضعیت، و استخراجِ متغیر از پاسخ) همه دست‌نخورده باقی می‌مانند.
+baseUrl/token، تبدیلِ {id} به :id، assertionهای وضعیت، و استخراجِ متغیر از
+پاسخ) همه دست‌نخورده باقی می‌مانند.
+
+احراز هویت: هدرِ «Authorization: {{token}}» را PostmanBuilder روی هر درخواست
+اعمال می‌کند — بی‌قید و شرط و مستقل از فیلدِ `authorization` نتیجه‌ی قدم دوم
+(که برای snapshotهای بدونِ `security` همیشه null است). `validate_collection`
+همین قاعده را روی کالکشنِ نهایی بررسی می‌کند تا قدم پنجم هم کالکشنِ قدیمیِ
+بدونِ هدر را رد کند.
 """
 
 from __future__ import annotations
@@ -38,6 +44,8 @@ from typing_extensions import TypedDict
 
 from src.agents.test_case_generator.api_discovery import operation_key
 from src.agents.test_case_generator.postman_builder import (
+    AUTHORIZATION_HEADER,
+    AUTHORIZATION_VALUE,
     SCHEMA_V21,
     PostmanBuildError,
     PostmanBuilder,
@@ -57,10 +65,6 @@ _DEFAULT_COLLECTION_NAME = "Generated API Test Collection"
 # نامِ پوشه‌ای که تست‌کیس‌های خارج از هر سناریو را نگه می‌دارد
 _UNASSIGNED_FOLDER = "Unassigned test cases"
 
-# قراردادِ احراز هویتِ موجودِ پروژه — توکنِ واقعی هرگز ساخته نمی‌شود
-_AUTH_HEADER = "Authorization"
-_AUTH_VALUE = "Bearer {{token}}"
-
 _COLLECTION_SCOPE = "collection"
 _BODY_SOURCE = "body"
 _HEADER_SOURCE = "header"
@@ -71,28 +75,6 @@ _VALID_METHODS = frozenset(
         "GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS",
         "COPY", "LINK", "UNLINK", "PURGE", "LOCK", "UNLOCK", "PROPFIND", "VIEW",
     }
-)
-
-# عبارت‌هایی که نشان می‌دهند خودِ تست‌کیس درخواستِ «بدون احراز هویت» را توصیف
-# می‌کند. عمداً محافظه‌کارانه است: «unauthorized» یا «invalid token» اینجا نیست،
-# چون آن سناریوها معمولاً هدر را می‌فرستند و فقط مقصودشان رد شدن است.
-_UNAUTHENTICATED_PHRASES = (
-    "without authentication",
-    "without authorization",
-    "without an authentication",
-    "without credentials",
-    "without a token",
-    "without any token",
-    "without token",
-    "no authentication",
-    "no authorization",
-    "no token",
-    "missing authentication",
-    "missing authorization",
-    "missing token",
-    "unauthenticated",
-    "not authenticated",
-    "anonymous",
 )
 
 # {{variable}} داخل url/header/body
@@ -346,26 +328,6 @@ def validate_step3_references(
 
 # ── تصمیم‌های قطعی ───────────────────────────────────────────────────────────
 
-def case_text(case: dict) -> str:
-    """متنِ یک تست‌کیس را برای تشخیصِ معنایی جمع می‌کند."""
-    parts = [_clean(case.get("title")), _clean(case.get("expected_result"))]
-    for key in ("preconditions", "steps"):
-        value = case.get(key)
-        if isinstance(value, list):
-            parts.extend(_clean(item) for item in value)
-    return " ".join(part for part in parts if part).lower()
-
-
-def case_expects_no_authentication(case: dict) -> bool:
-    """آیا خودِ تست‌کیس صریحاً درخواستِ بدونِ احراز هویت را توصیف می‌کند؟
-
-    فقط عبارت‌هایی که «نبودِ» احراز هویت را می‌گویند اینجا مؤثرند. یک کیسِ منفیِ
-    کسب‌وکاری (مثلاً اعتبارسنجیِ بدنه) همچنان هدرِ معتبر می‌فرستد.
-    """
-    text = case_text(case)
-    return any(phrase in text for phrase in _UNAUTHENTICATED_PHRASES)
-
-
 def operation_index(services: list[dict]) -> dict[tuple[str, str], tuple[dict, dict]]:
     """(متد، مسیرِ نرمال‌شده) → (سرویس، عملیات)."""
     index: dict[tuple[str, str], tuple[dict, dict]] = {}
@@ -527,7 +489,6 @@ def _build_request_case(
     case: dict,
     case_id: str,
     operation: dict,
-    service: dict,
     dependencies: list[dict],
     clarifications: list[dict],
     warnings: list[str],
@@ -540,17 +501,10 @@ def _build_request_case(
     notes: list[str] = []
 
     # ── احراز هویت ──────────────────────────────────────────────────────────
-    headers: dict[str, str] = {}
-    authorization = service.get("authorization")
-    if isinstance(authorization, dict) and _clean(authorization.get("value")):
-        if case_expects_no_authentication(case):
-            notes.append(
-                "The Authorization header is intentionally not sent: this test case "
-                "describes a request made without authentication."
-            )
-        else:
-            header = _clean(authorization.get("header")) or _AUTH_HEADER
-            headers[header] = _clean(authorization.get("value")) or _AUTH_VALUE
+    # PostmanBuilder این هدر را روی هر درخواست اعمال می‌کند؛ این‌جا هم گذاشته
+    # می‌شود تا TestCaseِ میانی با خروجی یکی باشد و پارامترِ header ِ مستندِ
+    # «authorization» به‌عنوانِ «مقدار ندارد» گزارش نشود.
+    headers: dict[str, str] = {AUTHORIZATION_HEADER: AUTHORIZATION_VALUE}
 
     # ── بدنه ────────────────────────────────────────────────────────────────
     documented_body = operation.get("request_body")
@@ -729,7 +683,7 @@ def _plan(
 
         built[case_id] = (
             _build_request_case(
-                case, case_id, operation, service, dependencies, clarifications,
+                case, case_id, operation, dependencies, clarifications,
                 outcome.warnings,
             ),
             service,
@@ -928,6 +882,22 @@ def iter_collection_requests(collection: dict):
                 yield item
 
 
+def has_required_authorization(request: dict) -> bool:
+    """آیا درخواستِ Postman دقیقاً یک «Authorization: {{token}}» دارد؟
+
+    نامِ هدر case-insensitive مقایسه می‌شود تا «authorization» تکراری حساب شود.
+    کالکشنی که پیش از قاعده‌ی سراسری ساخته شده (مثلاً نتیجه‌ی قدیمیِ قدم چهارم
+    که در session مانده) این‌جا رد می‌شود.
+    """
+    values = [
+        header.get("value")
+        for header in request.get("header") or []
+        if isinstance(header, dict)
+        and _clean(header.get("key")).lower() == AUTHORIZATION_HEADER.lower()
+    ]
+    return values == [AUTHORIZATION_VALUE]
+
+
 def validate_collection(collection: Any) -> list[str]:
     """کالکشنِ ساخته‌شده را از نظرِ ساختارِ Postman بررسی می‌کند.
 
@@ -1001,6 +971,12 @@ def validate_collection(collection: Any) -> list[str]:
                 method = _clean(request.get("method")).upper()
                 if method not in _VALID_METHODS:
                     problems.append(f"request {name!r} has an invalid method {method!r}.")
+                if not has_required_authorization(request):
+                    problems.append(
+                        f"request {name!r} must send exactly one "
+                        f"'{AUTHORIZATION_HEADER}: {AUTHORIZATION_VALUE}' header — "
+                        f"regenerate the collection in Step 4."
+                    )
                 url = request.get("url")
                 if not isinstance(url, dict):
                     problems.append(f"request {name!r} has no 'url' object.")
@@ -1225,13 +1201,12 @@ __all__ = [
     "Step4Result",
     "Step4Scenario",
     "Step4Unresolved",
-    "case_expects_no_authentication",
-    "case_text",
     "check_variables_are_available",
     "extract_mappings",
     "extract_services",
     "extract_step3_sections",
     "extract_test_cases",
+    "has_required_authorization",
     "iter_collection_requests",
     "mapping_for",
     "operation_index",

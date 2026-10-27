@@ -48,11 +48,11 @@ from src.agents.test_case_generator.api_mapping import (  # noqa: E402
 )
 from src.agents.test_case_generator.swagger_snapshots import (  # noqa: E402
     DEFAULT_SELECTION,
-    REFRESH_NOT_IMPLEMENTED,
     SELECTIONS,
     SWAGGER_SOURCES,
     expand_selection,
     selection_label,
+    snapshot_fingerprint,
     snapshot_path,
 )
 from src.debug import DebugConfig  # noqa: E402
@@ -62,8 +62,15 @@ from ui.formatting import (  # noqa: E402
     mapping_details,
     service_details,
 )
+from ui.swagger_refresh import (  # noqa: E402
+    is_refreshing,
+    refresh_status,
+    run_pending_refresh,
+    start_refresh,
+)
 from ui.workflow import (  # noqa: E402
     INPUT_SWAGGER_SELECTION,
+    INPUT_SWAGGER_SNAPSHOTS,
     INPUT_SWAGGER_SOURCES,
     RESULT_ARGUMENT,
     WorkflowState,
@@ -287,28 +294,44 @@ def _render_standalone() -> None:
 
 
 def _render_update_buttons() -> None:
-    """دکمه‌ی Update هر منبعِ Swagger — فعلاً فقط جای‌نگهدار.
+    """دکمه‌ی Update هر منبعِ Swagger — سندِ تازه را می‌گیرد و snapshot را جایگزین می‌کند.
 
-    تازه‌سازیِ snapshot از روی نشانیِ اصلی پیاده نشده است و این دکمه هیچ
-    درخواستی نمی‌فرستد. متنِ راهنما و زیرنویس عمداً صریح‌اند تا کسی گمان
-    نکند این دکمه کار می‌کند.
+    هر دکمه فقط فایلِ منبعِ خودش را عوض می‌کند. کلیک فقط وضعیت را «در حالِ
+    بارگذاری» می‌کند و صفحه دوباره کشیده می‌شود تا همان دکمه غیرفعال دیده شود؛
+    درخواست در اجرای بعد فرستاده می‌شود. دکمه‌ی منبعِ دیگر فعال می‌ماند. نگاشت
+    خودکار اجرا نمی‌شود.
     """
     st.caption(
-        "Refreshing a snapshot from its Swagger URL is **not implemented yet**. "
-        "The buttons below are placeholders — the JSON files in `data/swagger/` "
-        "are maintained by hand for now."
+        "Fetch the latest Swagger document of a source and replace its local "
+        "snapshot. The file is only replaced when the download is complete and "
+        "valid. Step 2 is not run automatically."
     )
     columns = st.columns(len(SWAGGER_SOURCES))
     for column, source in zip(columns, SWAGGER_SOURCES):
         with column:
-            st.button(
-                f"Update {source.label}",
+            loading = is_refreshing(st.session_state, source.key)
+            if st.button(
+                f"Fetching {source.label}..." if loading else f"Update {source.label}",
                 key=f"workflow_update_{source.key}",
-                disabled=True,
-                help=REFRESH_NOT_IMPLEMENTED,
+                disabled=loading,
+                help=f"Fetch {source.remote_url} and replace data/swagger/{source.filename}",
                 use_container_width=True,
-            )
+            ):
+                start_refresh(st.session_state, source.key)
+                st.rerun()
             st.caption(f"`{source.filename}`")
+            status = refresh_status(st.session_state, source.key)
+            if status is not None:
+                (st.success if status.ok else st.error)(status.message)
+
+    # درخواست‌ها بعد از کشیدنِ همه‌ی دکمه‌ها فرستاده می‌شوند تا دکمه‌ی منبعِ دیگر
+    # در طولِ انتظار دیده و قابلِ کلیک بماند.
+    for column, source in zip(columns, SWAGGER_SOURCES):
+        if not is_refreshing(st.session_state, source.key):
+            continue
+        with column, st.spinner(f"Fetching {source.label} Swagger from {source.remote_url}..."):
+            run_pending_refresh(st.session_state, source.key)
+        st.rerun()
 
 
 def _stored_selection(workflow: WorkflowState) -> str:
@@ -346,6 +369,14 @@ def _render_in_workflow(workflow: WorkflowState) -> None:
 
     _render_update_buttons()
 
+    # محتوای snapshotهایی که آخرین نگاشت از آن‌ها خوانده است. اگر بعد از اجرا
+    # عوض شده باشند (Update یا ویرایشِ دستی)، پاورقیِ ویزارد هشدار می‌دهد که
+    # نتیجه متعلق به سندِ قدیمی است.
+    workflow.set_input(
+        INPUT_SWAGGER_SNAPSHOTS,
+        snapshot_fingerprint(expand_selection(_stored_selection(workflow))),
+    )
+
     if st.button(run_label(workflow, 2), key="workflow_run_2"):
         payload = workflow.step_inputs(2)
         upstream = RESULT_ARGUMENT[1]
@@ -361,6 +392,7 @@ def _render_in_workflow(workflow: WorkflowState) -> None:
             workflow.set_input(
                 INPUT_SWAGGER_SOURCES, "\n".join(str(snapshot_path(key)) for key in keys)
             )
+            workflow.set_input(INPUT_SWAGGER_SNAPSHOTS, snapshot_fingerprint(keys))
             with workflow.track_usage(2):
                 result, error = _run(payload[upstream], "", snapshot_keys=keys)
             if error:

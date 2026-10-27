@@ -706,10 +706,13 @@ def _apply_negative_type(
     notes: list[str] = []
 
     if neg_type == "unauthorized":
+        # PostmanBuilder هدرِ Authorization: {{token}} را روی هر درخواست می‌گذارد؛
+        # پس این کیس فقط با یک {{token}}ِ خالی/نامعتبر در زمانِ اجرا 401 می‌گیرد.
         headers.pop(_AUTH_HEADER, None)
         notes.append(
-            "The Authorization header is intentionally not sent so that the request "
-            "asserts the unauthorized response."
+            "The Authorization header is always sent as {{token}}; run this request "
+            "with an empty or invalid token value so that it asserts the "
+            "unauthorized response."
         )
         return body, notes
 
