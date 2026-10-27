@@ -174,6 +174,9 @@ def _render_data_dependencies(result: dict, test_cases: list[dict]) -> None:
 
     for dependency in details:
         st.markdown(f"#### {dependency['variable_name'] or '—'}")
+        origin = "requested in the task" if dependency["origin"] == "task" else "inferred"
+        required = "required" if dependency["required"] else "optional"
+        st.markdown(f"**Variable:** {dependency['scope']} · {required} · {origin}")
         st.markdown(f"**Source:** {dependency['source']['label'] or '—'}")
         st.markdown("**Targets:**")
         for target in dependency["targets"]:

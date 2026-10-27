@@ -16,6 +16,11 @@ import re
 from typing import Any
 
 from src.agents.test_case_generator.task_analysis import REQUIRES_MAPPING
+from src.agents.test_case_generator.variable_dependencies import (
+    ORIGIN_INFERRED,
+    dependency_required,
+    dependency_scope,
+)
 
 # ترتیبِ ثابتِ انواع در خلاصه‌ی نتیجه
 TYPE_ORDER = ("positive", "negative", "boundary", "state_transition")
@@ -400,6 +405,11 @@ def dependency_details(result: Any, test_cases: Any = None) -> list[dict[str, An
                 "variable_name": _case_field(dependency, "variable_name"),
                 "confidence": _case_field(dependency, "confidence"),
                 "reason": _case_field(dependency, "reason"),
+                # نتیجه‌ی قدیمیِ بدونِ این فیلدها همان پیش‌فرض‌های قدم چهارم را
+                # نشان می‌دهد تا آنچه دیده می‌شود همان باشد که ساخته می‌شود.
+                "scope": dependency_scope(dependency),
+                "required": dependency_required(dependency),
+                "origin": _case_field(dependency, "origin") or ORIGIN_INFERRED,
                 "source": {
                     "test_case_id": source_case,
                     "heading": _case_heading_for(source_case, titles),
@@ -416,6 +426,40 @@ def dependency_details(result: Any, test_cases: Any = None) -> list[dict[str, An
             }
         )
     return details
+
+
+def requested_variable_rows(result: Any) -> list[dict[str, str]]:
+    """متغیرهایی که کاربر در تسک صریحاً خواسته — یک ردیف برای هر متغیر."""
+    rows: list[dict[str, str]] = []
+    for variable in (result or {}).get("variables") or []:
+        if not isinstance(variable, dict):
+            continue
+        consumers = []
+        for consumer in variable.get("consumers") or []:
+            if not isinstance(consumer, dict):
+                continue
+            place = ".".join(
+                part
+                for part in (
+                    _case_field(consumer, "location"),
+                    _case_field(consumer, "parameter"),
+                )
+                if part
+            )
+            case_id = _case_field(consumer, "test_case_id")
+            consumers.append(f"{case_id} ({place})" if place else case_id)
+        rows.append(
+            {
+                "Variable": _case_field(variable, "name"),
+                "Scope": _case_field(variable, "scope"),
+                "Source": _case_field(variable, "source_test_case_id"),
+                "Response path": _case_field(variable, "response_path")
+                or "(resolved in Step 3)",
+                "Required": "yes" if variable.get("required", True) else "no",
+                "Consumers": ", ".join(consumers) or "—",
+            }
+        )
+    return rows
 
 
 def clarification_details(result: Any, test_cases: Any = None) -> list[dict[str, Any]]:

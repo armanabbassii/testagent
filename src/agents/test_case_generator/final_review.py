@@ -39,6 +39,7 @@ final_review.py — بازبینیِ قطعیِ نهایی و آماده‌سا�
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Any
 
@@ -47,6 +48,7 @@ from typing_extensions import TypedDict
 from src.agents.test_case_generator.api_discovery import operation_key
 from src.agents.test_case_generator.postman_generation import (
     PostmanGenerationError,
+    check_dependency_wiring,
     check_variables_are_available,
     extract_mappings,
     extract_services,
@@ -54,9 +56,14 @@ from src.agents.test_case_generator.postman_generation import (
     extract_test_cases,
     iter_collection_requests,
     mapping_for,
+    missing_requested_variables,
     operation_index,
     validate_collection,
     validate_step3_references,
+)
+from src.agents.test_case_generator.variable_dependencies import (
+    VariableInstructionError,
+    requested_variables,
 )
 from src.debug import DebugConfig
 
@@ -74,6 +81,9 @@ _UNRESOLVED_TEST_CASE = "unresolved_test_case"
 
 #: قراردادِ نام‌گذاریِ درخواستِ قدم چهارم: «<case_id> — <title>»
 _SEPARATOR = " — "
+
+# قطعه‌ای از مسیرِ URL که خودش یک متغیرِ Postman است: «{{voucherId}}»
+_PATH_VARIABLE_SEGMENT_RE = re.compile(r"^\{\{[^{}]+\}\}$")
 
 # ── قراردادِ خروجی ───────────────────────────────────────────────────────────
 
@@ -236,7 +246,11 @@ def _case_id_for(name: str, by_name: dict[str, str], known: set[str]) -> str:
 def _request_path(url: Any) -> str:
     """مسیرِ قالبیِ یک URLِ Postman.
 
-        ["admin", "voucher", ":id"] → "/admin/voucher/{id}"
+        ["admin", "voucher", ":id"]           → "/admin/voucher/{id}"
+        ["admin", "voucher", "{{voucherId}}"] → "/admin/voucher/{voucherId}"
+
+    قطعه‌ای که خودش یک متغیرِ Postman است (مقدارِ یک data dependency که قدم
+    چهارم مستقیم در مسیر گذاشته) همان پارامترِ مسیر است، نه یک قطعه‌ی ثابت.
     """
     if not isinstance(url, dict):
         return ""
@@ -247,7 +261,12 @@ def _request_path(url: Any) -> str:
     parts: list[str] = []
     for segment in segments:
         text = str(segment)
-        parts.append("{" + text[1:] + "}" if text.startswith(":") else text)
+        if text.startswith(":"):
+            parts.append("{" + text[1:] + "}")
+        elif _PATH_VARIABLE_SEGMENT_RE.match(text):
+            parts.append("{" + text[2:-2].strip() + "}")
+        else:
+            parts.append(text)
     return "/" + "/".join(parts) if parts else ""
 
 
@@ -454,6 +473,35 @@ def _collection_issues(
         for problem in check_variables_are_available(collection, dependency_variables)
     )
     return issues
+
+
+def _dependency_issues(
+    collection: dict, dependencies: list[dict], records: list[_GeneratedRequest]
+) -> list[ReviewIssue]:
+    """سیم‌کشیِ وابستگی‌های قدم سوم در کالکشن — با همان بررسیِ قدم چهارم.
+
+    کالکشنی که پیش از قاعده‌ی استخراجِ محافظت‌شده ساخته شده (نتیجه‌ی قدیمیِ
+    قدم چهارم در session) یا دستی ویرایش شده، این‌جا رد می‌شود.
+    """
+    names = {record.case_id: record.name for record in records if record.case_id}
+    return [
+        _issue("broken_dependency", 4, "", problem)
+        for problem in check_dependency_wiring(collection, dependencies, names)
+    ]
+
+
+def _requested_variable_issues(
+    step1_result: Any, dependencies: list[dict]
+) -> list[ReviewIssue]:
+    """متغیری که کاربر صریحاً خواسته باید در نتیجه‌ی قدم سوم وجود داشته باشد."""
+    try:
+        requested = requested_variables(step1_result)
+    except VariableInstructionError as exc:
+        return [_issue("invalid_step1_input", 1, "", str(exc))]
+    return [
+        _issue("missing_requested_variable", 3, "", problem)
+        for problem in missing_requested_variables(requested, dependencies)
+    ]
 
 
 def _metadata_issues(
@@ -743,6 +791,9 @@ class FinalReviewGenerator:
             issues.extend(
                 _collection_issues(collection, _dependency_variables(dependencies))
             )
+            issues.extend(_dependency_issues(collection, dependencies, records))
+        if step1_ok and step3_ok:
+            issues.extend(_requested_variable_issues(step1_result, dependencies))
         if step1_ok:
             issues.extend(
                 _coverage_issues(test_cases, records, _reported_unresolved(metadata))

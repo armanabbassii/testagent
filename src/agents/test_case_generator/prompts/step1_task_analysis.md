@@ -273,6 +273,56 @@ Example:
 Do not invent an actual ID.
 
 ==================================================
+REQUESTED VARIABLES
+==================================================
+
+The task may explicitly ask that a value from one API response is extracted,
+checked, saved as a Postman variable and reused by later requests. For example:
+
+  "Extract result.body.id from the create response, check that it exists,
+   save it as the global variable voucherId and call the get service with it."
+
+Only when the task explicitly asks for this, record each such variable in the
+top-level "variables" array. Never add a variable the task does not ask for —
+ordinary data flow between test cases is analysed in a later step.
+
+Each variable is an object:
+
+  "name": the exact variable name the task gives (for example "voucherId").
+          Do not rename it, translate it or change its case.
+  "scope": "global" or "collection". Use the scope the task names; when the
+          task does not name one, use "global".
+  "source_test_case_id": the id of the test case whose successful response
+          produces the value. It must be one of your test cases and must not be
+          a negative test case.
+  "response_path": the path of the value inside the response body exactly as
+          the task gives it (for example "result.body.id"). Use "" when the
+          task does not give a path. Never invent a path.
+  "required": true when the task asks to check that the value exists or when
+          later requests depend on it (the normal case); false only when the
+          task says the value is optional.
+  "consumers": the test cases that must use the saved value, each as
+          {"test_case_id": "...", "location": "...", "parameter": "..."}.
+          location is "path", "query", "header" or "body" when the task makes
+          it clear (for example "the id in the URL" is "path"), otherwise "".
+          parameter is the parameter or body field name when the task gives it,
+          otherwise "". A later step resolves empty values from the API
+          contract.
+  "instruction": the sentence of the task this variable comes from, quoted.
+
+Rules:
+
+- The check that the extracted value exists belongs to the source test case
+  ("required": true). Do NOT create an extra test case whose only purpose is to
+  check that the value exists.
+- Only list a test case as a consumer when it really operates on the resource
+  the source created. A negative test case that deliberately uses a
+  non-existent or invalid identifier is NOT a consumer; it uses its own
+  independent input.
+- Do not write Postman scripts, {{...}} references or JavaScript. Record the
+  instruction only; later steps generate the scripts deterministically.
+
+==================================================
 DUPLICATES
 ==================================================
 
@@ -316,8 +366,27 @@ Use exactly this top-level structure:
       "auth_intent": "inherit"
     }
   ],
-  "clarifications": []
+  "clarifications": [],
+  "variables": []
 }
+
+When the task explicitly requests a variable, "variables" looks like:
+
+"variables": [
+  {
+    "name": "createdId",
+    "scope": "global",
+    "source_test_case_id": "TC-001",
+    "response_path": "data.id",
+    "required": true,
+    "consumers": [
+      {"test_case_id": "TC-003", "location": "path", "parameter": ""}
+    ],
+    "instruction": "<the sentence of the task that asks for it>"
+  }
+]
+
+Use "variables": [] when the task requests no variable.
 
 If no clarification is required:
 
@@ -366,7 +435,8 @@ Do NOT:
 - Generate Postman scripts
 - Generate Authorization headers
 - Generate {{token}}
-- Generate Postman variables
+- Generate Postman variables, scripts or {{...}} references (only record the
+  variables the task explicitly requests in the "variables" array)
 - Generate or invent credentials of any kind
 - Execute APIs
 - Execute tests

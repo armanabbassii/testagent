@@ -44,10 +44,6 @@ from typing_extensions import TypedDict
 
 from src.agents.test_case_generator.api_discovery import operation_key
 from src.agents.test_case_generator.auth_intent import (
-    AUTH_INTENT_AUTHENTICATED,
-    AUTH_INTENT_INHERIT,
-    AUTH_INTENT_INVALID,
-    AUTH_INTENT_UNAUTHENTICATED,
     AuthIntentError,
     normalize_auth_intent,
 )
@@ -57,14 +53,23 @@ from src.agents.test_case_generator.postman_builder import (
     SCHEMA_V21,
     PostmanBuildError,
     PostmanBuilder,
+    variable_setter,
 )
 from src.agents.test_case_generator.testcase_generator import (
     DEFAULT_BASE_URL_VAR,
     Assertion,
     ControllerTestCases,
+    RequiredVariable,
     SaveVariable,
     TestCase,
     TestCaseSuite,
+)
+from src.agents.test_case_generator.variable_dependencies import (
+    SCOPE_GLOBAL,
+    VariableInstructionError,
+    dependency_required,
+    dependency_scope,
+    requested_variables,
 )
 from src.debug import DebugConfig
 
@@ -73,7 +78,6 @@ _DEFAULT_COLLECTION_NAME = "Generated API Test Collection"
 # نامِ پوشه‌ای که تست‌کیس‌های خارج از هر سناریو را نگه می‌دارد
 _UNASSIGNED_FOLDER = "Unassigned test cases"
 
-_COLLECTION_SCOPE = "collection"
 _BODY_SOURCE = "body"
 _HEADER_SOURCE = "header"
 
@@ -385,11 +389,37 @@ def source_variables(dependencies: list[dict], case_id: str) -> list[SaveVariabl
             SaveVariable(
                 json_path=_clean(source.get("path")),
                 variable=variable,
-                scope=_COLLECTION_SCOPE,
+                # اسکوپ از خودِ وابستگی می‌آید (global برای متغیرِ درخواستیِ
+                # کاربر)؛ نتیجه‌ی قدیمیِ بدونِ این فیلد همان collection است.
+                scope=dependency_scope(dependency),
                 source=_HEADER_SOURCE if is_header else _BODY_SOURCE,
+                required=dependency_required(dependency),
             )
         )
     return saves
+
+
+def required_variables(dependencies: list[dict], case_id: str) -> list[RequiredVariable]:
+    """متغیرهای الزامی‌ای که این تست‌کیس مصرف می‌کند — برای pre-request guard."""
+    required: list[RequiredVariable] = []
+    for dependency in dependencies:
+        variable = _clean(dependency.get("variable_name"))
+        if not variable or not dependency_required(dependency):
+            continue
+        consumes = any(
+            isinstance(target, dict) and _clean(target.get("test_case_id")) == case_id
+            for target in dependency.get("targets") or []
+        )
+        if not consumes:
+            continue
+        source = dependency.get("source")
+        producer = _clean(source.get("test_case_id")) if isinstance(source, dict) else ""
+        required.append(
+            RequiredVariable(
+                variable=variable, scope=dependency_scope(dependency), producer=producer
+            )
+        )
+    return required
 
 
 def target_references(dependencies: list[dict], case_id: str) -> dict[str, dict[str, str]]:
@@ -534,24 +564,14 @@ def _build_request_case(
     references = target_references(dependencies, case_id)
     path_params = dict(references["path"])
     query_params = dict(references["query"])
-    protected_auth_header = next(iter(headers), None)
-    if protected_auth_header is None and credentials_withheld:
-        # حتی وقتی هدر عمداً فرستاده نمی‌شود، یک dependencyِ داده‌ای نباید آن را
-        # دوباره تزریق کند. نامِ هدر از قرارداد می‌آید (پیش‌فرض authorization).
-        contract = valid_auth_header(service)
-        if contract is not None:
-            protected_auth_header = contract[0]
     for header, value in references["header"].items():
-        # قصدِ اعتبارنامه‌ی همین تست‌کیس بر یک dependencyِ داده‌ای مقدم است؛
-        # وگرنه ممکن بود توکنِ نامعتبر یا «بدونِ اعتبارنامه» بازنویسی شود.
-        if (
-            protected_auth_header is not None
-            and header.lower() == protected_auth_header.lower()
-        ):
+        # قاعده‌ی سراسریِ احراز هویت بر یک dependencyِ داده‌ای مقدم است؛ وگرنه
+        # PostmanBuilder مقدارِ dependency را بی‌صدا با {{token}} جایگزین می‌کرد.
+        if header.lower() == AUTHORIZATION_HEADER.lower():
             note = (
                 f"The data dependency targets the authentication header '{header}', "
-                f"but this test case's credential intent takes precedence; the "
-                f"dependency value was not applied."
+                f"but every request sends '{AUTHORIZATION_HEADER}: "
+                f"{AUTHORIZATION_VALUE}'; the dependency value was not applied."
             )
             notes.append(note)
             warnings.append(f"{case_id}: {note}")
@@ -565,7 +585,15 @@ def _build_request_case(
                 "Swagger documents no request body for this operation; the body "
                 "carries only the fields required by the Step 3 data dependencies."
             )
-        body.update(references["body"])
+        for field_path, value in references["body"].items():
+            if not _set_body_field(body, field_path, value):
+                note = (
+                    f"The data dependency targets body field '{field_path}', but the "
+                    f"documented body has a non-object value on that path; the "
+                    f"dependency value was not applied."
+                )
+                notes.append(note)
+                warnings.append(f"{case_id}: {note}")
 
     for parameter in path_params:
         if f"{{{parameter}}}" not in path:
@@ -623,7 +651,29 @@ def _build_request_case(
         save_variables=save_variables,
         assumptions=notes,
         base_url_var="",
+        required_variables=required_variables(dependencies, case_id),
     )
+
+
+def _set_body_field(body: dict, field_path: str, value: str) -> bool:
+    """مقدار را فقط در همان فیلدِ بدنه می‌گذارد — «a.b» یعنی فیلدِ تودرتوی b.
+
+    فیلدهای هم‌نامِ دیگر در بدنه دست نمی‌خورند. اگر میانه‌ی مسیر یک مقدارِ
+    غیرِشیء باشد، چیزی بازنویسی نمی‌شود و False برمی‌گردد.
+    """
+    parts = [part for part in field_path.split(".") if part]
+    if not parts:
+        return False
+    node = body
+    for part in parts[:-1]:
+        child = node.get(part)
+        if child is None:
+            child = node[part] = {}
+        if not isinstance(child, dict):
+            return False
+        node = child
+    node[parts[-1]] = value
+    return True
 
 
 def _plan(
@@ -777,18 +827,6 @@ def _plan(
             for service in used_services[1:]
         ]
 
-    # متغیرِ نامعتبر فقط وقتی declare می‌شود که واقعاً در درخواستی استفاده شده
-    # باشد؛ کالکشنِ بدونِ تستِ نامعتبر متغیرِ بی‌استفاده نمی‌گیرد.
-    uses_invalid_credentials = any(
-        _AUTH_INVALID_VALUE in value
-        for request_case, _ in built.values()
-        for value in request_case["headers"].values()
-    )
-    if uses_invalid_credentials:
-        outcome.extra_variables.append(
-            {"key": _AUTH_INVALID_VARIABLE, "value": ""}
-        )
-
     for request_case, service in built.values():
         request_case["base_url_var"] = var_of[id(service)]
 
@@ -819,13 +857,28 @@ def _plan(
             folder_of[case_id] = name
             outcome.positions[case_id] = (folder_index, item_index)
 
+    # (شناسه‌ی سناریو یا None برای پوشه‌ی «بدونِ سناریو»، اعضا)
+    folders: list[tuple[str | None, list[str]]] = []
     for scenario in scenarios:
         scenario_id = _clean(scenario.get("id"))
         members = sorted(
             (case_id for case_id, owner in assignment.items() if owner == scenario_id),
             key=sort_key,
         )
-        if not members:
+        if members:
+            folders.append((scenario_id, members))
+
+    leftovers = sorted(
+        (case_id for case_id in built if case_id not in assignment), key=sort_key
+    )
+    if leftovers:
+        folders.append((None, leftovers))
+
+    folders = _producers_first(folders, _dependency_edges(dependencies, built), outcome)
+
+    for scenario_id, members in folders:
+        if scenario_id is None:
+            add_folder(_unique_name(_UNASSIGNED_FOLDER, used_names), members)
             continue
         add_folder(_unique_name(scenario_titles[scenario_id], used_names), members)
         outcome.scenario_rows.append(
@@ -835,12 +888,6 @@ def _plan(
                 "request_count": len(members),
             }
         )
-
-    leftovers = sorted(
-        (case_id for case_id in built if case_id not in assignment), key=sort_key
-    )
-    if leftovers:
-        add_folder(_unique_name(_UNASSIGNED_FOLDER, used_names), leftovers)
 
     outcome.suite = TestCaseSuite(controllers=controllers)
 
@@ -866,12 +913,107 @@ def _plan(
     return outcome
 
 
+def _dependency_edges(dependencies: list[dict], built: dict) -> list[tuple[str, str, str]]:
+    """(تولیدکننده، مصرف‌کننده، متغیر) برای هر وابستگی که هر دو سرش درخواست دارند."""
+    edges: list[tuple[str, str, str]] = []
+    for dependency in dependencies:
+        source = dependency.get("source")
+        source_id = _clean(source.get("test_case_id")) if isinstance(source, dict) else ""
+        variable = _clean(dependency.get("variable_name"))
+        if source_id not in built or not variable:
+            continue
+        for target in dependency.get("targets") or []:
+            target_id = _clean(target.get("test_case_id")) if isinstance(target, dict) else ""
+            if target_id in built and target_id != source_id:
+                edges.append((source_id, target_id, variable))
+    return edges
+
+
+def _stable_topological(items: list, edges: set[tuple]) -> list | None:
+    """مرتب‌سازیِ توپولوژیکِ پایدار: تا جای ممکن همان ترتیبِ ورودی.
+
+    در هر قدم، اولین عضوی (به ترتیبِ ورودی) انتخاب می‌شود که همه‌ی پیش‌نیازهایش
+    آمده باشند. حلقه → None (ترتیب دست‌نخورده می‌ماند و هشدار گزارش می‌شود).
+    """
+    remaining = list(items)
+    placed: list = []
+    while remaining:
+        ready = next(
+            (
+                item
+                for item in remaining
+                if all(before in placed for before, after in edges if after == item)
+            ),
+            None,
+        )
+        if ready is None:
+            return None
+        placed.append(ready)
+        remaining.remove(ready)
+    return placed
+
+
+def _producers_first(
+    folders: list[tuple[str | None, list[str]]],
+    edges: list[tuple[str, str, str]],
+    outcome: _Outcome,
+) -> list[tuple[str | None, list[str]]]:
+    """ترتیب را طوری می‌چیند که هر تولیدکننده پیش از مصرف‌کننده‌هایش اجرا شود.
+
+    ترتیبِ قدم سوم مبنا است و فقط وقتی تغییر می‌کند که یک مصرف‌کننده پیش از
+    تولیدکننده‌اش آمده باشد — هم داخلِ پوشه و هم بینِ پوشه‌ها (Runner پوشه‌ها را
+    به ترتیب اجرا می‌کند). هر جابه‌جایی گزارش می‌شود. اگر وابستگی‌ها حلقه
+    بسازند، ترتیب دست‌نخورده می‌ماند و _check_dependency_order هشدار می‌دهد.
+    """
+    if not edges:
+        return folders
+
+    original = [case_id for _, members in folders for case_id in members]
+
+    folder_of = {
+        case_id: position
+        for position, (_, members) in enumerate(folders)
+        for case_id in members
+    }
+    reordered: list[tuple[str | None, list[str]]] = []
+    for scenario_id, members in folders:
+        inside = {
+            (source, target)
+            for source, target, _ in edges
+            if source in members and target in members
+        }
+        reordered.append((scenario_id, _stable_topological(members, inside) or members))
+
+    folder_edges = {
+        (folder_of[source], folder_of[target])
+        for source, target, _ in edges
+        if folder_of[source] != folder_of[target]
+    }
+    order = _stable_topological(list(range(len(reordered))), folder_edges)
+    if order is not None:
+        reordered = [reordered[position] for position in order]
+
+    final = [case_id for _, members in reordered for case_id in members]
+    if final != original:
+        before = {case_id: position for position, case_id in enumerate(original)}
+        after = {case_id: position for position, case_id in enumerate(final)}
+        for source, target, variable in edges:
+            if before[target] < before[source] and after[target] > after[source]:
+                outcome.warnings.append(
+                    f"{target!r} consumes '{{{{{variable}}}}}' produced by "
+                    f"{source!r}; it was moved after {source!r} so the variable is "
+                    f"set before it runs."
+                )
+    return reordered
+
+
 def _check_dependency_order(dependencies: list[dict], outcome: _Outcome) -> None:
     """بررسی می‌کند متغیرِ هر وابستگی پیش از مصرف‌شدن استخراج شود.
 
-    ترتیبِ درخواست‌ها تصمیمِ قدم سوم است و اینجا بازچینی نمی‌شود؛ اگر وابستگی‌ای
-    با آن ترتیب ناسازگار باشد، به‌صورت هشدار و assumption گزارش می‌شود تا بازبین
-    بتواند تصمیم بگیرد.
+    _producers_first پیش از این، هر مصرف‌کننده را بعد از تولیدکننده‌اش چیده است؛
+    آنچه این‌جا می‌ماند فقط حالتی است که بازچینی ممکن نبود (حلقه). آن به‌صورت
+    هشدار و assumption گزارش می‌شود تا بازبین بتواند تصمیم بگیرد — و در زمانِ
+    اجرا pre-request guardِ مصرف‌کننده جلوی ارسالِ درخواست را می‌گیرد.
     """
     positions = outcome.positions
 
@@ -1090,6 +1232,222 @@ def check_variables_are_available(
     return problems
 
 
+# ── سیم‌کشیِ وابستگی‌ها در کالکشنِ نهایی ─────────────────────────────────────
+
+# بررسیِ وجودِ مقدار در اسکریپتِ استخراجِ محافظت‌شده‌ی PostmanBuilder
+_VALUE_CHECK = 'to.not.be.oneOf([undefined, null, ""])'
+
+
+def _event_script(item: dict, listen: str) -> str:
+    """متنِ اسکریپتِ یک event («test» یا «prerequest») از یک آیتمِ کالکشن."""
+    lines: list[str] = []
+    for event in item.get("event") or []:
+        if not isinstance(event, dict) or event.get("listen") != listen:
+            continue
+        script = event.get("script")
+        exec_lines = script.get("exec") if isinstance(script, dict) else None
+        if isinstance(exec_lines, list):
+            lines.extend(str(line) for line in exec_lines)
+        elif isinstance(exec_lines, str):
+            lines.append(exec_lines)
+    return "\n".join(lines)
+
+
+def _request_uses(request: dict, location: str, parameter: str, reference: str) -> bool:
+    """آیا درخواست دقیقاً در همان محل، ارجاعِ {{variable}} را دارد؟"""
+    url = request.get("url") if isinstance(request.get("url"), dict) else {}
+    if location == "path":
+        if reference in (url.get("path") or []):
+            return True
+        return any(
+            isinstance(variable, dict)
+            and _clean(variable.get("key")) == parameter
+            and variable.get("value") == reference
+            for variable in url.get("variable") or []
+        )
+    if location == "query":
+        return any(
+            isinstance(entry, dict)
+            and _clean(entry.get("key")) == parameter
+            and reference in str(entry.get("value") or "")
+            for entry in url.get("query") or []
+        )
+    if location == "header":
+        return any(
+            isinstance(header, dict)
+            and _clean(header.get("key")).lower() == parameter.lower()
+            and reference in str(header.get("value") or "")
+            for header in request.get("header") or []
+        )
+    if location == "body":
+        body = request.get("body") if isinstance(request.get("body"), dict) else {}
+        try:
+            node: Any = json.loads(body.get("raw") or "")
+        except (TypeError, ValueError):
+            return False
+        for part in [part for part in parameter.split(".") if part]:
+            if not isinstance(node, dict) or part not in node:
+                return False
+            node = node[part]
+        return node == reference
+    return False
+
+
+def _has_path_slot(request: dict, parameter: str, reference: str) -> bool:
+    """آیا مسیرِ درخواست جایی برای این پارامتر دارد (:name، متغیرِ مسیر یا ارجاع)؟"""
+    url = request.get("url") if isinstance(request.get("url"), dict) else {}
+    segments = [str(segment) for segment in url.get("path") or []]
+    if reference in segments or f":{parameter}" in segments:
+        return True
+    return any(
+        isinstance(variable, dict) and _clean(variable.get("key")) == parameter
+        for variable in url.get("variable") or []
+    )
+
+
+def check_dependency_wiring(
+    collection: dict, dependencies: list[dict], request_names: dict[str, str]
+) -> list[str]:
+    """هر data_dependency باید در خودِ کالکشنِ سریال‌شده سیم‌کشی شده باشد.
+
+    برای هر وابستگی:
+      * تولیدکننده مقدار را با تابعِ همان اسکوپ ذخیره می‌کند (pm.globals.set
+        برای global) و — اگر الزامی است — پیش از ذخیره وجودش را بررسی می‌کند؛
+      * هر مصرف‌کننده {{variable}} را دقیقاً در همان path/query/header/body
+        می‌فرستد و — اگر الزامی است — یک pre-request guard دارد؛
+      * متغیرِ global با یک متغیرِ کالکشنِ هم‌نام سایه نمی‌خورد (در Postman
+        اسکوپِ collection بر global مقدم است).
+
+    ``request_names``: شناسه‌ی تست‌کیس → نامِ درخواست در کالکشن. تست‌کیسی که
+    درخواستی ندارد این‌جا بررسی نمی‌شود؛ آن را بررسیِ پوشش گزارش می‌کند.
+    """
+    items = {
+        _clean(item.get("name")): item for item in iter_collection_requests(collection)
+    }
+    declared = {
+        _clean(variable.get("key"))
+        for variable in collection.get("variable") or []
+        if isinstance(variable, dict)
+    }
+
+    problems: list[str] = []
+    for dependency in dependencies:
+        variable = _clean(dependency.get("variable_name"))
+        if not variable:
+            continue
+        scope = dependency_scope(dependency)
+        required = dependency_required(dependency)
+        reference = "{{" + variable + "}}"
+        literal = json.dumps(variable, ensure_ascii=False)
+
+        if scope == SCOPE_GLOBAL and variable in declared:
+            problems.append(
+                f"'{variable}' is saved as a global variable, but the collection also "
+                f"declares a collection variable with that name, which would shadow "
+                f"the global value."
+            )
+
+        source = dependency.get("source")
+        source_id = _clean(source.get("test_case_id")) if isinstance(source, dict) else ""
+        source_name = request_names.get(source_id, "")
+        source_item = items.get(source_name)
+        if source_item is not None:
+            script = _event_script(source_item, "test")
+            setter = variable_setter(scope)
+            if f"{setter}({literal}," not in script:
+                problems.append(
+                    f"request {source_name!r} must save '{variable}' with {setter} — "
+                    f"regenerate the collection in Step 4."
+                )
+            elif required and _VALUE_CHECK not in script:
+                problems.append(
+                    f"request {source_name!r} saves '{variable}' without checking that "
+                    f"the extracted value exists — regenerate the collection in Step 4."
+                )
+
+        for target in dependency.get("targets") or []:
+            if not isinstance(target, dict):
+                continue
+            target_name = request_names.get(_clean(target.get("test_case_id")), "")
+            item = items.get(target_name)
+            if item is None:
+                continue
+            location = _clean(target.get("location"))
+            parameter = _clean(target.get("parameter"))
+            if location == "header" and parameter.lower() == AUTHORIZATION_HEADER.lower():
+                # قاعده‌ی سراسریِ احراز هویت عمداً بر این وابستگی مقدم است.
+                continue
+            request = item.get("request") if isinstance(item.get("request"), dict) else {}
+            if location == "path" and not _has_path_slot(request, parameter, reference):
+                # مسیرِ مستند اصلاً این پارامتر را ندارد؛ قدم چهارم همین را به‌صورتِ
+                # هشدار روی همان درخواست گزارش کرده است.
+                continue
+            if not _request_uses(request, location, parameter, reference):
+                problems.append(
+                    f"request {target_name!r} must send {reference} in its {location} "
+                    f"{parameter!r}."
+                )
+            if required and literal not in _event_script(item, "prerequest"):
+                problems.append(
+                    f"request {target_name!r} has no pre-request check that "
+                    f"'{variable}' is set — regenerate the collection in Step 4."
+                )
+    return problems
+
+
+def missing_requested_variables(
+    requested: list[dict], dependencies: list[dict]
+) -> list[str]:
+    """متغیرهایی که کاربر خواسته ولی نتیجه‌ی قدم سوم آن‌ها را آن‌طور ندارد.
+
+    این‌ها خطای ساختاری نیستند (قدم سوم دلیلش را به‌صورتِ ابهام ثبت کرده)،
+    اما نباید بی‌صدا بمانند: کالکشن بدونِ آن‌ها همان سناریوی خواسته‌شده را
+    اجرا نمی‌کند.
+    """
+    by_name = {
+        _clean(dependency.get("variable_name")): dependency
+        for dependency in dependencies
+        if _clean(dependency.get("variable_name"))
+    }
+
+    problems: list[str] = []
+    for variable in requested:
+        name = variable["name"]
+        dependency = by_name.get(name)
+        if dependency is None:
+            problems.append(
+                f"The task requests the {variable['scope']} variable '{name}', but the "
+                f"Step 3 result has no data dependency for it (see the Step 3 "
+                f"clarifications), so nothing extracts it — rerun Step 3."
+            )
+            continue
+        if dependency_scope(dependency) != variable["scope"]:
+            problems.append(
+                f"'{name}' is saved as a {dependency_scope(dependency)} variable, but "
+                f"the task asks for a {variable['scope']} variable — rerun Step 3."
+            )
+        source = dependency.get("source")
+        source_id = _clean(source.get("test_case_id")) if isinstance(source, dict) else ""
+        if source_id != variable["source_test_case_id"]:
+            problems.append(
+                f"'{name}' is extracted from {source_id!r}, but the task asks for it "
+                f"from {variable['source_test_case_id']!r} — rerun Step 3."
+            )
+        targets = {
+            _clean(target.get("test_case_id"))
+            for target in dependency.get("targets") or []
+            if isinstance(target, dict)
+        }
+        for consumer in variable["consumers"]:
+            if consumer["test_case_id"] not in targets:
+                problems.append(
+                    f"The task asks {consumer['test_case_id']!r} to use '{name}', but "
+                    f"no request parameter of it was wired to the variable (see the "
+                    f"Step 3 clarifications)."
+                )
+    return problems
+
+
 # ── تولیدکننده ───────────────────────────────────────────────────────────────
 
 class Step4PostmanGenerator:
@@ -1137,11 +1495,16 @@ class Step4PostmanGenerator:
         validate_step3_references(
             test_cases, mappings, scenarios, execution_order, dependencies
         )
+        try:
+            requested = requested_variables(step1_result)
+        except VariableInstructionError as exc:
+            raise PostmanGenerationError(str(exc)) from exc
 
         outcome = _plan(
             test_cases, scenarios, execution_order, dependencies, clarifications,
             services, mappings,
         )
+        outcome.warnings.extend(missing_requested_variables(requested, dependencies))
 
         collection_name = self._collection_name or self._collection_name_from(step1_result)
         self._log.info(
@@ -1171,6 +1534,13 @@ class Step4PostmanGenerator:
             if _clean(dependency.get("variable_name"))
         }
         problems.extend(check_variables_are_available(collection, dependency_variables))
+        problems.extend(
+            check_dependency_wiring(
+                collection,
+                dependencies,
+                {row["test_case_id"]: row["name"] for row in outcome.requests},
+            )
+        )
         if problems:
             raise PostmanGenerationError(
                 "The generated Postman collection is not valid:\n  - "
@@ -1254,6 +1624,7 @@ __all__ = [
     "Step4Result",
     "Step4Scenario",
     "Step4Unresolved",
+    "check_dependency_wiring",
     "check_variables_are_available",
     "extract_mappings",
     "extract_services",
@@ -1262,9 +1633,9 @@ __all__ = [
     "has_required_authorization",
     "iter_collection_requests",
     "mapping_for",
-    "normalize_authorization",
+    "missing_requested_variables",
     "operation_index",
-    "operation_requires_auth",
+    "required_variables",
     "source_variables",
     "status_assertions",
     "target_references",

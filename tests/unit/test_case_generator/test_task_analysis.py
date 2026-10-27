@@ -773,7 +773,10 @@ class TestTaskAnalysisGenerator:
             "identified_requirements",
             "test_cases",
             "clarifications",
+            "variables",
         }
+        # تسکی که متغیری نخواسته، فهرستِ خالی می‌گیرد — نه اسکریپت یا {{...}}
+        assert result["variables"] == []
         text = json.dumps(result)
         assert "postman" not in text.lower()
         assert "swagger" not in text.lower()

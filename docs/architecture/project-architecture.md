@@ -133,10 +133,10 @@ flowchart TD
 | هدف | تبدیلِ توصیفِ تسک به تست‌کیس‌های کسب‌وکاریِ ساختاریافته |
 | پیاده‌سازی | `TaskAnalysisGenerator` در `task_analysis.py`؛ صفحه: `ui/step1_task_analysis.py` |
 | ورودی | `task_description` (اجباری)، `developed_services` (اختیاری، فقط زمینه) |
-| خروجی | `TaskAnalysisResult`: `task_summary`, `identified_requirements`, `test_cases[]` (`TaskTestCase`: id, title, type, priority, preconditions, steps, expected_result, related_service), `clarifications` |
+| خروجی | `TaskAnalysisResult`: `task_summary`, `identified_requirements`, `test_cases[]` (`TaskTestCase`: id, title, type, priority, preconditions, steps, expected_result, related_service, auth_intent), `clarifications`, `variables[]` (متغیرهای درخواستیِ کاربر — بخشِ K) |
 | LLM | `prompts/step1_task_analysis.md`؛ اگر پاسخ بریده شود یا خالی باشد، تولیدِ مرحله‌ای: `step1_task_plan.md` (برنامه) و `step1_test_case_details.md` (جزئیات در دسته‌ها) |
 | خطا | `ValueError` (ورودیِ خالی)، `TaskAnalysisError` (خروجیِ نامعتبر) — پاسخِ بریده هرگز ترمیم نمی‌شود |
-| نکته | این قدم صراحتاً «Authorization header یا متغیرِ Postman» نمی‌سازد |
+| نکته | این قدم Authorization header، اسکریپت یا ارجاعِ `{{...}}` نمی‌سازد؛ فقط متغیری را که تسک صراحتاً خواسته به‌صورتِ داده در `variables` ثبت می‌کند. `auth_intent` فقط فراداده است و هدر را تغییر نمی‌دهد (بخشِ J) |
 
 ### قدم ۲ — Swagger Analysis & API Mapping
 
@@ -159,8 +159,8 @@ flowchart TD
 | هدف | گروه‌بندیِ سناریو، ترتیبِ اجرا و وابستگی‌های داده بینِ تست‌کیس‌ها |
 | پیاده‌سازی | `Step3ScenarioAnalysisGenerator`/`ScenarioAnalysisAgent` در `scenario_analysis.py` |
 | ورودی | `step1_result` + **قراردادِ فشرده‌ی** قدم ۲ (`compact_step2_result` در `ui/step3_scenario_analysis.py::_run`) — کاتالوگِ کامل حذف می‌شود؛ فقط تعریفِ عملیات‌های نگاشت‌شده (`CompactMapping.operation`) می‌ماند |
-| خروجی | `Step3Result`: `scenarios[]`, `execution_order[]`, `data_dependencies[]` (variable_name, source{test_case_id, location: response.body\|response.header, path}, targets[{test_case_id, location: path\|query\|header\|body, parameter}]), `clarifications[]` |
-| اعتبارسنجی | `validate_scenario_payload`: ارجاع به تست‌کیس‌های واقعی، `find_cycle` برای حلقه، تطبیقِ پارامترِ مقصد با پارامترهای سند و فیلدِ مبدأ با فیلدهای پاسخ |
+| خروجی | `Step3Result`: `scenarios[]`, `execution_order[]`, `data_dependencies[]` (variable_name, source{test_case_id, location: response.body\|response.header, path}, targets[{test_case_id, location: path\|query\|header\|body, parameter}], scope: global\|collection, required, origin: task\|inferred), `clarifications[]` |
+| اعتبارسنجی | `validate_scenario_payload`: ارجاع به تست‌کیس‌های واقعی، `find_cycle` برای حلقه، تطبیقِ پارامترِ مقصد با پارامترهای سند و فیلدِ مبدأ با فیلدهای پاسخ؛ متغیرهای `variables`ِ قدم ۱ پیش از آن به‌صورتِ قطعی به وابستگی تبدیل می‌شوند (`_resolve_requested_variables`) |
 
 ### قدم ۴ — Postman Collection Generation (قطعی)
 
@@ -170,7 +170,7 @@ flowchart TD
 | پیاده‌سازی | `Step4PostmanGenerator` در `postman_generation.py` → `PostmanBuilder` در `postman_builder.py` |
 | ورودی | `step1_result`، **`step2_result` کامل** (نه فشرده — `services[]` لازم است)، `step3_result`، `collection_name` |
 | خروجی | `Step4Result`: `collection`، `collection_name`، `scenarios`، `requests`، `unresolved`، `clarifications`، `warnings` |
-| تبدیل‌ها | `extract_*` → `validate_step3_references` → `_plan` (برای هر تست‌کیس: `mapping_for` → `operation_index` → `_build_request_case` → `TestCase`) → پوشه‌ها بر اساسِ سناریو → `TestCaseSuite` → `PostmanBuilder.build` → `validate_collection` + `check_variables_are_available` |
+| تبدیل‌ها | `extract_*` → `validate_step3_references` → `_plan` (برای هر تست‌کیس: `mapping_for` → `operation_index` → `_build_request_case` → `TestCase`) → پوشه‌ها بر اساسِ سناریو → `_producers_first` (تولیدکننده پیش از مصرف‌کننده) → `TestCaseSuite` → `PostmanBuilder.build` → `validate_collection` + `check_variables_are_available` + `check_dependency_wiring` |
 | خطا | `PostmanGenerationError`؛ تست‌کیسِ بی‌نگاشت در `unresolved` می‌ماند و حدس زده نمی‌شود |
 
 ### قدم ۵ — Final Review & Export (قطعی)
@@ -241,10 +241,10 @@ flowchart TD
 | بخش | منبع |
 |-----|------|
 | `method` / `path` | عملیاتِ کشف‌شده در قدم ۲ |
-| URL | `{{baseUrl}}` (یا `{{baseUrl_<service>}}` برای سرویس‌های بعدی) + مسیر با `:param`؛ مقدارِ path/query از ارجاع‌های وابستگیِ قدم ۳ |
+| URL | `{{baseUrl}}` (یا `{{baseUrl_<service>}}` برای سرویس‌های بعدی) + مسیر با `:param`؛ پارامترِ مسیری که مقدارش یک متغیرِ وابستگی است مستقیم در مسیر می‌نشیند (`/voucher/{{voucherId}}`)؛ query از ارجاع‌های وابستگیِ قدم ۳ |
 | `header` | `PostmanBuilder._build_headers(case["headers"], has_body)` |
 | `body` | `request_body`ِ سند + فیلدهای مقصدِ وابستگی؛ mode `raw` / JSON |
-| `event` | assertionِ کدِ وضعیت (فقط وقتی یک کدِ موفقِ یکتا مستند باشد) + اسکریپتِ استخراجِ متغیر |
+| `event` | `test`: assertionِ کدِ وضعیت (فقط وقتی یک کدِ موفقِ یکتا مستند باشد) + اسکریپتِ استخراجِ محافظت‌شده‌ی متغیر؛ `prerequest`: guardِ مصرف‌کننده (بخشِ K) |
 | متغیرهای کالکشن | `baseUrl`، `token` (خالی)، و `baseUrl_<service>` |
 
 **احراز هویت:** `PostmanBuilder._build_headers` روی **هر** درخواست دقیقاً یک
@@ -383,3 +383,100 @@ Swagger → `discover_from_spec` → `build_result` → قدم ۴ → قدم ۵ 
 موجود، ناموجود، شناسه‌ی نامعتبر، …)، جایگزینیِ مقدارِ قبلی، حروفِ مختلف، حفظِ
 بقیه‌ی هدرها، وابستگیِ قدم ۳ که هدرِ `authorization` را هدف گرفته، و مسدودشدنِ
 کالکشنِ کهنه در قدم ۵.
+
+---
+
+## K. متغیرهای درخواستیِ کاربر (استخراج، ذخیره و مصرف)
+
+کاربر می‌تواند در تسک بخواهد مقداری از پاسخِ یک API استخراج و بررسی شود، در یک
+متغیرِ Postman (معمولاً global) ذخیره شود و درخواست‌های بعدی از آن استفاده کنند
+— مثلاً `result.body.id` از «ایجادِ بن» → `voucherId` → مسیرِ «دریافتِ بن».
+این قابلیت عمومی است: هیچ نام، مسیر یا endpointی در کد هاردکد نشده است
+(`test_no_endpoint_or_variable_name_is_hardcoded` همین را بررسی می‌کند).
+
+### علتِ مشکلِ قبلی
+
+| لایه | چه چیزی گم می‌شد |
+|------|-------------------|
+| قدم ۱ | قراردادِ خروجی فیلدی برای متغیر نداشت و پرامپت صراحتاً «Generate Postman variables» را منع می‌کرد؛ نام، اسکوپ و مسیرِ کاربر حداکثر در متنِ requirements می‌ماند |
+| قدم ۳ | LLM نام و مسیر را خودش حدس می‌زد (مثلاً `createdVoucherId` و `$.id`) و ممکن بود کیسِ منفیِ «بنِ ناموجود» را هم مقصد کند؛ `DataDependency` فیلدی برای اسکوپ/الزام نداشت |
+| قدم ۴ | `source_variables` اسکوپ را همیشه `collection` می‌گذاشت؛ اسکریپت یک خطِ `set(..., jsonData.id)` بدونِ هیچ بررسی بود (مقدارِ undefined هم ذخیره می‌شد)؛ مسیر `:id` با جدولِ متغیر بود؛ ترتیبِ مخالف فقط هشدار می‌گرفت و هیچ guardی در مصرف‌کننده نبود |
+| قدم ۵ | فقط وجودِ نامِ متغیر را می‌سنجید، نه اینکه واقعاً ذخیره و در محلِ درست مصرف شود |
+
+### جریانِ داده
+
+```text
+قدم ۱  variables[]  ── RequestedVariable (variable_dependencies.py)
+         name, scope, source_test_case_id, response_path, required, consumers[], instruction
+           │  validate_requested_variables: نامِ معتبر، اسکوپ، مبدأِ موجود و غیرِمنفی،
+           │  مسیرِ ساده («result.body.id» → «$.result.body.id»)، مصرف‌کننده‌ی موجود
+           ▼
+قدم ۳  _resolve_requested_variables (قطعی، بعد از پاسخِ LLM)
+           │  نام/اسکوپ/مبدأ/مسیر/مصرف‌کننده‌های کاربر برنده‌اند؛ پیشنهادِ مطابقِ LLM
+           │  فقط جای خالی را پر می‌کند و کنار گذاشته می‌شود (متغیرِ دومی ساخته نمی‌شود)
+           │  مسیرِ تأییدناپذیر/ناسازگار با سند → حفظ + clarification (نه جایگزینیِ بی‌صدا)
+           ▼
+       data_dependencies[] با scope، required، origin="task"
+           ▼
+قدم ۴  source_variables → SaveVariable(scope, required)      روی تولیدکننده
+       required_variables → RequiredVariable                   روی مصرف‌کننده‌ها
+       target_references → path/query/header/body (فیلدِ تودرتوی «a.b» در بدنه)
+       _producers_first → تولیدکننده پیش از مصرف‌کننده (داخل و بینِ پوشه‌ها)
+       PostmanBuilder → اسکریپت‌ها؛ check_dependency_wiring → سنجشِ JSONِ نهایی
+           ▼
+قدم ۵  check_dependency_wiring + missing_requested_variables روی همان کالکشن
+```
+
+### اسکریپت‌ها
+
+تولیدکننده (`PostmanBuilder._required_save_lines`، eventِ `test`):
+
+```javascript
+pm.globals.unset("voucherId");
+pm.test("Response provides result.body.id and saves it as global variable 'voucherId'", function () {
+    pm.expect(pm.response.code, "HTTP status of the response that provides voucherId").to.be.within(200, 299);
+    const response = pm.response.json();
+    pm.expect(response.result, "response.result").to.exist;
+    pm.expect(response.result.body, "response.result.body").to.exist;
+    const value = response.result.body.id;
+    pm.expect(value, "response.result.body.id").to.not.be.oneOf([undefined, null, ""]);
+    pm.globals.set("voucherId", value);
+});
+```
+
+- `unset` اول: اجرای ناموفق مقدارِ کهنه‌ی اجرای قبلی را باقی نمی‌گذارد.
+- هر `expect`ِ ناموفق تابع را متوقف می‌کند، پس `set` فقط پس از همه‌ی بررسی‌ها
+  اجرا می‌شود.
+
+مصرف‌کننده (`PostmanBuilder._guard_lines`، eventِ `prerequest`): اگر متغیر ست
+نباشد، یک تستِ ناموفقِ گویا ثبت می‌شود و درخواست با `pm.execution.skipRequest()`
+فرستاده نمی‌شود (در Postman/Newmanِ قدیمی که آن را ندارند، خطای اسکریپت). این
+همان حالتی را پوشش می‌دهد که Runner فقط یک پوشه را اجرا کند یا ترتیب را عوض
+کند — جایگاهِ درخواست به‌تنهایی کافی نیست.
+
+### کیس‌های منفی
+
+- فقط تست‌کیسِ مبدأ اسکریپتِ ذخیره دارد؛ کیسِ منفیِ همان endpoint (مثلاً ایجادِ
+  نامعتبر) به متغیر دست نمی‌زند.
+- مبدأِ یک متغیرِ درخواستی نمی‌تواند تست‌کیسِ منفی باشد (قدم ۱ رد می‌کند).
+- وقتی کاربر مصرف‌کننده‌ها را گفته، فقط همان‌ها مقصدند؛ پیشنهادِ LLM برای کیسِ
+  «بنِ ناموجود» کنار گذاشته می‌شود و آن درخواست ورودیِ مستقلِ خودش (`:id`) را
+  نگه می‌دارد. مقدارِ آن شناسه‌ی ناموجود ساخته نمی‌شود (هیچ مقداری حدس زده
+  نمی‌شود) و به‌عنوانِ assumption روی همان درخواست گزارش می‌شود.
+
+### سازگاری با artifactهای قدیمی
+
+- قدم ۱ بدونِ `variables` → `[]`؛ قدم ۳ بدونِ `scope`/`required`/`origin` →
+  `collection` / `true` / `inferred` (`dependency_scope`، `dependency_required`).
+- وابستگیِ قدیمی همان اسکوپِ collection را نگه می‌دارد ولی اسکریپتش محافظت‌شده
+  می‌شود؛ پارامترِ مسیرِ بدونِ وابستگی همچنان `:id` است.
+- کالکشنِ قدیمیِ قدم ۴ (یک‌خطی، بدونِ guard) در قدم ۵ با issueِ
+  `broken_dependency` مسدود می‌شود تا دوباره ساخته شود.
+
+### تست‌ها
+
+`tests/unit/test_case_generator/test_variable_dependencies.py` زنجیره‌ی واقعی
+(اعتبارسنجِ قدم ۱ → کشفِ Swagger → قراردادِ فشرده → عاملِ قدم ۳ با پاسخِ ثابتِ
+LLM → قدم ۴ → قدم ۵ → JSONِ صادرشده) را می‌سنجد و اسکریپت‌های تولیدشده را با
+Node و یک شبیه‌سازِ کوچکِ `pm` واقعاً اجرا می‌کند (بدونِ Node همان تست‌ها skip
+می‌شوند).

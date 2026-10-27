@@ -191,6 +191,42 @@ Example:
 }
 
 ==================================================
+REQUESTED VARIABLES
+==================================================
+
+The task may explicitly ask that a value from one API response is extracted,
+checked, saved as a Postman variable and reused by later requests (for example
+"save result.body.id as the global variable voucherId and call the get service
+with it").
+
+Only when the task explicitly asks for this, record each such variable in the
+top-level "variables" array. Never add a variable the task does not ask for.
+
+Each variable is an object:
+
+  "name": the exact variable name the task gives; do not rename it.
+  "scope": "global" or "collection"; "global" when the task names none.
+  "source_test_case_id": the planned test case whose successful response
+          produces the value; never a negative test case.
+  "response_path": the response body path exactly as the task gives it (for
+          example "result.body.id"), or "" when the task gives none.
+  "required": true unless the task says the value is optional.
+  "consumers": [{"test_case_id": "...", "location": "...", "parameter": "..."}]
+          — the test cases that use the saved value. location is "path",
+          "query", "header", "body" or "" when unclear; parameter is the name
+          the task gives, or "".
+  "instruction": the sentence of the task this variable comes from, quoted.
+
+Rules:
+
+- The existence check belongs to the source test case ("required": true). Do
+  NOT plan an extra test case whose only purpose is to check that the value
+  exists.
+- A negative test case that deliberately uses a non-existent or invalid
+  identifier is not a consumer.
+- Do not write Postman scripts, {{...}} references or JavaScript.
+
+==================================================
 DUPLICATES
 ==================================================
 
@@ -228,8 +264,11 @@ Use exactly this top-level structure:
       "auth_intent": "inherit"
     }
   ],
-  "clarifications": []
+  "clarifications": [],
+  "variables": []
 }
+
+Use "variables": [] when the task requests no variable.
 
 If no clarification is required:
 

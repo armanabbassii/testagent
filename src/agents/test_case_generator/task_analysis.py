@@ -38,6 +38,10 @@ from src.agents.test_case_generator.json_output import (
     JsonExtractionError,
     extract_json_object,
 )
+from src.agents.test_case_generator.variable_dependencies import (
+    RequestedVariable,
+    validate_requested_variables,
+)
 from src.config import LLM_MAX_OUTPUT_TOKENS
 from src.debug import DebugConfig
 from src.llm_client import LLMClient, truncation_message
@@ -125,6 +129,10 @@ class TaskAnalysisResult(TypedDict):
     identified_requirements: list[str]
     test_cases: list[TaskTestCase]
     clarifications: list[str]
+    # متغیرهایی که کاربر صراحتاً خواسته (استخراج از پاسخ، ذخیره، مصرف) — از
+    # این‌جا به بعد داده‌ی ساختاریافته است، نه متن. نتیجه‌ی قدیمیِ بدونِ این
+    # فیلد یعنی «هیچ متغیری خواسته نشده».
+    variables: list[RequestedVariable]
 
 
 class PlannedTestCase(TypedDict):
@@ -151,6 +159,8 @@ class TaskAnalysisPlan(TypedDict):
     identified_requirements: list[str]
     test_cases: list[PlannedTestCase]
     clarifications: list[str]
+    # در برنامه می‌آید چون شناسه‌ی تست‌کیس‌ها همین‌جا قطعی می‌شود.
+    variables: list[RequestedVariable]
 
 
 class TestCaseDetails(TypedDict):
@@ -573,6 +583,9 @@ def validate_analysis(data: dict) -> TaskAnalysisResult:
             errors.append(f"duplicate test case id {case['id']!r} — ids must be unique.")
         seen_ids.add(case["id"])
 
+    kept = _dedupe(cases)
+    variables = validate_requested_variables(data.get("variables"), kept, errors)
+
     if errors:
         raise TaskAnalysisError(
             "LLM output does not match the required test case format:\n  - "
@@ -582,8 +595,9 @@ def validate_analysis(data: dict) -> TaskAnalysisResult:
     return TaskAnalysisResult(
         task_summary=task_summary,
         identified_requirements=requirements,
-        test_cases=_dedupe(cases),
+        test_cases=kept,
         clarifications=clarifications,
+        variables=variables,
     )
 
 
@@ -711,6 +725,8 @@ def validate_plan(data: dict) -> TaskAnalysisPlan:
             errors.append(f"duplicate test case id {case['id']!r} — ids must be unique.")
         seen_ids.add(case["id"])
 
+    variables = validate_requested_variables(data.get("variables"), cases, errors)
+
     if errors:
         raise TaskAnalysisError(
             "LLM output does not match the required test case plan format:\n  - "
@@ -722,6 +738,7 @@ def validate_plan(data: dict) -> TaskAnalysisPlan:
         identified_requirements=requirements,
         test_cases=cases,
         clarifications=clarifications,
+        variables=variables,
     )
 
 
@@ -847,6 +864,7 @@ def _assemble_result(
             "identified_requirements": plan["identified_requirements"],
             "test_cases": test_cases,
             "clarifications": plan["clarifications"],
+            "variables": plan.get("variables") or [],
         }
     )
 

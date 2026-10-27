@@ -173,7 +173,7 @@ class TestDiscoverFromSpec:
 
         assert service.requires_auth is True
         assert service.authorization == {
-            "header": "authorization",
+            "header": "Authorization",
             "value": AUTHORIZATION_VALUE,
         }
 

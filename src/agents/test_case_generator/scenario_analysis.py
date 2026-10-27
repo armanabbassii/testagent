@@ -26,7 +26,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
 from src.agents.test_case_generator.api_discovery import operation_key
 from src.agents.test_case_generator.api_mapping import (
@@ -36,6 +36,16 @@ from src.agents.test_case_generator.api_mapping import (
 from src.agents.test_case_generator.json_output import (
     JsonExtractionError,
     extract_json_object,
+)
+from src.agents.test_case_generator.variable_dependencies import (
+    DEFAULT_DEPENDENCY_SCOPE,
+    ORIGIN_INFERRED,
+    ORIGIN_TASK,
+    RequestedVariable,
+    VariableInstructionError,
+    first_field,
+    normalize_response_path,
+    requested_variables,
 )
 from src.config import LLM_MAX_OUTPUT_TOKENS
 from src.debug import DebugConfig
@@ -116,6 +126,13 @@ class DataDependency(TypedDict):
     targets: list[DependencyTarget]
     confidence: str
     reason: str
+    # اسکوپِ متغیرِ Postman — «global» یا «collection». نتیجه‌ی قدیمیِ بدونِ این
+    # فیلد همان collection است (variable_dependencies.dependency_scope).
+    scope: NotRequired[str]
+    # آیا مصرف‌کننده‌ها بدونِ این مقدار نباید اجرا شوند؟ نبودِ فیلد یعنی بله.
+    required: NotRequired[bool]
+    # «task» = کاربر صریحاً خواسته (قدم ۱)؛ «inferred» = استنتاجِ همین قدم
+    origin: NotRequired[str]
 
 
 class Clarification(TypedDict):
@@ -734,9 +751,397 @@ def _validate_data_dependencies(
                 if confidence in _VALID_CONFIDENCE
                 else "low",
                 reason=reason,
+                scope=DEFAULT_DEPENDENCY_SCOPE,
+                required=True,
+                origin=ORIGIN_INFERRED,
             )
         )
     return dependencies
+
+
+# ── متغیرهای درخواستیِ کاربر (قدم اول) ───────────────────────────────────────
+
+def _matching_dependency(variable: RequestedVariable, raw: list) -> int | None:
+    """وابستگیِ پیشنهادیِ LLM که همان مقدارِ درخواستی را توصیف می‌کند.
+
+    به ترتیب: هم‌نامی؛ همان مبدأ با همان مسیر؛ همان مبدأ با مقصدهایی که با
+    مصرف‌کننده‌های کاربر هم‌پوشانی دارند (همان مقدار با نام/مسیرِ حدسیِ دیگر)؛
+    و وقتی کاربر مسیری نگفته، تنها وابستگیِ همان مبدأ. پیشنهادِ مطابق فقط
+    «کمک» است: نام، اسکوپ، مبدأ، مسیر و مصرف‌کننده‌هایی که کاربر گفته همیشه
+    برنده‌اند — و چون کنار گذاشته می‌شود، متغیرِ دومی برای همان مقدار نمی‌سازد.
+    """
+    for position, item in enumerate(raw):
+        if isinstance(item, dict) and _clean(item.get("variable_name")) == variable["name"]:
+            return position
+
+    consumers = {consumer["test_case_id"] for consumer in variable["consumers"]}
+    same_source: list[int] = []
+    overlapping: list[int] = []
+    for position, item in enumerate(raw):
+        source = item.get("source") if isinstance(item, dict) else None
+        if not isinstance(source, dict):
+            continue
+        if _clean(source.get("test_case_id")) != variable["source_test_case_id"]:
+            continue
+        same_source.append(position)
+        targets = {
+            _clean(target.get("test_case_id"))
+            for target in item.get("targets") or []
+            if isinstance(target, dict)
+        }
+        if consumers & targets:
+            overlapping.append(position)
+        if not variable["response_path"]:
+            continue
+        try:
+            path = normalize_response_path(source.get("path"))
+        except VariableInstructionError:
+            continue
+        if path == variable["response_path"]:
+            return position
+    if overlapping:
+        return overlapping[0]
+    if not variable["response_path"] and len(same_source) == 1:
+        return same_source[0]
+    return None
+
+
+def _describe(operation: dict | None) -> str:
+    if not operation:
+        return "its mapped operation"
+    return f"{_clean(operation.get('method')).upper()} {_clean(operation.get('path'))}"
+
+
+def _requested_target(
+    label: str,
+    source_id: str,
+    consumer: dict,
+    hint: dict,
+    mapped: dict[str, dict],
+    index: dict[tuple[str, str], dict],
+    clarifications: list[Clarification],
+) -> DependencyTarget | None:
+    """محلِ مصرفِ یک متغیرِ درخواستی را با قراردادِ عملیاتِ مقصد تطبیق می‌دهد.
+
+    محل/پارامترِ کاربر برنده است؛ مقدارِ خالی از پیشنهادِ LLM و در نهایت فقط
+    وقتی از قرارداد پر می‌شود که بی‌ابهام باشد (مثلاً تنها پارامترِ مسیر). هر
+    چیزی که قابلِ تعیین یا تأیید نباشد به ابهام تبدیل می‌شود، نه حدس.
+    """
+    case_id = consumer["test_case_id"]
+    if not case_id or case_id == source_id:
+        return None
+    if case_id not in mapped:
+        clarifications.append(
+            Clarification(
+                type="data_dependency",
+                test_case_id=case_id,
+                message=(
+                    f"{label}: consumer {case_id!r} has no resolved API mapping in "
+                    f"Step 2, so the value cannot be wired into its request."
+                ),
+            )
+        )
+        return None
+
+    operation = _operation_for(mapped.get(case_id), index)
+    hint_location = _clean(hint.get("location"))
+    hint_parameter = _clean(hint.get("parameter"))
+
+    location = consumer["location"] or (
+        hint_location if hint_location in _TARGET_LOCATIONS else ""
+    )
+    parameter = consumer["parameter"]
+    if not parameter and hint_location == location:
+        parameter = hint_parameter
+
+    by_location = _parameters_by_location(operation) if operation else {}
+    body_fields = _body_fields(operation) if operation else set()
+    if operation is not None:
+        if not location and not parameter:
+            # فقط وقتی عملیات دقیقاً یک ورودی (مسیر/query/بدنه) دارد، محل بی‌ابهام است
+            # — مثلاً GET /voucher/{id}. با بیش از یک ورودی حدس زده نمی‌شود.
+            inputs = [
+                (place, name)
+                for place in ("path", "query")
+                for name in sorted(by_location.get(place, set()))
+            ] + [("body", name) for name in sorted(body_fields)]
+            if len(inputs) == 1:
+                location, parameter = inputs[0]
+        if not location and parameter:
+            candidates = [
+                place
+                for place in ("path", "query", "header")
+                if parameter in by_location.get(place, set())
+            ]
+            if parameter.split(".", 1)[0] in body_fields:
+                candidates.append("body")
+            if len(candidates) == 1:
+                location = candidates[0]
+        if location == "path" and not parameter:
+            names = sorted(by_location.get("path", set()))
+            if len(names) == 1:
+                parameter = names[0]
+
+    if not location or not parameter:
+        clarifications.append(
+            Clarification(
+                type="data_dependency",
+                test_case_id=case_id,
+                message=(
+                    f"{label}: cannot determine where {case_id!r} "
+                    f"({_describe(operation)}) uses the value — name the parameter "
+                    f"(for example the path parameter) in the task or in the "
+                    f"Step 1 'variables' and rerun Step 3."
+                ),
+            )
+        )
+        return None
+
+    if operation is not None:
+        if location == "body":
+            known, checked = body_fields, parameter.split(".", 1)[0]
+        elif location == "header":
+            known = {name.lower() for name in by_location.get("header", set())}
+            checked = parameter.lower()
+        else:
+            known, checked = by_location.get(location, set()), parameter
+        if known and checked not in known:
+            clarifications.append(
+                Clarification(
+                    type="data_dependency",
+                    test_case_id=case_id,
+                    message=(
+                        f"{label}: {parameter!r} is not a {location} parameter of "
+                        f"{_describe(operation)} (mapped to {case_id!r}); the value "
+                        f"was not wired into that request."
+                    ),
+                )
+            )
+            return None
+        if not known and location in ("query", "header"):
+            # سند هیچ پارامتری در این محل ندارد؛ چیزی برای مقایسه نیست. انتخابِ
+            # صریحِ کاربر نگه داشته می‌شود ولی بی‌صدا نمی‌ماند.
+            clarifications.append(
+                Clarification(
+                    type="data_dependency",
+                    test_case_id=case_id,
+                    message=(
+                        f"{label}: {_describe(operation)} documents no {location} "
+                        f"parameters; {parameter!r} is used as specified but cannot "
+                        f"be verified against the API contract."
+                    ),
+                )
+            )
+
+    return DependencyTarget(test_case_id=case_id, location=location, parameter=parameter)
+
+
+def _requested_dependency(
+    variable: RequestedVariable,
+    hint: dict,
+    mapped: dict[str, dict],
+    index: dict[tuple[str, str], dict],
+    clarifications: list[Clarification],
+) -> DataDependency | None:
+    """یک متغیرِ درخواستیِ قدم اول را به یک data_dependency تبدیل می‌کند."""
+    name = variable["name"]
+    source_id = variable["source_test_case_id"]
+    label = f"Requested variable '{name}'"
+
+    if source_id not in mapped:
+        clarifications.append(
+            Clarification(
+                type="data_dependency",
+                test_case_id=source_id,
+                message=(
+                    f"{label}: the source test case {source_id!r} has no resolved API "
+                    f"mapping in Step 2, so nothing can extract the value."
+                ),
+            )
+        )
+        return None
+
+    hint_source = hint.get("source") if isinstance(hint.get("source"), dict) else {}
+    if _clean(hint_source.get("test_case_id")) != source_id:
+        hint_source = {}
+
+    # مسیرِ کاربر حفظ می‌شود؛ فقط وقتی کاربر مسیری نگفته، پیشنهادِ LLM.
+    location, path = "response.body", variable["response_path"]
+    from_task = bool(path)
+    if not path and hint_source:
+        try:
+            hint_path = normalize_response_path(hint_source.get("path"))
+        except VariableInstructionError:
+            hint_path = ""
+        hint_location = _clean(hint_source.get("location"))
+        if hint_path and hint_location in _SOURCE_LOCATIONS:
+            location, path = hint_location, hint_path
+
+    if not path:
+        clarifications.append(
+            Clarification(
+                type="data_dependency",
+                test_case_id=source_id,
+                message=(
+                    f"{label}: neither the task nor the scenario analysis identifies "
+                    f"where the value is in the response of {source_id!r}; give its "
+                    f"response path (for example data.id) and rerun Step 3."
+                ),
+            )
+        )
+        return None
+
+    operation = _operation_for(mapped.get(source_id), index)
+    if operation is not None and location == "response.body":
+        fields = _response_fields(operation)
+        given = "specified in the task" if from_task else "proposed by the scenario analysis"
+        if not fields:
+            clarifications.append(
+                Clarification(
+                    type="response_path",
+                    test_case_id=source_id,
+                    message=(
+                        f"{label}: the response schema of {_describe(operation)} "
+                        f"documents no fields, so '{path}' ({given}) cannot be "
+                        f"verified against the API contract; it is used exactly as "
+                        f"given and its existence is checked when the request runs."
+                    ),
+                )
+            )
+        elif first_field(path) not in fields:
+            clarifications.append(
+                Clarification(
+                    type="response_path",
+                    test_case_id=source_id,
+                    message=(
+                        f"{label}: '{path}' ({given}) does not start with a documented "
+                        f"response field of {_describe(operation)} "
+                        f"({', '.join(sorted(fields))}); it was kept as given — "
+                        f"confirm the path."
+                    ),
+                )
+            )
+
+    hint_targets = {
+        _clean(target.get("test_case_id")): target
+        for target in hint.get("targets") or []
+        if isinstance(target, dict) and _clean(target.get("test_case_id"))
+    }
+    consumers = variable["consumers"] or [
+        {"test_case_id": case_id, "location": "", "parameter": ""}
+        for case_id in hint_targets
+    ]
+    targets: list[DependencyTarget] = []
+    for consumer in consumers:
+        target = _requested_target(
+            label,
+            source_id,
+            consumer,
+            hint_targets.get(consumer["test_case_id"], {}),
+            mapped,
+            index,
+            clarifications,
+        )
+        if target is not None:
+            targets.append(target)
+
+    instruction = variable["instruction"]
+    reason = (
+        f"Requested in the task: {instruction}"
+        if instruction
+        else _clean(hint.get("reason")) or "Requested explicitly in the Step 1 result."
+    )
+    return DataDependency(
+        variable_name=name,
+        source=DependencySource(test_case_id=source_id, location=location, path=path),
+        targets=targets,
+        confidence="high",
+        reason=reason,
+        scope=variable["scope"],
+        required=variable["required"],
+        origin=ORIGIN_TASK,
+    )
+
+
+def _resolve_requested_variables(
+    requested: list[RequestedVariable],
+    raw_dependencies: list,
+    mapped: dict[str, dict],
+    index: dict[tuple[str, str], dict],
+) -> tuple[list[DataDependency], list, list[Clarification]]:
+    """متغیرهای درخواستی را قطعی می‌سازد و پیشنهادهای مطابقِ LLM را کنار می‌گذارد.
+
+    برمی‌گرداند: (وابستگی‌های درخواستی، پیشنهادهای باقی‌مانده‌ی LLM، ابهام‌ها)
+    """
+    remaining = list(raw_dependencies)
+    resolved: list[DataDependency] = []
+    clarifications: list[Clarification] = []
+    for variable in requested:
+        position = _matching_dependency(variable, remaining)
+        hint = remaining.pop(position) if position is not None else {}
+        dependency = _requested_dependency(
+            variable, hint if isinstance(hint, dict) else {}, mapped, index,
+            clarifications,
+        )
+        if dependency is not None:
+            resolved.append(dependency)
+    return resolved, remaining, clarifications
+
+
+def _without_claimed_targets(
+    requested: list[DataDependency],
+    inferred: list[DataDependency],
+    clarifications: list[Clarification],
+) -> list[DataDependency]:
+    """وابستگیِ استنتاجی نمی‌تواند محلی را که کاربر صریحاً تعیین کرده بگیرد.
+
+    بدونِ این، دو متغیر برای یک پارامتر رقابت می‌کردند و فقط یکی واقعاً در
+    درخواست می‌نشست. هم‌نامی با متغیرِ درخواستی هم پذیرفته نمی‌شود.
+    """
+    names = {dependency["variable_name"] for dependency in requested}
+    claimed = {
+        (target["test_case_id"], target["location"], target["parameter"])
+        for dependency in requested
+        for target in dependency["targets"]
+    }
+
+    kept: list[DataDependency] = []
+    for dependency in inferred:
+        name = dependency["variable_name"]
+        source_id = dependency["source"]["test_case_id"]
+        if name in names:
+            clarifications.append(
+                Clarification(
+                    type="data_dependency",
+                    test_case_id=source_id,
+                    message=(
+                        f"The scenario analysis proposed a second dependency named "
+                        f"'{name}'; the variable requested in the task was kept."
+                    ),
+                )
+            )
+            continue
+        targets = [
+            target
+            for target in dependency["targets"]
+            if (target["test_case_id"], target["location"], target["parameter"])
+            not in claimed
+        ]
+        if len(targets) != len(dependency["targets"]):
+            clarifications.append(
+                Clarification(
+                    type="data_dependency",
+                    test_case_id=source_id,
+                    message=(
+                        f"The inferred variable '{name}' targeted a parameter that a "
+                        f"variable requested in the task already fills; the requested "
+                        f"variable was kept there."
+                    ),
+                )
+            )
+        if targets:
+            kept.append({**dependency, "targets": targets})
+    return kept
 
 
 def _validate_clarifications(
@@ -778,6 +1183,7 @@ def validate_scenario_payload(
     *,
     test_cases: list[dict],
     step2_result: Any,
+    requested: list[RequestedVariable] | None = None,
 ) -> tuple[
     list[Scenario], list[ExecutionStep], list[DataDependency], list[Clarification]
 ]:
@@ -786,6 +1192,10 @@ def validate_scenario_payload(
     همه‌ی خطاها یک‌جا جمع و در یک پیام گزارش می‌شوند. علاوه بر ساختار، ارجاع‌ها
     به تست‌کیس‌ها، ترتیبِ سازگار با وابستگی‌ها، نبودِ حلقه در گرافِ وابستگی و
     وجودِ پارامترها/فیلدهای پاسخ در عملیات‌های قدم دوم بررسی می‌شوند.
+
+    ``requested`` متغیرهایی است که کاربر در قدم اول صریحاً خواسته. آن‌ها به‌صورتِ
+    قطعی به وابستگی تبدیل می‌شوند (با origin «task») و پیشنهادِ LLM فقط
+    جاهای خالی را پر می‌کند؛ آنچه قابلِ تأیید نیست ابهام می‌شود، نه خطا.
 
     پرتاب می‌کند:
         ScenarioAnalysisError : خروجی با قرارداد نخواند
@@ -803,12 +1213,23 @@ def validate_scenario_payload(
     steps, valid_order = _validate_execution_order(
         data.get("execution_order"), known_ids, errors
     )
-    dependencies = _validate_data_dependencies(
-        data.get("data_dependencies"), known_ids, mapped, index, errors
+    raw_dependencies = data.get("data_dependencies")
+    requested_dependencies: list[DataDependency] = []
+    requested_notes: list[Clarification] = []
+    if requested and isinstance(raw_dependencies, list):
+        requested_dependencies, raw_dependencies, requested_notes = (
+            _resolve_requested_variables(requested, raw_dependencies, mapped, index)
+        )
+    inferred = _validate_data_dependencies(
+        raw_dependencies, known_ids, mapped, index, errors
+    )
+    dependencies = requested_dependencies + _without_claimed_targets(
+        requested_dependencies, inferred, requested_notes
     )
     clarifications = _validate_clarifications(
         data.get("clarifications"), known_ids, errors
     )
+    clarifications.extend(requested_notes)
 
     # گرافِ وابستگی: یال از تست‌کیسِ وابسته به تست‌کیسی که باید پیش از آن اجرا شود.
     edges: dict[str, set[str]] = {}
@@ -915,6 +1336,10 @@ class ScenarioAnalysisAgent:
             test_cases = extract_test_cases(step1_result)
         except ApiMappingError as exc:
             raise ScenarioAnalysisError(str(exc)) from exc
+        try:
+            requested = requested_variables(step1_result)
+        except VariableInstructionError as exc:
+            raise ScenarioAnalysisError(str(exc)) from exc
 
         system_prompt, user_message = build_prompt(
             self._prompt_path, step1_result, step2_result
@@ -945,7 +1370,10 @@ class ScenarioAnalysisAgent:
             raise ScenarioAnalysisError(str(exc)) from exc
 
         return validate_scenario_payload(
-            data, test_cases=test_cases, step2_result=step2_result
+            data,
+            test_cases=test_cases,
+            step2_result=step2_result,
+            requested=requested,
         )
 
 

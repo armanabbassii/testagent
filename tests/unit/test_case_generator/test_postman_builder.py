@@ -110,13 +110,23 @@ class TestUrl:
         assert url["host"] == ["{{baseUrl}}"]
 
     def test_path_placeholders_become_postman_path_variables(self):
-        url = _item(_build())["request"]["url"]
+        collection = _build(suite=_suite(_case(path_params={"id": "42"})))
+        url = _item(collection)["request"]["url"]
         assert url["path"] == ["admin", "voucher", ":id"]
         assert url["raw"].startswith("{{baseUrl}}/admin/voucher/:id")
 
     def test_path_variable_values_come_from_path_params(self):
+        collection = _build(suite=_suite(_case(path_params={"id": "42"})))
+        url = _item(collection)["request"]["url"]
+        assert url["variable"] == [{"key": "id", "value": "42"}]
+
+    def test_a_variable_reference_is_written_into_the_path(self):
+        """«{{voucherId}}» مستقیم در مسیر می‌نشیند — نه «:id» با جدولِ متغیر."""
         url = _item(_build())["request"]["url"]
-        assert url["variable"] == [{"key": "id", "value": "{{voucherId}}"}]
+        assert url["path"] == ["admin", "voucher", "{{voucherId}}"]
+        assert url["raw"].startswith("{{baseUrl}}/admin/voucher/{{voucherId}}")
+        assert ":id" not in url["raw"]
+        assert "variable" not in url
 
     def test_query_params_are_serialised_with_booleans(self):
         url = _item(_build())["request"]["url"]

@@ -115,6 +115,18 @@ class SaveVariable(TypedDict):
     # منبعِ مقدار: "body" (پیش‌فرض) یا "header".
     # با "header"، json_path نامِ هدر است، نه یک مسیرِ JSON.
     source: NotRequired[str]
+    # true → اسکریپتِ محافظت‌شده: پاسخِ موفق و وجودِ مقدار (نه undefined/null/"")
+    # بررسی می‌شود و فقط پس از آن ذخیره می‌شود. نبودنش رفتارِ قبلی (یک خط) است.
+    required: NotRequired[bool]
+
+
+class RequiredVariable(TypedDict):
+    """متغیری که این درخواست بدونِ آن نباید اجرا شود (مصرف‌کننده‌ی یک وابستگی)."""
+    variable: str
+    # همان اسکوپی که تولیدکننده در آن ذخیره می‌کند
+    scope: str
+    # نامِ درخواست/تست‌کیسی که مقدار را تولید می‌کند — برای پیامِ خطا
+    producer: str
 
 
 class Assertion(TypedDict):
@@ -142,6 +154,9 @@ class TestCase(TypedDict):
     # نامِ متغیرِ base URL برای این درخواست — وقتی یک سناریو چند منبعِ Swagger
     # (چند سرویس) دارد، هر قدم می‌تواند میزبانِ خودش را داشته باشد.
     base_url_var: NotRequired[str]
+    # متغیرهایی که باید پیش از ارسال ست شده باشند؛ PostmanBuilder برایشان یک
+    # pre-request guard می‌سازد تا درخواست با مقدارِ خالی/کهنه فرستاده نشود.
+    required_variables: NotRequired[list[RequiredVariable]]
 
 
 class ControllerTestCases(TypedDict):

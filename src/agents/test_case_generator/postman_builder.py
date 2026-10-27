@@ -27,9 +27,15 @@ from src.agents.test_case_generator.testcase_generator import (
     DEFAULT_BASE_URL_VAR,
     Assertion,
     ControllerTestCases,
+    RequiredVariable,
     SaveVariable,
     TestCase,
     TestCaseSuite,
+)
+from src.agents.test_case_generator.variable_dependencies import (
+    JSON_PATH_RE,
+    normalize_response_path,
+    path_tokens,
 )
 from src.debug import DebugConfig
 
@@ -68,13 +74,34 @@ _SCOPE_SETTERS = {
     "global": "pm.globals.set",
     "collection": "pm.collectionVariables.set",
 }
+_SCOPE_GETTERS = {
+    "global": "pm.globals.get",
+    "collection": "pm.collectionVariables.get",
+}
+_SCOPE_UNSETTERS = {
+    "global": "pm.globals.unset",
+    "collection": "pm.collectionVariables.unset",
+}
 _DEFAULT_SCOPE = "collection"
 
 # پارامترِ مسیر به شکلِ {name} در path
 _PATH_VAR_RE = re.compile(r"\{([^{}]+)\}")
 
+# مقداری که خودش دقیقاً یک متغیرِ Postman است، مثلِ «{{voucherId}}»
+_VARIABLE_REFERENCE_RE = re.compile(r"^\{\{[^{}\s]+\}\}$")
+
 # قطعه‌ی معتبرِ یک JSON path ساده (فقط شناسه‌های ساده پشتیبانی می‌شوند)
 _SEGMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def variable_setter(scope: str) -> str:
+    """تابعِ Postmanی که متغیرِ این اسکوپ را ذخیره می‌کند (مثلاً pm.globals.set).
+
+    عمومی است تا اعتبارسنجیِ قدم ۴ و ۵ همان نگاشتِ این ماژول را بخوانند و
+    اسکریپتِ ساخته‌شده را با قاعده‌ای جداگانه نسنجند.
+    """
+    key = (scope or "").strip().lower()
+    return _SCOPE_SETTERS.get(key, _SCOPE_SETTERS[_DEFAULT_SCOPE])
 
 
 class PostmanBuildError(RuntimeError):
@@ -252,7 +279,9 @@ class PostmanBuilder:
         item: dict = {"name": name, "request": request}
 
         events = self._build_events(
-            case.get("assertions") or [], case.get("save_variables") or []
+            case.get("assertions") or [],
+            case.get("save_variables") or [],
+            case.get("required_variables") or [],
         )
         if events:
             item["event"] = events
@@ -304,11 +333,25 @@ class PostmanBuilder:
         path_params برداشته می‌شود. query_params به entryهای query نگاشت می‌شود؛
         هیچ پارامترِ مستندنشده‌ای اضافه نمی‌شود.
 
+        استثنا: وقتی مقدارِ یک پارامترِ مسیر خودش دقیقاً یک متغیرِ Postman باشد
+        (مثلاً «{{voucherId}}» که درخواستِ قبلی ذخیره کرده)، همان ارجاع مستقیم
+        در مسیر می‌نشیند — «/voucher/{{voucherId}}» به‌جای «/voucher/:id». این‌طور
+        مصرفِ متغیر در خودِ URL دیده می‌شود و به جدولِ path variables وابسته نیست.
+
         base_url_var نامِ متغیرِ base URLِ این درخواست است؛ وقتی یک سناریو چند
         منبعِ Swagger دارد، هر قدم می‌تواند میزبانِ خودش را داشته باشد.
         """
-        # {name} → :name
-        colon_path = _PATH_VAR_RE.sub(lambda m: f":{m.group(1)}", path)
+        inlined: set[str] = set()
+
+        def segment_for(match: re.Match) -> str:
+            name = match.group(1)
+            value = path_params.get(name)
+            if isinstance(value, str) and _VARIABLE_REFERENCE_RE.match(value.strip()):
+                inlined.add(name)
+                return value.strip()
+            return f":{name}"  # {name} → :name
+
+        colon_path = _PATH_VAR_RE.sub(segment_for, path)
 
         segments = [seg for seg in colon_path.split("/") if seg != ""]
 
@@ -321,6 +364,8 @@ class PostmanBuilder:
         variables = []
         for match in _PATH_VAR_RE.finditer(path):
             var_name = match.group(1)
+            if var_name in inlined:
+                continue
             variables.append(
                 {"key": var_name, "value": self._stringify(path_params.get(var_name, ""))}
             )
@@ -381,17 +426,46 @@ class PostmanBuilder:
         self,
         assertions: list[Assertion],
         save_variables: list[SaveVariable],
+        required_variables: list[RequiredVariable] | None = None,
     ) -> list[dict]:
-        """assertions و save_variables را به یک eventِ «test» تبدیل می‌کند."""
+        """assertions و save_variables را به eventِ «test» و required_variables را
+        به eventِ «prerequest» تبدیل می‌کند.
+
+        هر متغیر فقط یک‌بار ذخیره می‌شود — حتی اگر save_variables (مثلاً پس از
+        پردازشِ دوباره‌ی یک تست‌کیس) تکراری داشته باشد.
+        """
+        events: list[dict] = []
+        guard_lines = self._guard_lines(required_variables or [])
+        if guard_lines:
+            events.append(
+                {
+                    "listen": "prerequest",
+                    "script": {"type": "text/javascript", "exec": guard_lines},
+                }
+            )
+
+        unique_saves: list[SaveVariable] = []
+        seen_saves: set[tuple[str, str]] = set()
+        for save in save_variables:
+            if not isinstance(save, dict) or not save.get("variable"):
+                continue
+            key = (str(save.get("variable")), self._scope(save))
+            if key in seen_saves:
+                continue
+            seen_saves.add(key)
+            unique_saves.append(save)
+        save_variables = unique_saves
+
         exec_lines: list[str] = []
 
         # آیا به بدنه‌ی JSONِ پاسخ نیاز داریم؟ (برای field-assertion یا save)
-        # فقط saveهای بدنه‌محور به jsonData نیاز دارند؛ save از هدر نه.
+        # فقط saveهای بدنه‌محورِ ساده به jsonData نیاز دارند؛ save از هدر و saveِ
+        # الزامی (که پاسخ را داخلِ pm.testِ خودش می‌خواند) نه.
         needs_json = any(
             self._save_source(sv) == _BODY_SOURCE
+            and not sv.get("required")
             and self._json_path_to_accessor(sv.get("json_path", "")) is not None
             for sv in save_variables
-            if isinstance(sv, dict)
         ) or any(
             isinstance(a, dict)
             and a.get("type") != "status_code"
@@ -409,18 +483,145 @@ class PostmanBuilder:
             exec_lines.extend(self._assertion_lines(assertion))
 
         for save in save_variables:
-            exec_lines.extend(self._save_lines(save))
+            if save.get("required"):
+                exec_lines.extend(self._required_save_lines(save))
+            else:
+                exec_lines.extend(self._save_lines(save))
 
-        # اگر هیچ خطِ معناداری تولید نشد، event هم نمی‌سازیم
-        if not any(line.strip() for line in exec_lines):
+        # اگر هیچ خطِ معناداری تولید نشد، eventِ test هم نمی‌سازیم
+        if any(line.strip() for line in exec_lines):
+            events.append(
+                {
+                    "listen": "test",
+                    "script": {"type": "text/javascript", "exec": exec_lines},
+                }
+            )
+        return events
+
+    def _required_save_lines(self, save: SaveVariable) -> list[str]:
+        """استخراجِ محافظت‌شده‌ی یک متغیرِ الزامی.
+
+        ترتیبِ اسکریپت عمدی است:
+
+          1. مقدارِ قبلیِ متغیر پاک می‌شود — اجرای ناموفقِ این درخواست نباید
+             مقدارِ کهنه‌ی یک اجرای قبلی را برای مصرف‌کننده‌ها باقی بگذارد؛
+          2. داخلِ یک pm.test: پاسخِ موفق (2xx)، وجودِ هر قطعه‌ی مسیر و
+             غیرِخالی‌بودنِ مقدار (نه undefined، نه null، نه "") بررسی می‌شود؛
+          3. فقط اگر همه‌ی بررسی‌ها رد نشوند، مقدار ذخیره می‌شود — هر expectِ
+             ناموفق تابع را متوقف می‌کند و set هرگز اجرا نمی‌شود.
+
+        مسیر یا نامِ هدرِ نامعتبر هیچ JSِ خرابی تولید نمی‌کند.
+        """
+        variable = str(save.get("variable") or "")
+        scope = self._scope(save)
+        setter = _SCOPE_SETTERS[scope]
+        unsetter = _SCOPE_UNSETTERS[scope]
+        variable_literal = self._js_string(variable)
+        status_label = self._js_string(f"HTTP status of the response that provides {variable}")
+
+        if self._save_source(save) == _HEADER_SOURCE:
+            header = self._header_name(save.get("json_path", ""))
+            if not header:
+                return []
+            title = self._js_string(
+                f"Response header {header} is present and saved as {scope} variable "
+                f"'{variable}'"
+            )
+            return [
+                f"{unsetter}({variable_literal});",
+                f"pm.test({title}, function () {{",
+                f"    pm.expect(pm.response.code, {status_label}).to.be.within(200, 299);",
+                f"    const value = pm.response.headers.get({self._js_string(header)});",
+                f"    pm.expect(value, {self._js_string('response header ' + header)})"
+                ".to.not.be.oneOf([undefined, null, \"\"]);",
+                f"    {setter}({variable_literal}, value);",
+                "});",
+                "",
+            ]
+
+        try:
+            json_path = normalize_response_path(save.get("json_path", ""))
+        except ValueError:
             return []
+        if not json_path or not JSON_PATH_RE.match(json_path):
+            return []
+        tokens = path_tokens(json_path)
+        readable = json_path[2:] if json_path.startswith("$.") else json_path[1:]
 
-        return [
-            {
-                "listen": "test",
-                "script": {"type": "text/javascript", "exec": exec_lines},
-            }
+        title = self._js_string(
+            f"Response provides {readable} and saves it as {scope} variable "
+            f"'{variable}'"
+        )
+        lines = [
+            f"{unsetter}({variable_literal});",
+            f"pm.test({title}, function () {{",
+            f"    pm.expect(pm.response.code, {status_label}).to.be.within(200, 299);",
+            "    const response = pm.response.json();",
         ]
+        accessor = "response"
+        for token in tokens[:-1]:
+            accessor += token
+            label = self._js_string(accessor)
+            lines.append(f"    pm.expect({accessor}, {label}).to.exist;")
+        accessor += tokens[-1]
+        lines.extend(
+            [
+                f"    const value = {accessor};",
+                f"    pm.expect(value, {self._js_string(accessor)})"
+                ".to.not.be.oneOf([undefined, null, \"\"]);",
+                f"    {setter}({variable_literal}, value);",
+                "});",
+                "",
+            ]
+        )
+        return lines
+
+    def _guard_lines(self, required_variables: list[RequiredVariable]) -> list[str]:
+        """pre-request guard برای درخواستی که به متغیرِ یک درخواستِ قبلی نیاز دارد.
+
+        اگر تولیدکننده اجرا نشده یا شکست خورده باشد (مثلاً فقط همین پوشه در
+        Runner اجرا شده، یا ترتیبِ اجرا تغییر کرده)، متغیر ست نیست. در آن حالت
+        یک تستِ ناموفقِ گویا ثبت می‌شود و درخواست اصلاً فرستاده نمی‌شود — به‌جای
+        اینکه با «/voucher/» یا مقدارِ کهنه یک پاسخِ گمراه‌کننده بگیرد.
+        ``pm.execution.skipRequest`` در Postman/Newmanِ قدیمی وجود ندارد؛ آنجا
+        خطای اسکریپت همان نقش را بازی می‌کند.
+        """
+        lines: list[str] = []
+        seen: set[tuple[str, str]] = set()
+        for required in required_variables:
+            if not isinstance(required, dict):
+                continue
+            variable = str(required.get("variable") or "").strip()
+            scope = self._scope(required)
+            if not variable or (variable, scope) in seen:
+                continue
+            seen.add((variable, scope))
+
+            producer = str(required.get("producer") or "").strip() or "a previous request"
+            message = (
+                f"{scope} variable '{variable}' is not set — '{producer}' must run "
+                f"successfully before this request."
+            )
+            title = f"Required {scope} variable '{variable}' is available"
+            lines.extend(
+                [
+                    "{",
+                    f"    const value = {_SCOPE_GETTERS[scope]}({self._js_string(variable)});",
+                    '    const available = !(value === undefined || value === null || value === "");',
+                    f"    pm.test({self._js_string(title)}, function () {{",
+                    f"        pm.expect(available, {self._js_string(message)}).to.be.true;",
+                    "    });",
+                    "    if (!available) {",
+                    '        if (pm.execution && typeof pm.execution.skipRequest === "function") {',
+                    "            pm.execution.skipRequest();",
+                    "        } else {",
+                    f"            throw new Error({self._js_string(message)});",
+                    "        }",
+                    "    }",
+                    "}",
+                ]
+            )
+        return lines
 
     def _assertion_lines(self, assertion: Assertion) -> list[str]:
         """یک assertion را به خطوطِ اسکریپتِ Postman تبدیل می‌کند.
@@ -486,8 +687,7 @@ class PostmanBuilder:
         if not variable:
             return []
 
-        scope = str(save.get("scope") or _DEFAULT_SCOPE).strip().lower()
-        setter = _SCOPE_SETTERS.get(scope, _SCOPE_SETTERS[_DEFAULT_SCOPE])
+        setter = _SCOPE_SETTERS[self._scope(save)]
         variable_literal = self._js_string(str(variable))
 
         if self._save_source(save) == _HEADER_SOURCE:
@@ -507,6 +707,12 @@ class PostmanBuilder:
         return [f"{setter}({variable_literal}, {accessor});"]
 
     # ── کمکی‌ها ──────────────────────────────────────────────────────────────
+
+    @staticmethod
+    def _scope(item: dict) -> str:
+        """اسکوپِ یک save/required — مقدارِ ناشناخته همان پیش‌فرض (collection) است."""
+        scope = str(item.get("scope") or _DEFAULT_SCOPE).strip().lower()
+        return scope if scope in _SCOPE_SETTERS else _DEFAULT_SCOPE
 
     @staticmethod
     def _save_source(save: dict) -> str:

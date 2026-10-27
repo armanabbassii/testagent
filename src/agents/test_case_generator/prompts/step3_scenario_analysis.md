@@ -175,6 +175,32 @@ a Postman variable. Use letters, digits and underscores, start with a letter or
 an underscore, and use the same name every time for the same value.
 
 ==================================================
+VARIABLES REQUESTED BY THE USER
+==================================================
+
+The STEP 1 RESULT may contain a "variables" array. Each entry is a variable the
+user explicitly asked for: its name, the source test case, the response path
+(possibly empty) and the consumer test cases (location and parameter possibly
+empty).
+
+For every requested variable, produce exactly one data dependency that:
+
+- uses exactly that name as variable_name — never rename it;
+- uses that source test case;
+- uses the given response path when it is not empty (written as "$.result.body.id"
+  for "result.body.id"), even if the response schema documents no fields;
+- has one target per listed consumer, filling an empty location or parameter
+  with the matching parameter of the consumer's mapped operation.
+
+Do not add other test cases as targets of a requested variable. In particular, a
+negative test case that deliberately uses a non-existent or invalid identifier
+is not a target.
+
+The requested values are enforced by a later deterministic check; your job is to
+fill what the user left empty from the STEP 2 RESULT, never to change what the
+user specified.
+
+==================================================
 CONFIDENCE
 ==================================================
 

@@ -50,6 +50,7 @@ from ui.formatting import (  # noqa: E402
     case_details,
     case_overview,
     markdown_bullets,
+    requested_variable_rows,
     type_counts,
 )
 from ui.workflow import (  # noqa: E402
@@ -142,6 +143,15 @@ def _render_result(result: dict) -> None:
         )
         for item in result["clarifications"]:
             st.warning(item)
+
+    variables = requested_variable_rows(result)
+    if variables:
+        st.subheader("Requested Variables")
+        st.caption(
+            "Values the task explicitly asks to extract, check and save. Step 3 "
+            "matches them to the API contract and Step 4 generates the scripts."
+        )
+        st.dataframe(variables, hide_index=True)
 
     st.subheader("Test Cases")
     st.dataframe(case_overview(result), hide_index=True)
