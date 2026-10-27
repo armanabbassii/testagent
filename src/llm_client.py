@@ -147,11 +147,10 @@ def _redacted_url(url: str) -> str:
 def _actionable_html_error(exc: APIStatusError) -> APIStatusError | None:
     """اگر پاسخِ خطا HTML بود، همان نوعِ خطا را با پیامی کوتاه و قابلِ‌اقدام برمی‌گرداند.
 
-    ریشه‌ی مشاهده‌شده: ``LLM_BASE_URL`` بدونِ پیشوندِ API بود و OpenAI SDK
-    مسیرِ ``/chat/completions`` را به همان base URL چسباند؛ فرانت‌اندِ Next.js
-    با HTML 404 پاسخ داد و بدنه‌ی HTML به‌صورتِ خام در پیامِ خطا ظاهر شد. اینجا
-    نوعِ خطا (مثلاً ``NotFoundError``) و بدنه‌ی اصلی در ``body``/``__cause__``
-    حفظ می‌شود، ولی پیام کوتاه و بدونِ HTML است تا علت قابلِ‌تشخیص باشد.
+    پاسخِ مشاهده‌شده به مسیرِ ``/chat/completions`` (که خودِ OpenAI SDK به
+    base URL می‌چسباند) HTML بود و بدنه‌ی HTML خام در پیامِ خطا ظاهر می‌شد.
+    اینجا نوعِ خطا و بدنه‌ی اصلی در ``body``/``__cause__`` حفظ می‌شود، ولی پیام
+    کوتاه و بدونِ HTML است تا وضعیت، URLِ نهایی و request id قابلِ‌تشخیص باشند.
     """
     response = getattr(exc, "response", None)
     if response is None:
@@ -170,11 +169,11 @@ def _actionable_html_error(exc: APIStatusError) -> APIStatusError | None:
         f"LLM endpoint returned HTTP {exc.status_code} with content-type 'text/html' "
         f"for {method} {_redacted_url(str(response.url))}{suffix}. "
         "The endpoint answered with an HTML page instead of an OpenAI-compatible "
-        "JSON response, so LLM_BASE_URL most likely points to a web UI or a gateway "
-        "root rather than the API base. The OpenAI SDK appends '/chat/completions' "
-        "to LLM_BASE_URL, so the base must include the service's API prefix "
-        "(for example '/v1') when the service requires one. No endpoint was changed "
-        f"automatically. The original HTML body ({body_length} characters) was omitted."
+        "JSON response for this route. The OpenAI SDK appends '/chat/completions' "
+        "to LLM_BASE_URL, and this client passes the configured base URL through "
+        "unchanged; the remote service's routing/API contract for this path is "
+        "the remaining unknown. No URL was modified automatically. "
+        f"The original HTML body ({body_length} characters) was omitted."
     )
 
     try:

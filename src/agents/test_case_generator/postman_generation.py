@@ -43,6 +43,14 @@ from typing import Any
 from typing_extensions import TypedDict
 
 from src.agents.test_case_generator.api_discovery import operation_key
+from src.agents.test_case_generator.auth_intent import (
+    AUTH_INTENT_AUTHENTICATED,
+    AUTH_INTENT_INHERIT,
+    AUTH_INTENT_INVALID,
+    AUTH_INTENT_UNAUTHENTICATED,
+    AuthIntentError,
+    normalize_auth_intent,
+)
 from src.agents.test_case_generator.postman_builder import (
     AUTHORIZATION_HEADER,
     AUTHORIZATION_VALUE,
@@ -191,7 +199,19 @@ def extract_test_cases(step1_result: Any) -> list[dict]:
                 f"Step 1 result contains duplicate test case id {case_id!r}."
             )
         seen.add(case_id)
-        normalized.append({**case, "id": case_id})
+        normalized_case = {**case, "id": case_id}
+        if "auth_intent" in case:
+            try:
+                intent = normalize_auth_intent(case["auth_intent"])
+            except AuthIntentError as exc:
+                raise PostmanGenerationError(
+                    f"test case {case_id!r} has an invalid auth_intent: {exc}"
+                ) from exc
+            if intent is None:
+                normalized_case.pop("auth_intent", None)
+            else:
+                normalized_case["auth_intent"] = intent
+        normalized.append(normalized_case)
     return normalized
 
 
@@ -514,7 +534,28 @@ def _build_request_case(
     references = target_references(dependencies, case_id)
     path_params = dict(references["path"])
     query_params = dict(references["query"])
+    protected_auth_header = next(iter(headers), None)
+    if protected_auth_header is None and credentials_withheld:
+        # حتی وقتی هدر عمداً فرستاده نمی‌شود، یک dependencyِ داده‌ای نباید آن را
+        # دوباره تزریق کند. نامِ هدر از قرارداد می‌آید (پیش‌فرض authorization).
+        contract = valid_auth_header(service)
+        if contract is not None:
+            protected_auth_header = contract[0]
     for header, value in references["header"].items():
+        # قصدِ اعتبارنامه‌ی همین تست‌کیس بر یک dependencyِ داده‌ای مقدم است؛
+        # وگرنه ممکن بود توکنِ نامعتبر یا «بدونِ اعتبارنامه» بازنویسی شود.
+        if (
+            protected_auth_header is not None
+            and header.lower() == protected_auth_header.lower()
+        ):
+            note = (
+                f"The data dependency targets the authentication header '{header}', "
+                f"but this test case's credential intent takes precedence; the "
+                f"dependency value was not applied."
+            )
+            notes.append(note)
+            warnings.append(f"{case_id}: {note}")
+            continue
         headers[header] = value
 
     if references["body"]:
@@ -735,6 +776,18 @@ def _plan(
             {"key": var_of[id(service)], "value": _clean(service.get("base_url"))}
             for service in used_services[1:]
         ]
+
+    # متغیرِ نامعتبر فقط وقتی declare می‌شود که واقعاً در درخواستی استفاده شده
+    # باشد؛ کالکشنِ بدونِ تستِ نامعتبر متغیرِ بی‌استفاده نمی‌گیرد.
+    uses_invalid_credentials = any(
+        _AUTH_INVALID_VALUE in value
+        for request_case, _ in built.values()
+        for value in request_case["headers"].values()
+    )
+    if uses_invalid_credentials:
+        outcome.extra_variables.append(
+            {"key": _AUTH_INVALID_VARIABLE, "value": ""}
+        )
 
     for request_case, service in built.values():
         request_case["base_url_var"] = var_of[id(service)]
@@ -1209,7 +1262,9 @@ __all__ = [
     "has_required_authorization",
     "iter_collection_requests",
     "mapping_for",
+    "normalize_authorization",
     "operation_index",
+    "operation_requires_auth",
     "source_variables",
     "status_assertions",
     "target_references",

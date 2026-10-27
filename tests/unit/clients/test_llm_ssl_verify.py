@@ -110,6 +110,18 @@ class TestLlmClientWiring:
 
         make_client.assert_called_once_with("user-1", verify=False)
 
+    @pytest.mark.parametrize("verify", [True, False])
+    def test_the_configured_base_url_reaches_the_sdk_unchanged(self, monkeypatch, verify):
+        """هیچ نرمال‌سازی/دستکاری‌ای روی ``LLM_BASE_URL`` انجام نمی‌شود."""
+        monkeypatch.setattr("src.llm_client.LLM_SSL_VERIFY", verify)
+
+        with patch("src.llm_client.OpenAI") as openai_cls, patch(
+            "src.llm_client._make_http_client"
+        ):
+            LLMClient(user_id="user-1", agent_name="test")
+
+        assert openai_cls.call_args.kwargs["base_url"] == LLM_BASE_URL
+
 
 class TestEmbeddingIsUnaffected:
     def test_embedding_http_client_keeps_its_previous_configuration(self, monkeypatch):
@@ -161,12 +173,12 @@ def _openai_with_transport(base_url: str, handler) -> OpenAI:
 
 
 class TestVerifyDoesNotChangeTheRequestUrl:
-    """``LLM_SSL_VERIFY`` فقط TLS را عوض می‌کند؛ URL را نه.
+    """``LLM_SSL_VERIFY`` فقط TLS را عوض می‌کند؛ URL و method را نه.
 
-    خطای HTML 404 از «Token Usage Dashboard» در واقع نشان می‌داد
-    ``LLM_BASE_URL`` پیشوندِ API (``/v1``) را ندارد: OpenAI SDK همیشه
-    ``/chat/completions`` را به همان base URL می‌چسباند. خاموش‌کردنِ تأییدِ
-    گواهی فقط اجازه داد درخواست از مرحله‌ی TLS رد شود و آن 404 دیده شود.
+    مسیرِ ``/chat/completions`` را خودِ OpenAI SDK به base URL می‌چسباند
+    (``chat.completions.create`` → ``"/chat/completions"``). خطای HTML 404
+    نشان می‌داد درخواست به همان مسیرِ استانداردِ SDK رفته است؛ خاموش‌کردنِ
+    تأییدِ گواهی فقط اجازه داد درخواست از مرحله‌ی TLS رد شود.
     """
 
     @pytest.mark.parametrize("verify", [True, False])
@@ -177,6 +189,7 @@ class TestVerifyDoesNotChangeTheRequestUrl:
 
         def handler(request):
             seen_url["url"] = str(request.url)
+            seen_url["method"] = request.method
             return httpx.Response(200, json=_chat_completion_payload())
 
         def make_client(user_id, *, verify=True):
@@ -190,6 +203,7 @@ class TestVerifyDoesNotChangeTheRequestUrl:
             raw = client.chat(user_message="hi", system_prompt="sys")
 
         assert seen_verify == [verify]
+        assert seen_url["method"] == "POST"
         assert seen_url["url"] == LLM_BASE_URL.rstrip("/") + "/chat/completions"
         assert raw == "ok"
 
@@ -220,6 +234,34 @@ class TestVerifyDoesNotChangeTheRequestUrl:
         )
 
         assert urls == [expected]
+
+    @pytest.mark.parametrize("verify", [True, False])
+    def test_the_intended_base_url_is_sent_unchanged(self, monkeypatch, verify):
+        """پایان‌به‌پایان: همان base URLِ پیکربندی‌شده، همان مسیرِ SDK، همان method."""
+        monkeypatch.setattr(
+            "src.llm_client.LLM_BASE_URL", "https://aifa-chatbot.dev.dotin.ir/"
+        )
+        monkeypatch.setattr("src.llm_client.LLM_SSL_VERIFY", verify)
+        seen = {}
+
+        def handler(request):
+            seen["url"] = str(request.url)
+            seen["method"] = request.method
+            return httpx.Response(200, json=_chat_completion_payload())
+
+        def make_client(user_id, *, verify=True):
+            return httpx.Client(transport=httpx.MockTransport(handler))
+
+        with patch("src.llm_client.obs", MagicMock(enabled=False)), patch(
+            "src.llm_client._make_http_client", side_effect=make_client
+        ):
+            client = LLMClient(user_id="user-1", agent_name="test")
+            client.chat(user_message="hi", system_prompt="sys")
+
+        assert seen == {
+            "url": "https://aifa-chatbot.dev.dotin.ir/chat/completions",
+            "method": "POST",
+        }
 
     def test_an_html_404_is_surfaced_as_not_found_error(self):
         """توضیحِ مشاهده: بدنه‌ی HTML همان چیزی است که در پیامِ خطا دیده شد."""

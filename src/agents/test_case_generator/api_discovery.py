@@ -75,6 +75,9 @@ class DiscoveredApi:
             "parameters": list(self.parameters),
             "request_body": self.request_body,
             "responses": dict(self.responses),
+            # تصمیمِ auth در سطحِ همان عملیات می‌ماند؛ یک سرویس می‌تواند
+            # عملیاتِ عمومی و محافظت‌شده را هم‌زمان داشته باشد.
+            "requires_auth": self.requires_auth,
         }
 
 

@@ -131,6 +131,7 @@ Each planned test case must contain:
 - type
 - priority
 - related_service
+- auth_intent
 
 Where:
 
@@ -147,8 +148,30 @@ priority must be one of:
 - medium
 - low
 
+auth_intent must be one of:
+
+- "inherit"
+    No explicit credential behavior is stated. The API authentication contract
+    decides whether the request is authenticated.
+
+- "authenticated"
+    The test case exercises the API with valid credentials.
+
+- "unauthenticated"
+    The test case deliberately sends no credentials, for example to verify that
+    missing credentials are rejected.
+
+- "invalid_credentials"
+    The test case deliberately sends invalid, malformed, or expired credentials.
+
 Rules:
 
+- Decide auth_intent per test case, not from the endpoint path or the overall
+  task wording alone. The same endpoint may need both authenticated and
+  unauthenticated test cases.
+- Do not put header names, cookie names, tokens, or {{variables}} in
+  auth_intent.
+- Use "inherit" when the task gives no authentication information.
 - ids must be unique and stable. Use sequential ids: TC-001, TC-002, ...
 - title must state the behavior under test in one clear sentence.
 - do not include preconditions, steps, or expected_result.
@@ -163,7 +186,8 @@ Example:
   "related_service": {
     "method": "POST",
     "path": "/admin/voucher/percent"
-  }
+  },
+  "auth_intent": "authenticated"
 }
 
 ==================================================
@@ -200,7 +224,8 @@ Use exactly this top-level structure:
       "related_service": {
         "method": "POST",
         "path": "/example"
-      }
+      },
+      "auth_intent": "inherit"
     }
   ],
   "clarifications": []

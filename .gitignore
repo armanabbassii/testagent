@@ -86,3 +86,6 @@ htmlcov/
 # IDE
 .vscode/
 .idea/
+
+admin.json
+customer.json

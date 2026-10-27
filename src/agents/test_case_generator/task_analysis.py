@@ -29,6 +29,11 @@ from pathlib import Path
 
 from typing_extensions import TypedDict
 
+from src.agents.test_case_generator.auth_intent import (
+    DEFAULT_AUTH_INTENT,
+    AuthIntentError,
+    normalize_auth_intent,
+)
 from src.agents.test_case_generator.json_output import (
     JsonExtractionError,
     extract_json_object,
@@ -110,6 +115,9 @@ class TaskTestCase(TypedDict):
     steps: list[str]
     expected_result: str
     related_service: RelatedService
+    # رفتارِ اعتبارنامه‌ی همین تست‌کیس — مستقل از قراردادِ احراز هویتِ API.
+    # مقادیرِ مجاز در auth_intent.py تعریف شده‌اند.
+    auth_intent: str
 
 
 class TaskAnalysisResult(TypedDict):
@@ -132,6 +140,8 @@ class PlannedTestCase(TypedDict):
     type: str
     priority: str
     related_service: RelatedService
+    # در برنامه هم نگه داشته می‌شود تا تولیدِ مرحله‌ای آن را از دست ندهد.
+    auth_intent: str
 
 
 class TaskAnalysisPlan(TypedDict):
@@ -412,6 +422,20 @@ def _validate_related_service(
     return RelatedService(method=method, path=path, service=service)
 
 
+def _validate_auth_intent(value: object, where: str, errors: list[str]) -> str:
+    """قصدِ احراز هویت را نرمال می‌کند؛ غیبتِ فیلد یعنی ``inherit``.
+
+    فیلد برای نتیجه‌های ذخیره‌شده‌ی قدیمی اجباری نیست. مقدارِ ناشناخته ولی
+    خطاست و به‌جای حدس زدن، به مدل گزارش می‌شود.
+    """
+    try:
+        intent = normalize_auth_intent(value)
+    except AuthIntentError as exc:
+        errors.append(f"{where}: {exc}")
+        return DEFAULT_AUTH_INTENT
+    return intent or DEFAULT_AUTH_INTENT
+
+
 def _validate_test_case(
     case: object,
     where: str,
@@ -443,6 +467,10 @@ def _validate_test_case(
             f"{where}: 'priority' must be one of {_VALID_PRIORITIES}, "
             f"got {case.get('priority')!r}."
         )
+
+    auth_intent = _validate_auth_intent(
+        case.get("auth_intent"), f"{where}.auth_intent", errors
+    )
 
     expected_result = _clean(case.get("expected_result"))
     if not expected_result:
@@ -476,14 +504,16 @@ def _validate_test_case(
         steps=steps,
         expected_result=expected_result,
         related_service=related_service,
+        auth_intent=auth_intent,
     )
 
 
 def _dedupe(cases: list[TaskTestCase]) -> list[TaskTestCase]:
     """تست‌کیس‌های کاملاً تکراری را حذف می‌کند.
 
-    «تکراری» یعنی نوع، عنوان، قدم‌ها و نتیجه‌ی مورد انتظار یکسان باشند. اگر دو
-    سناریو در یکی از این‌ها تفاوت داشته باشند، هر دو می‌مانند.
+    «تکراری» یعنی نوع، عنوان، قدم‌ها، نتیجه‌ی مورد انتظار و قصدِ احراز هویت
+    یکسان باشند. اگر دو سناریو در یکی از این‌ها تفاوت داشته باشند، هر دو
+    می‌مانند — از جمله دو تستِ یک endpoint با رفتارِ اعتبارنامه‌ی متفاوت.
     """
     seen: set[tuple] = set()
     kept: list[TaskTestCase] = []
@@ -493,6 +523,7 @@ def _dedupe(cases: list[TaskTestCase]) -> list[TaskTestCase]:
             case["title"].lower(),
             tuple(step.lower() for step in case["steps"]),
             case["expected_result"].lower(),
+            case["auth_intent"],
         )
         if key in seen:
             continue
@@ -612,6 +643,10 @@ def _validate_planned_case(
             f"got {case.get('priority')!r}."
         )
 
+    auth_intent = _validate_auth_intent(
+        case.get("auth_intent"), f"{where}.auth_intent", errors
+    )
+
     related_service = _validate_related_service(
         case.get("related_service"), f"{where}.related_service", errors
     )
@@ -631,6 +666,7 @@ def _validate_planned_case(
         type=case_type,
         priority=priority,
         related_service=related_service,
+        auth_intent=auth_intent,
     )
 
 
@@ -801,6 +837,7 @@ def _assemble_result(
                 "steps": detail["steps"],
                 "expected_result": detail["expected_result"],
                 "related_service": planned["related_service"],
+                "auth_intent": planned["auth_intent"],
             }
         )
 
