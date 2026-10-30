@@ -2,13 +2,12 @@
 cli/__main__.py — entrypoint برای `python -m src.cli`
 
 ساختار — --lang هر جایی قبول می‌شود:
-    python -m src.cli --lang fa review --mr 42
-    python -m src.cli review --mr 42 --lang en
-    python -m src.cli scores --last 5 --lang fa
+    python -m src.cli --lang fa ingest-business --file catalog.jsonl
+    python -m src.cli ingest-business --file catalog.jsonl --lang en
 
 دستورهای موجود:
-    review   اجرای code review روی یک MR
-    scores   نمایش تاریخچه امتیازها
+    ingest-business    بارگذاریِ کاتالوگ سرویس‌های بیزینسی در vector store
+    ingest-technical   بارگذاریِ سورس جاوا/مستندات فنی در vector store
 
 افزودن دستور جدید:
     ۱. یک فایل در src/cli/commands/ بسازید
@@ -43,13 +42,9 @@ def _register_commands(subparsers, t: Translator, lang_parent: argparse.Argument
     """همه دستورها اینجا ثبت می‌شوند.
     برای اضافه کردن دستور جدید، فقط این تابع را ویرایش کنید.
     """
-    from src.cli.commands.review import add_parser as add_review
-    from src.cli.commands.scores import add_parser as add_scores
     from src.cli.commands.ingest import add_parser as add_ingest
     from src.cli.commands.ingest_technical import add_parser as add_ingest_technical
 
-    add_review(subparsers, t, lang_parent)
-    add_scores(subparsers, t, lang_parent)
     add_ingest(subparsers, t, lang_parent)
     add_ingest_technical(subparsers, t, lang_parent)
 

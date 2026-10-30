@@ -1,7 +1,7 @@
 [project]
 name = "local-llm-project"
 version = "0.1.0"
-description = "Local LLM + Embedding + LangGraph multi-agent with memory, HITL, and code review"
+description = "Local LLM + Embedding + LangGraph multi-agent with memory and HITL"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
@@ -67,11 +67,6 @@ source = ["src"]
 omit = [
     "src/__init__.py",
     "src/agents/__init__.py",
-    "src/agents/code_review/__init__.py",
-    "src/agents/code_review/gitlab/__init__.py",
-    "src/agents/code_review/reviewer/__init__.py",
-    "src/agents/code_review/decision/__init__.py",
-    "src/agents/code_review/scoring/__init__.py",
     "src/debug/__init__.py",
     "src/debug/handlers/__init__.py",
     "src/memory/__init__.py",

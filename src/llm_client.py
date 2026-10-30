@@ -2,12 +2,14 @@
 llm_client.py — کلاینت برای ارتباط با LLM لوکال (OpenAI-compatible)
 """
 
+import functools
 import uuid
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 from openai import APIStatusError, OpenAI
 from src.config import LLM_BASE_URL, LLM_MODEL, LLM_API_KEY, LLM_SSL_VERIFY, CLIENT_ID
+from src.debug import AgentLogger, DebugConfig
 from src.observability.observability import Observability
 from src.token_usage import report_usage
 
@@ -31,6 +33,8 @@ class LLMResponse(str):
         total_tokens      : جمعِ توکن‌های گزارش‌شده (اگر ارائه‌دهنده بدهد)
         cached_tokens     : توکن‌های ورودیِ کش‌شده (اگر گزارش شود)
         max_tokens        : سقفی که خودمان در درخواست فرستادیم
+        response_id       : شناسه‌ی پاسخِ ارائه‌دهنده (``ChatCompletion.id``) برای
+                            ردیابی — ``""`` اگر گزارش نشود
     """
 
     finish_reason: str
@@ -39,6 +43,7 @@ class LLMResponse(str):
     total_tokens: int | None
     cached_tokens: int | None
     max_tokens: int | None
+    response_id: str
 
     def __new__(
         cls,
@@ -50,6 +55,7 @@ class LLMResponse(str):
         total_tokens: int | None = None,
         cached_tokens: int | None = None,
         max_tokens: int | None = None,
+        response_id: str = "",
     ) -> "LLMResponse":
         response = super().__new__(cls, text or "")
         response.finish_reason = finish_reason or ""
@@ -58,6 +64,7 @@ class LLMResponse(str):
         response.total_tokens = total_tokens
         response.cached_tokens = cached_tokens
         response.max_tokens = max_tokens
+        response.response_id = response_id or ""
         return response
 
     @property
@@ -103,6 +110,7 @@ def _to_response(response: object, max_tokens: int) -> LLMResponse:
     usage = getattr(response, "usage", None)
     finish_reason = getattr(choice, "finish_reason", None)
     prompt_details = getattr(usage, "prompt_tokens_details", None)
+    response_id = getattr(response, "id", None)
     return LLMResponse(
         content,
         # str() تا مقایسه‌ی ``truncated`` هرگز روی یک شیءِ ناغافل انجام نشود.
@@ -112,6 +120,36 @@ def _to_response(response: object, max_tokens: int) -> LLMResponse:
         total_tokens=getattr(usage, "total_tokens", None),
         cached_tokens=getattr(prompt_details, "cached_tokens", None),
         max_tokens=max_tokens,
+        response_id=response_id if isinstance(response_id, str) else "",
+    )
+
+
+@functools.cache
+def _response_logger() -> AgentLogger:
+    """loggerِ فراداده‌ی پاسخ‌ها — یک بار در هر پروسه ساخته می‌شود.
+
+    سطحش مثلِ هر ایجنتِ دیگر با ``LOGGING_AGENTS_LLM_CLIENT_LEVEL`` تنظیم می‌شود.
+    """
+    return DebugConfig.from_env().get_logger("llm_client")
+
+
+def _log_response(response: LLMResponse, *, model: str, agent_name: str) -> None:
+    """فقط فراداده‌ی امن: نه متنِ پاسخ، نه استدلالِ (reasoning) مدل، نه پرامپت.
+
+    جای ``print(response)`` قبلی است که کلِ ``ChatCompletion`` — از جمله
+    استدلالِ کاملِ مدل — را روی کنسول می‌ریخت.
+    """
+    _response_logger().debug(
+        "پاسخِ LLM دریافت شد",
+        model=model,
+        agent=agent_name,
+        response_id=response.response_id,
+        finish_reason=response.finish_reason,
+        prompt_tokens=response.prompt_tokens,
+        completion_tokens=response.completion_tokens,
+        total_tokens=response.total_tokens,
+        max_tokens=response.max_tokens,
+        content_chars=len(response),
     )
 
 
@@ -235,9 +273,9 @@ class LLMClient:
             temperature=temperature,
             max_tokens=max_tokens,
         )
-        print(response)
         parsed = _to_response(response, max_tokens)
         report_usage(parsed)
+        _log_response(parsed, model=self.model, agent_name=self.agent_name)
         return parsed
 
     def _chat_observed(self, user_message, system_prompt, temperature, max_tokens) -> LLMResponse:
@@ -259,6 +297,7 @@ class LLMClient:
             )
             content = _to_response(response, max_tokens)
             report_usage(content)
+            _log_response(content, model=self.model, agent_name=self.agent_name)
             usage = response.usage
             gen.update(
                 output=content,

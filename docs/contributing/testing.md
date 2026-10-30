@@ -4,17 +4,16 @@
 
 ```
 tests/
-├── conftest.py              # fixture های مشترک (MemoryHandler، comment fixtures)
+├── conftest.py              # fixture های مشترک (MemoryHandler)
 ├── unit/                    # تست‌های واحد — بدون سرویس خارجی
 │   ├── debug/
 │   │   ├── test_levels.py       # DebugLevel enum
 │   │   ├── test_logger.py       # AgentLogger
 │   │   ├── test_file_handler.py # FileHandler
 │   │   └── test_debug_config.py # DebugConfig
-│   ├── scoring/
-│   │   └── test_scorer.py       # calculate_score, save_score, format_score_comment
-│   ├── gitlab/
-│   │   └── test_dedup.py        # fingerprint و جلوگیری از کامنت تکراری
+│   ├── task_sources/
+│   │   ├── fake_jira.py         # Jira + ADFSِ ساختگی برای تست‌ها
+│   │   └── test_jira_settings.py # کلید و نشانیِ issue، تنظیماتِ Jira
 │   └── vector_store/
 │       └── test_base.py         # Document، SearchResult
 └── integration/             # تست‌های integration — با mock
@@ -36,10 +35,10 @@ uv run pytest
 uv run pytest tests/unit/
 
 # فقط یک فایل
-uv run pytest tests/unit/scoring/test_scorer.py
+uv run pytest tests/unit/task_sources/test_jira_settings.py
 
 # یک تست خاص
-uv run pytest tests/unit/scoring/test_scorer.py::TestCalculateScore::test_single_critical
+uv run pytest tests/unit/task_sources/test_jira_settings.py::TestIssueReference::test_project_keys_with_digits_and_underscores
 
 # بدون coverage (سریع‌تر)
 uv run pytest --no-cov
@@ -61,20 +60,18 @@ uv run pytest -vv
 
 ```python
 # ✅ درست — ایزوله
-def test_calculate_score_critical():
-    result = calculate_score([_comment("critical")])
-    assert result["total_score"] == -10
+def test_parse_issue_reference_lowercase_key():
+    assert parse_issue_reference("demo-7") == "DEMO-7"
 
-# ❌ اشتباه — به LLM وابسته است
-def test_reviewer_agent():
-    agent = CodeReviewerAgent()
-    result = agent(state)   # این یه LLM call واقعی انجام می‌دهد
+# ❌ اشتباه — به سرویسِ واقعی وابسته است
+def test_import_issue():
+    result = import_issue("PODIUM-3386")   # به Jiraِ واقعی وصل می‌شود
 ```
 
 ### Integration Tests (`tests/integration/`)
 
 - **تعریف:** تست تعامل بین چند component
-- **قانون:** سرویس‌های خارجی (LLM، GitLab، Redis) باید mock شوند
+- **قانون:** سرویس‌های خارجی (LLM، Jira، Redis) باید mock شوند
 - **mock:** از `unittest.mock.patch` برای mock کردن استفاده کنید
 
 ```python
@@ -94,9 +91,9 @@ def test_graph_routing(mock_chat, checkpointer):
 
 ```python
 # فرمت: test_{چه چیزی}_{شرط}_{نتیجه مورد انتظار}
-def test_calculate_score_empty_list_returns_zero():
+def test_parse_issue_reference_empty_raises():
 def test_logger_disabled_logs_nothing():
-def test_fingerprint_different_files_different_result():
+def test_normalize_text_crlf_becomes_lf():
 ```
 
 ### ۲. ساختار — الگوی AAA
@@ -104,33 +101,33 @@ def test_fingerprint_different_files_different_result():
 ```python
 def test_example():
     # Arrange — آماده‌سازی
-    comments = [_comment("critical")]
+    reference = "https://jira.test/browse/demo-7"
 
     # Act — عمل
-    result = calculate_score(comments)
+    key = parse_issue_reference(reference, "https://jira.test")
 
     # Assert — بررسی
-    assert result["total_score"] == -10
+    assert key == "DEMO-7"
 ```
 
 ### ۳. یک assert منطقی per test
 
 ```python
 # ✅ درست
-def test_total_score_correct():
-    result = calculate_score([_comment("critical")])
-    assert result["total_score"] == -10
+def test_text_attachment_is_processed():
+    result = _process("notes.txt", b"hello")
+    assert result.status == ATTACHMENT_PROCESSED
 
-def test_issues_list_has_one_item():
-    result = calculate_score([_comment("critical")])
-    assert len(result["issues"]) == 1
+def test_text_attachment_content_is_extracted():
+    result = _process("notes.txt", b"hello")
+    assert result.content == "hello"
 
 # ❌ اشتباه — دو موضوع مختلف در یک تست
 def test_everything():
-    result = calculate_score([_comment("critical")])
-    assert result["total_score"] == -10
-    assert len(result["issues"]) == 1
-    assert result["issues"][0]["category"] == "security"
+    result = _process("notes.txt", b"hello")
+    assert result.status == ATTACHMENT_PROCESSED
+    assert result.content == "hello"
+    assert result.truncated is False
 ```
 
 ### ۴. استفاده از fixture به جای تکرار
@@ -138,13 +135,12 @@ def test_everything():
 ```python
 # conftest.py یا بالای فایل تست
 @pytest.fixture
-def critical_comment() -> ReviewComment:
-    return ReviewComment(file_path="f.py", line=1,
-                         severity="critical", category="security", body="issue")
+def server() -> FakeJira:
+    return FakeJira(issues={"DEMO-7": issue_body()})
 
 # در تست
-def test_something(critical_comment):
-    result = calculate_score([critical_comment])
+def test_something(server):
+    client = JiraClient(adfs_settings(), session=server.session())
     ...
 ```
 

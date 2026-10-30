@@ -20,8 +20,8 @@ class TestTranslator:
 
     def test_format_args_applied(self):
         t = Translator("en")
-        result = t.t("review_header", 42)
-        assert "42" in result
+        result = t.t("ingest_header", "catalog_42")
+        assert "catalog_42" in result
 
     def test_unknown_key_returns_bracketed_key(self):
         t = Translator("en")
@@ -43,9 +43,13 @@ class TestTranslator:
         assert "fa" in SUPPORTED_LANGS
         assert "en" in SUPPORTED_LANGS
 
-    def test_multiple_format_args(self):
+    def test_multiple_format_args(self, monkeypatch):
+        from src.cli.i18n import LANGUAGES
+
+        # هیچ پیامِ فعلی دو آرگومان ندارد؛ قابلیتِ قالب‌بندی با یک کلیدِ موقت سنجیده می‌شود.
+        monkeypatch.setitem(LANGUAGES["en"], "two_args_test", "MR #{} — {} item(s)")
         t = Translator("en")
-        result = t.t("scores_mr_header", 42, 5)
+        result = t.t("two_args_test", 42, 5)
         assert "42" in result
         assert "5" in result
 

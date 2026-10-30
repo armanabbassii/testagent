@@ -25,6 +25,7 @@ from __future__ import annotations
 import json
 import re
 from collections import Counter
+from dataclasses import dataclass
 from pathlib import Path
 
 from typing_extensions import TypedDict
@@ -84,6 +85,103 @@ _EMPTY_SINGLE_RESPONSE = (
     "The single-call LLM response was complete but contained no test cases, so "
     "it could not be used."
 )
+
+# ── تشخیصِ «هیچ مرحله‌ای تست‌کیس نساخت» ─────────────────────────────────────
+# وقتی هم پاسخِ یک‌فراخوانی و هم برنامه‌ی مرحله‌ای تست‌کیس ندارند، پیامِ خطا
+# می‌گوید کدام مرحله چه برگرداند و مدل چرا تست‌کیسی نساخت (خلاصه و چند
+# clarification از خودِ پاسخ، کوتاه‌شده). پاسخِ خام، استدلالِ مدل و پرامپت هرگز
+# در پیام یا لاگ نمی‌آیند؛ لاگ فقط وضعیت، شناسه و تعداد را ثبت می‌کند.
+STAGE_SINGLE_CALL = "single-call analysis"
+STAGE_PLAN = "staged generation (test case plan)"
+
+_DIAG_SUMMARY_CHARS = 300
+_DIAG_CLARIFICATIONS = 3
+_DIAG_CLARIFICATION_CHARS = 200
+
+
+@dataclass(frozen=True)
+class GenerationAttempt:
+    """یک مرحله که هیچ تست‌کیسِ قابلِ استفاده‌ای برنگرداند."""
+
+    stage: str
+    # missing | null | empty | not an array (<type>) | truncated (…)
+    test_cases_state: str
+    response_id: str = ""
+    task_summary: str = ""
+    clarifications: tuple[str, ...] = ()
+
+
+def cases_state(data: dict) -> str:
+    """چرا ``test_cases`` قابلِ استفاده نیست: نبودن، null، خالی یا غیرِ آرایه."""
+    if "test_cases" not in data:
+        return "missing"
+    value = data["test_cases"]
+    if value is None:
+        return "null"
+    if isinstance(value, list):
+        return "empty" if not value else "present"
+    return f"not an array ({type(value).__name__})"
+
+
+def _response_id(raw: object) -> str:
+    """شناسه‌ی پاسخِ ارائه‌دهنده، اگر کلاینت گزارش کرده باشد."""
+    value = getattr(raw, "response_id", "")
+    return value if isinstance(value, str) else ""
+
+
+def _shorten(value: object, limit: int) -> str:
+    text = " ".join(str(value).split())
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def _empty_attempt(stage: str, data: dict, raw: object) -> GenerationAttempt:
+    clarifications = data.get("clarifications")
+    texts = (
+        tuple(str(item) for item in clarifications if isinstance(item, str) and item.strip())
+        if isinstance(clarifications, list)
+        else ()
+    )
+    summary = data.get("task_summary")
+    return GenerationAttempt(
+        stage=stage,
+        test_cases_state=cases_state(data),
+        response_id=_response_id(raw),
+        task_summary=summary.strip() if isinstance(summary, str) else "",
+        clarifications=texts,
+    )
+
+
+def no_test_cases_diagnostics(attempts: list[GenerationAttempt]) -> str:
+    """بخشِ تشخیصیِ پیامِ خطا — مرحله‌ها، وضعیت، شناسه، خلاصه و clarificationها.
+
+    خلاصه و clarificationها از آخرین مرحله‌ای می‌آیند که آن‌ها را داشت (معمولاً
+    برنامه‌ی مرحله‌ای)، کوتاه‌شده و حداکثر _DIAG_CLARIFICATIONS مورد.
+    """
+    lines = ["", "", "No test cases were produced by any generation stage:"]
+    for attempt in attempts:
+        state = attempt.test_cases_state
+        described = state if state.startswith("truncated") else f"'test_cases' was {state}"
+        reference = f" (response id: {attempt.response_id})" if attempt.response_id else ""
+        lines.append(f"  - {attempt.stage}: {described}{reference}.")
+
+    source = next((a for a in reversed(attempts) if a.task_summary), None)
+    if source is not None:
+        lines.append(
+            f"Model task summary ({source.stage}): "
+            f"{_shorten(source.task_summary, _DIAG_SUMMARY_CHARS)}"
+        )
+    source = next((a for a in reversed(attempts) if a.clarifications), None)
+    if source is not None:
+        shown = source.clarifications[:_DIAG_CLARIFICATIONS]
+        lines.append(
+            f"Model clarifications ({source.stage}; {len(shown)} of "
+            f"{len(source.clarifications)}):"
+        )
+        lines += [f"  - {_shorten(item, _DIAG_CLARIFICATION_CHARS)}" for item in shown]
+    else:
+        lines.append("The model gave no clarifications.")
+    return "\n".join(lines)
+
 
 # حداکثر تعداد تست‌کیس در هر فراخوانیِ «گسترش» (مسیرِ مرحله‌ای).
 #
@@ -969,7 +1067,15 @@ class TaskAnalysisGenerator:
                 batch_size=self._batch_size,
             )
             result = self._generate_staged(
-                llm, task_description, developed_services, truncated
+                llm,
+                task_description,
+                developed_services,
+                truncated,
+                single_call=GenerationAttempt(
+                    stage=STAGE_SINGLE_CALL,
+                    test_cases_state="truncated (finish_reason='length'; nothing was read)",
+                    response_id=_response_id(raw),
+                ),
             )
         else:
             result = self._analyze_single_call(
@@ -999,9 +1105,13 @@ class TaskAnalysisGenerator:
             raise TaskAnalysisError(str(exc)) from exc
 
         if _has_no_test_cases(data):
+            attempt = _empty_attempt(STAGE_SINGLE_CALL, data, raw)
             self._log.warning(
                 "پاسخِ یک‌فراخوانی هیچ تست‌کیسی نداشت — تولیدِ مرحله‌ای آغاز می‌شود",
                 reason="empty_test_cases",
+                test_cases=attempt.test_cases_state,
+                response_id=attempt.response_id,
+                clarifications=len(attempt.clarifications),
                 batch_size=self._batch_size,
             )
             return self._generate_staged(
@@ -1009,6 +1119,7 @@ class TaskAnalysisGenerator:
                 task_description,
                 developed_services,
                 _EMPTY_SINGLE_RESPONSE,
+                single_call=attempt,
             )
         return validate_analysis(data)
 
@@ -1027,9 +1138,16 @@ class TaskAnalysisGenerator:
         task_description: str,
         developed_services: str,
         fallback_reason: str,
+        single_call: GenerationAttempt | None = None,
     ) -> TaskAnalysisResult:
-        """برنامه‌ی فشرده می‌سازد و جزئیات را دسته‌به‌دسته گسترش می‌دهد."""
-        plan = self._plan(llm, task_description, developed_services, fallback_reason)
+        """برنامه‌ی فشرده می‌سازد و جزئیات را دسته‌به‌دسته گسترش می‌دهد.
+
+        ``single_call`` می‌گوید پاسخِ یک‌فراخوانی چرا کنار گذاشته شد — فقط برای
+        پیامِ خطا اگر برنامه هم تست‌کیسی نداشته باشد.
+        """
+        plan = self._plan(
+            llm, task_description, developed_services, fallback_reason, single_call
+        )
         details = self._expand_all(llm, task_description, plan["test_cases"])
         return _assemble_result(plan, details)
 
@@ -1039,6 +1157,7 @@ class TaskAnalysisGenerator:
         task_description: str,
         developed_services: str,
         fallback_reason: str,
+        single_call: GenerationAttempt | None = None,
     ) -> TaskAnalysisPlan:
         system_prompt, user_message = build_plan_prompt(
             self._plan_prompt_path, task_description, developed_services
@@ -1060,7 +1179,23 @@ class TaskAnalysisGenerator:
             data = extract_json_object(raw)
         except JsonExtractionError as exc:
             raise TaskAnalysisError(str(exc)) from exc
-        return validate_plan(data)
+        if not _has_no_test_cases(data):
+            return validate_plan(data)
+
+        # هیچ مرحله‌ای تست‌کیس نساخت: همان اعتبارسنجی خطا می‌دهد؛ پیامش فقط با
+        # تشخیصِ مرحله‌ها کامل می‌شود و خطای اصلی به‌عنوانِ علت حفظ می‌شود.
+        attempts = [a for a in (single_call, _empty_attempt(STAGE_PLAN, data, raw)) if a]
+        try:
+            return validate_plan(data)
+        except TaskAnalysisError as exc:
+            self._log.error(
+                "هیچ مرحله‌ای تست‌کیس تولید نکرد",
+                stages=[a.stage for a in attempts],
+                test_cases=[a.test_cases_state for a in attempts],
+                response_ids=[a.response_id for a in attempts],
+                clarifications=[len(a.clarifications) for a in attempts],
+            )
+            raise TaskAnalysisError(f"{exc}{no_test_cases_diagnostics(attempts)}") from exc
 
     def _expand_all(
         self,

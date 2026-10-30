@@ -28,20 +28,6 @@ _COLORS = {
     "dim":     "\033[2m",
 }
 
-SEV_COLORS = {
-    "critical":   "red",
-    "major":      "yellow",
-    "minor":      "cyan",
-    "suggestion": "dim",
-}
-
-DECISION_COLORS = {
-    "approve":    "green",
-    "reject":     "red",
-    "needs_work": "yellow",
-}
-
-
 def _c(text: str, color: str) -> str:
     if not _COLOR_SUPPORTED:
         return text
@@ -55,14 +41,6 @@ def bold(text: str) -> str:
 
 def dim(text: str) -> str:
     return _c(text, "dim")
-
-
-def severity_color(severity: str, text: str) -> str:
-    return _c(text, SEV_COLORS.get(severity, "white"))
-
-
-def decision_color(decision: str, text: str) -> str:
-    return _c(text, DECISION_COLORS.get(decision, "white"))
 
 
 # ── توابع چاپ ────────────────────────────────────────────────────────────────
@@ -103,20 +81,6 @@ def step(text: str) -> None:
 def prompt(text: str, options: list[str]) -> str:
     opts = "/".join(options)
     return input(f"\n  {bold(text)} ({opts}): ").strip().lower()
-
-
-def review_comment(severity: str, category: str, file_path: str,
-                   line: int | None, body: str) -> None:
-    line_info = f" :{line}" if line else ""
-    sev_label = severity_color(severity, f"[{severity.upper()}]")
-    cat_label = dim(f"[{category}]")
-    location = bold(f"{file_path}{line_info}")
-    print(f"\n  {sev_label} {cat_label} {location}")
-    # body را با indent نمایش بده
-    for part in body[:200].split("\n"):
-        print(f"     {dim(part)}")
-    if len(body) > 200:
-        print(f"     {dim('...')}")
 
 
 def score_row(label: str, value, width: int = 20) -> None:

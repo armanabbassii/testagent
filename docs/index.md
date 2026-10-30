@@ -41,7 +41,5 @@ src/
 └── agents/
     ├── state.py / base_agent.py / graph.py / hitl.py / memory_nodes.py
     ├── router/ research/ summarizer/ general/
-    └── code_review/
-        ├── gitlab/ reviewer/ decision/ scoring/
-        └── state.py / graph.py
+    └── test_case_generator/     # جریانِ پنج‌قدمیِ تولیدِ تست‌کیس و Postman
 ```

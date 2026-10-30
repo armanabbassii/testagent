@@ -2,7 +2,7 @@
 
 زیرساخت multi-agent با LLM و Embedding لوکال از طریق OpenAI-compatible API،
 مدیریت ایجنت‌ها با LangGraph، حافظه بلندمدت با Qdrant/Chroma، Human-in-the-Loop،
-سیستم لاگ سطح‌بندی‌شده، و Code Review خودکار با GitLab.
+و سیستم لاگ سطح‌بندی‌شده.
 
 ---
 
@@ -74,23 +74,14 @@ local-llm-project/
 │       ├── router/                  # RouterAgent
 │       ├── research/                # ResearchAgent
 │       ├── summarizer/              # SummaryAgent
-│       ├── general/                 # GeneralAgent
-│       └── code_review/
-│           ├── state.py             # CodeReviewState
-│           ├── graph.py             # build_code_review_graph()
-│           ├── gitlab/              # GitLabFetcherAgent, GitLabCommenterAgent
-│           ├── reviewer/            # CodeReviewerAgent + prompts/
-│           ├── decision/            # DecisionMakerAgent + prompts/
-│           └── scoring/             # scorer.py — امتیازدهی + JSONL
+│       └── general/                 # GeneralAgent
 │
 ├── examples/
 │   ├── llm_basic.py                 # استفاده از LLMClient
 │   ├── embedding_basic.py           # استفاده از EmbeddingClient
 │   ├── agents_basic.py              # Multi-agent بدون memory
 │   ├── agents_with_memory.py        # Multi-agent با Qdrant memory
-│   ├── agents_hitl.py               # Human-in-the-Loop
-│   ├── code_review_basic.py         # Code Review با GitLab
-│   └── code_review_scores.py        # خواندن تاریخچه امتیازها
+│   └── agents_hitl.py               # Human-in-the-Loop
 │
 ├── docs/
 │   ├── index.md
@@ -129,14 +120,6 @@ CLIENT_ID=my-client-id
 # توجه: USER_ID از کد برنامه (session/auth) پاس داده می‌شود
 ```
 
-### Code Review (اختیاری)
-
-```ini
-GITLAB_URL=https://gitlab.com
-GITLAB_TOKEN=glpat-xxxxxxxxxxxxxxxxxxxx
-GITLAB_PROJECT_ID=12345678
-```
-
 ### لاگ (اختیاری)
 
 ```ini
@@ -147,8 +130,8 @@ LOGGING_DRIVER_FILE_PATH=logs/app.log
 LOGGING_DRIVER_FILE_FORMAT=text # text | jsonl
 
 # per-agent (ارث‌بری از global در صورت خالی بودن)
-LOGGING_AGENTS_CODE_REVIEWER_LEVEL=trace
-LOGGING_AGENTS_DECISION_MAKER_ENABLED=false
+LOGGING_AGENTS_SOURCE_SELECTION_LEVEL=trace
+LOGGING_AGENTS_JIRA_IMPORT_ENABLED=false
 ```
 
 ---
@@ -168,19 +151,6 @@ LOGGING_AGENTS_DECISION_MAKER_ENABLED=false
                                    summarizer → memory_saver → END
                                    general    → memory_saver → END
 ```
-
-### Code Review
-
-```
-START → gitlab_fetcher → code_reviewer → gitlab_commenter → decision_maker → END
-```
-
-| Node | وظیفه |
-|------|-------|
-| `gitlab_fetcher` | دریافت diff، اطلاعات MR، و fingerprint کامنت‌های موجود |
-| `code_reviewer` | بررسی diff با rule های تخصصی (security، correctness، performance، style) |
-| `gitlab_commenter` | ثبت کامنت‌های inline با dedup + کامنت امتیاز |
-| `decision_maker` | تصمیم نهایی (approve/reject/needs_work) + ثبت کامنت تصمیم |
 
 ---
 
@@ -218,19 +188,6 @@ config = {"configurable": {"thread_id": "session-1"}}
 graph.invoke(state, config)                            # اجرا تا interrupt
 approved = HITLHandler.prompt_user(graph.get_state(config).values)
 HITLHandler.resume(graph, approved=approved, config=config)
-```
-
-### Code Review
-
-```bash
-# ساده
-uv run python examples/code_review_basic.py --mr 42
-
-# با تأیید انسانی قبل از تصمیم نهایی
-uv run python examples/code_review_basic.py --mr 42 --hitl
-
-# نمایش تاریخچه امتیازها
-uv run python examples/code_review_scores.py --mr 42
 ```
 
 ### لاگ

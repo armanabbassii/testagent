@@ -3,7 +3,7 @@
 > این سند **پیاده‌سازیِ واقعی** را توصیف می‌کند، نه یک معماریِ ایده‌آل. هر
 > ارجاع به فایل/کلاس/تابع مستقیماً به کدِ همین مخزن اشاره دارد.
 > بخشِ اصلی سند جریانِ پنج‌قدمیِ `test_case_generator` است؛ بقیه‌ی پروژه
-> (code review، ایجنت‌های عمومی، حافظه) فقط در حدِ نقشه‌ی کلی آمده‌اند و سندهای
+> (ایجنت‌های عمومی، حافظه) فقط در حدِ نقشه‌ی کلی آمده‌اند و سندهای
 > جداگانه‌ی خودشان را دارند ([index.md](../index.md)).
 > مسیرِ اجرای دکمه‌ها و `Run All` (`ui/pipeline.py`)، مدیریتِ وضعیت و صادرات در
 > [workflow-execution.md](workflow-execution.md) آمده است.
@@ -19,7 +19,6 @@
 |--------|-------|-------|-------------|
 | **تولیدِ تست‌کیس و Postman (ویزاردِ HITL)** | توصیفِ تسک + snapshotِ Swagger | Postman Collection v2.1 | `ui/app.py` (Streamlit) |
 | تولیدِ تست‌کیس از Swagger/سناریوی YAML (جریانِ قدیمی) | URLِ Swagger یا فایلِ YAML در پیامِ کاربر | فایلِ `*.postman_collection.json` | `TestCaseGeneratorAgent` در `src/agents/graph.py` |
-| Code review روی MRِ GitLab | شماره‌ی MR | کامنت، امتیاز، تصمیمِ approve | `python -m src.cli review` |
 
 اصلِ معماریِ مشترک: **LLM فقط «معنا» را تفسیر می‌کند و پایتون همه‌چیز را
 قطعی اعتبارسنجی می‌کند.** هیچ خروجیِ LLM بدونِ اعتبارسنجیِ سخت‌گیرانه به قدمِ
@@ -50,7 +49,6 @@ src/
 │   └── jira/                   # ورودِ ADFS SAML/PAT، REST v2، wiki markup (jira-integration.md)
 ├── agents/
 │   ├── graph.py                # گرافِ LangGraphِ عمومی (router → …, test_case_generator)
-│   ├── code_review/            # گرافِ code review (GitLab، Sonar، reviewer، decision)
 │   └── test_case_generator/    # ← موضوعِ اصلیِ این سند
 │       ├── task_analysis.py        # قدم ۱
 │       ├── swagger_analyzer.py     # parse سندِ OpenAPI v2/v3 (مشترک)

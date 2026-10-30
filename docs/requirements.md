@@ -23,7 +23,6 @@
 |-------|-----|-------------|
 | Qdrant | Vector store + Long-term memory | استفاده از `QdrantVectorStore` یا `QdrantMemory` |
 | ChromaDB | Vector store جایگزین | استفاده از `ChromaVectorStore` |
-| GitLab | Code review | استفاده از گراف `code_review` |
 
 ## وابستگی‌های Python
 
@@ -38,7 +37,7 @@ langchain-core>=0.3.0
 # اختیاری (بر اساس نیاز)
 qdrant-client>=1.10.0    # برای QdrantVectorStore / QdrantMemory
 chromadb>=0.5.0          # برای ChromaVectorStore
-requests>=2.32.0         # برای GitLab agent
+requests>=2.32.0         # برای Jira و دریافتِ Swagger
 ```
 
 ## متغیرهای محیطی الزامی
@@ -55,14 +54,6 @@ EMBEDDING_BASE_URL=
 EMBEDDING_MODEL=
 EMBEDDING_API_KEY=
 CLIENT_ID=
-```
-
-### الزامی برای code review
-
-```ini
-GITLAB_URL=
-GITLAB_TOKEN=
-GITLAB_PROJECT_ID=
 ```
 
 ### اختیاری (لاگ)

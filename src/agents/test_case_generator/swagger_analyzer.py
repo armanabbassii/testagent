@@ -8,7 +8,7 @@ api-docs) را می‌گیرد، spec خام JSON را resolve و دریافت �
 خروجی این ماژول ورودی postman_builder است.
 
 نکته‌ی معماری:
-    این ماژول از `requests` استفاده می‌کند (مثل GitLabClient) چون با یک سرویس
+    این ماژول از `requests` استفاده می‌کند (مثل کلاینتِ Jira) چون با یک سرویس
     HTTP معمولی صحبت می‌کند، نه با LLM/Embedding. قانونِ «فقط از LLMClient/
     EmbeddingClient استفاده کن» فقط مربوط به ارتباط با سرویس‌های AI است.
 """

@@ -118,11 +118,6 @@ EMBEDDING_API_KEY: str = _require("EMBEDDING_API_KEY")
 # ── Custom Headers ────────────────────────────────────────────────────────────
 CLIENT_ID: str = _require("CLIENT_ID")
 
-# ── GitLab ────────────────────────────────────────────────────────────────────
-GITLAB_URL: str = _require("GITLAB_URL")
-GITLAB_TOKEN: str = _require("GITLAB_TOKEN")
-GITLAB_PROJECT_ID: str = _require("GITLAB_PROJECT_ID")
-
 # ── Checkpointer ──────────────────────────────────────────────────────────────
 # backend: sqlite (توسعه/تست/single-node) | redis (production/multi-node)
 CHECKPOINTER_BACKEND: str = os.getenv("CHECKPOINTER_BACKEND", "sqlite")
@@ -141,29 +136,3 @@ LANGFUSE_ENABLED: bool = os.getenv("LANGFUSE_ENABLED", "false").lower() in ("tru
 LANGFUSE_PUBLIC_KEY: str = os.getenv("LANGFUSE_PUBLIC_KEY", "")
 LANGFUSE_SECRET_KEY: str = os.getenv("LANGFUSE_SECRET_KEY", "")
 LANGFUSE_HOST: str = os.getenv("LANGFUSE_HOST", "http://localhost:3000")
-
-# ── SonarQube (اختیاری — فقط اگر enable_sonar=True در گراف کد ریویو) ──────────
-SONAR_URL: str = os.getenv("SONAR_URL", "http://localhost:9000")
-SONAR_TOKEN: str = os.getenv("SONAR_TOKEN", "")
-SONAR_SCANNER_BIN: str = os.getenv("SONAR_SCANNER_BIN", "sonar-scanner")
-SONAR_PROJECT_PREFIX: str = os.getenv("SONAR_PROJECT_PREFIX", "cr-mr")
-SONAR_POLL_INTERVAL_SECONDS: int = int(os.getenv("SONAR_POLL_INTERVAL_SECONDS", "5"))
-SONAR_POLL_TIMEOUT_SECONDS: int = int(os.getenv("SONAR_POLL_TIMEOUT_SECONDS", "600"))
-SONAR_DELETE_PROJECT_AFTER_SCAN: bool = (
-    os.getenv("SONAR_DELETE_PROJECT_AFTER_SCAN", "true").lower() in ("true", "1", "yes")
-)
-
-# ── SonarQube (اختیاری — فقط با --sonar در CLI فعال می‌شود) ──────────────────
-SONAR_URL: str = os.getenv("SONAR_URL", "http://localhost:9000")
-SONAR_TOKEN: str = os.getenv("SONAR_TOKEN", "")
-SONAR_SCANNER_BIN: str = os.getenv("SONAR_SCANNER_BIN", "sonar-scanner")
-SONAR_PROJECT_PREFIX: str = os.getenv("SONAR_PROJECT_PREFIX", "cr-mr")
-SONAR_POLL_INTERVAL_SECONDS: int = int(os.getenv("SONAR_POLL_INTERVAL_SECONDS", "5"))
-SONAR_POLL_TIMEOUT_SECONDS: int = int(os.getenv("SONAR_POLL_TIMEOUT_SECONDS", "600"))
-SONAR_DELETE_PROJECT_AFTER_SCAN: bool = (
-    os.getenv("SONAR_DELETE_PROJECT_AFTER_SCAN", "true").lower() in ("true", "1", "yes")
-)
-# full = همه issue‌های باز پروژه گزارش شوند
-# diff = فقط issue‌هایی که روی خطوط واقعاً تغییرکرده در این MR هستند
-#        (پیش‌فرض — برای جلوگیری از جریمه‌شدن پروژه‌های قدیمی با بدهی فنی preexisting)
-SONAR_SCAN_MODE: str = os.getenv("SONAR_SCAN_MODE", "diff").lower().strip()

@@ -3,6 +3,12 @@
 import pytest
 from unittest.mock import MagicMock, patch
 from src.llm_client import LLMClient
+from openai.types.chat import ChatCompletion
+from openai.types.chat.chat_completion import Choice
+from openai.types.chat.chat_completion_message import ChatCompletionMessage
+from openai.types.completion_usage import CompletionUsage
+from src.debug import DebugConfig
+from src.debug.levels import DebugLevel
 
 
 @pytest.fixture
@@ -93,3 +99,75 @@ class TestLLMClientStreamChat:
         client, mock_inner = llm_client
         mock_inner.chat.completions.create.return_value = [self._chunk("only one")]
         assert list(client.stream_chat("hi")) == ["only one"]
+
+
+
+class TestResponseLogging:
+    """پاسخ دیگر چاپ نمی‌شود؛ فقط فراداده‌ی امن لاگ می‌شود."""
+
+    @staticmethod
+    def _completion() -> ChatCompletion:
+        return ChatCompletion(
+            id="chatcmpl-123",
+            object="chat.completion",
+            created=0,
+            model="test-model",
+            choices=[
+                Choice(
+                    index=0,
+                    finish_reason="stop",
+                    message=ChatCompletionMessage(
+                        role="assistant",
+                        content='{"answer": "VISIBLE-CONTENT-42"}',
+                        reasoning="PRIVATE-REASONING-99",
+                    ),
+                )
+            ],
+            usage=CompletionUsage(prompt_tokens=11, completion_tokens=7, total_tokens=18),
+        )
+
+    def test_the_response_id_is_kept(self, llm_client):
+        client, mock_inner = llm_client
+        mock_inner.chat.completions.create.return_value = self._completion()
+
+        assert client.chat("hi").response_id == "chatcmpl-123"
+
+    def test_a_missing_or_non_string_id_becomes_empty(self, llm_client):
+        client, mock_inner = llm_client
+        mock_inner.chat.completions.create.return_value.choices[0].message.content = "x"
+
+        assert client.chat("hi").response_id == ""
+
+    def test_nothing_is_printed(self, llm_client, capsys, memory_handler):
+        client, mock_inner = llm_client
+        mock_inner.chat.completions.create.return_value = self._completion()
+        logger = DebugConfig(global_level=DebugLevel.TRACE, handlers=[memory_handler])
+        with patch("src.llm_client._response_logger", return_value=logger.get_logger("llm_client")):
+            client.chat("hi")
+
+        captured = capsys.readouterr()
+        assert captured.out == ""
+        assert "PRIVATE-REASONING-99" not in captured.err
+
+    def test_only_safe_metadata_is_logged(self, llm_client, memory_handler):
+        client, mock_inner = llm_client
+        mock_inner.chat.completions.create.return_value = self._completion()
+        logger = DebugConfig(global_level=DebugLevel.TRACE, handlers=[memory_handler])
+        with patch("src.llm_client._response_logger", return_value=logger.get_logger("llm_client")):
+            client.chat("SECRET-PROMPT-7", system_prompt="SECRET-SYSTEM-8", max_tokens=64)
+
+        (record,) = memory_handler.records
+        assert record.extra == {
+            "model": client.model,
+            "agent": "test-llm-client",
+            "response_id": "chatcmpl-123",
+            "finish_reason": "stop",
+            "prompt_tokens": 11,
+            "completion_tokens": 7,
+            "total_tokens": 18,
+            "max_tokens": 64,
+            "content_chars": len('{"answer": "VISIBLE-CONTENT-42"}'),
+        }
+        logged = f"{record.message} {record.extra}"
+        for secret in ("PRIVATE-REASONING-99", "VISIBLE-CONTENT-42", "SECRET-PROMPT-7", "SECRET-SYSTEM-8"):
+            assert secret not in logged

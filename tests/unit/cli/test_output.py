@@ -14,24 +14,6 @@ class TestColorFunctions:
         result = out.dim("test")
         assert "test" in result
 
-    def test_severity_color_critical(self):
-        result = out.severity_color("critical", "CRITICAL")
-        assert "CRITICAL" in result
-
-    def test_severity_color_unknown_still_returns_text(self):
-        result = out.severity_color("unknown_sev", "TEXT")
-        assert "TEXT" in result
-
-    def test_decision_color_approve(self):
-        result = out.decision_color("approve", "APPROVED")
-        assert "APPROVED" in result
-
-    def test_decision_color_reject(self):
-        result = out.decision_color("reject", "REJECTED")
-        assert "REJECTED" in result
-
-
-class TestPrintFunctions:
     def test_header_prints_text(self, capsys):
         out.header("Test Header")
         output = capsys.readouterr().out
@@ -67,15 +49,3 @@ class TestPrintFunctions:
         output = capsys.readouterr().out
         assert "Total Score" in output
         assert "-10" in output
-
-    def test_review_comment_prints_severity(self, capsys):
-        out.review_comment("critical", "security", "src/auth.py", 42, "SQL injection")
-        output = capsys.readouterr().out
-        assert "CRITICAL" in output
-        assert "src/auth.py" in output
-
-    def test_review_comment_no_line(self, capsys):
-        out.review_comment("minor", "style", "src/f.py", None, "style issue")
-        output = capsys.readouterr().out
-        assert "src/f.py" in output
-        assert "None" not in output

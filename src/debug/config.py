@@ -13,8 +13,8 @@ debug/config.py — DebugConfig: مرکز کنترل debug
     LOGGING_DRIVER_FILE_PATH=logs/app.log
     LOGGING_DRIVER_FILE_FORMAT=text
 
-    LOGGING_AGENTS_CODE_REVIEWER_LEVEL=trace
-    LOGGING_AGENTS_DECISION_MAKER_ENABLED=false
+    LOGGING_AGENTS_SOURCE_SELECTION_LEVEL=trace
+    LOGGING_AGENTS_JIRA_IMPORT_ENABLED=false
 """
 
 import os
@@ -37,7 +37,7 @@ def _env_bool(key: str, default: bool = True) -> bool:
 def _agent_env_prefix(agent_name: str) -> str:
     """نام ایجنت را به پیشوند متغیر env تبدیل می‌کند.
 
-    مثال: "code_reviewer" → "LOGGING_AGENTS_CODE_REVIEWER"
+    مثال: "source_selection" → "LOGGING_AGENTS_SOURCE_SELECTION"
     """
     return f"LOGGING_AGENTS_{agent_name.upper()}"
 
@@ -120,9 +120,9 @@ class DebugConfig:
         for key, value in os.environ.items():
             if not key.startswith("LOGGING_AGENTS_"):
                 continue
-            # LOGGING_AGENTS_CODE_REVIEWER_LEVEL → ["CODE", "REVIEWER", "LEVEL"]
-            # LOGGING_AGENTS_CODE_REVIEWER_ENABLED → ["CODE", "REVIEWER", "ENABLED"]
-            rest = key[len("LOGGING_AGENTS_"):]   # CODE_REVIEWER_LEVEL
+            # LOGGING_AGENTS_SOURCE_SELECTION_LEVEL → ["SOURCE", "SELECTION", "LEVEL"]
+            # LOGGING_AGENTS_SOURCE_SELECTION_ENABLED → ["SOURCE", "SELECTION", "ENABLED"]
+            rest = key[len("LOGGING_AGENTS_"):]   # SOURCE_SELECTION_LEVEL
             if rest.endswith("_LEVEL"):
                 agent_name = rest[:-len("_LEVEL")].lower()
                 try:

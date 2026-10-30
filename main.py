@@ -8,9 +8,6 @@ main.py — نقطه ورود اصلی پروژه
     uv run python examples/agents_basic.py
     uv run python examples/agents_with_memory.py
     uv run python examples/agents_hitl.py
-    uv run python examples/code_review_basic.py --mr <شماره MR>
-    uv run python examples/code_review_basic.py --mr <شماره MR> --hitl
-    uv run python examples/code_review_scores.py
 """
 
 if __name__ == "__main__":

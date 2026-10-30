@@ -1,7 +1,7 @@
 """تست‌های build_graph."""
 
 import pytest
-from unittest.mock import patch, MagicMock
+from unittest.mock import MagicMock
 from langgraph.checkpoint.memory import MemorySaver
 
 
@@ -39,35 +39,6 @@ class TestBuildGraph:
         # بررسی که node های اصلی وجود دارند
         assert graph is not None
 
-
-class TestBuildCodeReviewGraph:
-    def test_code_review_graph_compiled(self, checkpointer):
-        from src.agents.code_review.graph import build_code_review_graph
-        from src.debug import DebugConfig
-        graph = build_code_review_graph(
-            checkpointer=checkpointer,
-            debug_config=DebugConfig.off(),
-        )
-        assert graph is not None
-
-    def test_code_review_graph_with_interrupt(self, checkpointer):
-        from src.agents.code_review.graph import build_code_review_graph
-        from src.debug import DebugConfig
-        graph = build_code_review_graph(
-            checkpointer=checkpointer,
-            interrupt_before=["decision_maker"],
-            debug_config=DebugConfig.off(),
-        )
-        assert graph is not None
-
-    def test_code_review_graph_default_debug_config(self, checkpointer):
-        """وقتی debug_config=None باشد باید از .env بخواند."""
-        from src.agents.code_review.graph import build_code_review_graph
-        with patch("src.agents.code_review.graph.DebugConfig.from_env",
-                   return_value=MagicMock()) as mock_env:
-            graph = build_code_review_graph(checkpointer=checkpointer, debug_config=None)
-        mock_env.assert_called_once()
-        assert graph is not None
 
 class TestBuildGraphWithRAG:
     def test_graph_with_vector_store_compiles(self, checkpointer):

@@ -6,13 +6,11 @@
 |--------|--------|
 | Redis + SQLite Checkpointer | ✅ انجام شد |
 | Test Suite (451 تست، 94% coverage) | ✅ انجام شد |
-| CLI (review + scores، FA/EN) | ✅ انجام شد |
+| CLI (ingest، FA/EN) | ✅ انجام شد |
 | Memory Backend (Qdrant + JSON) | ✅ انجام شد |
 | ConsoleHandler + FileHandler | ✅ انجام شد |
-| Custom Rules (RuleLoader) | ✅ انجام شد |
 | RAG Agent | ✅ انجام شد |
 | Prompt Injection Guard | ✅ انجام شد |
-| SonarQube Integration (CE-compatible) | ✅ انجام شد |
 | CI/CD Pipeline | 🔲 باقی‌مانده |
 | Async Support | 🔲 باقی‌مانده |
 
@@ -122,71 +120,7 @@ class AsyncQueueHandler(BaseHandler):
 
 ---
 
-## ۲. Code Review
-
-### پشتیبانی از GitHub
-**اولویت: متوسط**
-
-```
-src/agents/code_review/
-└── vcs/
-    ├── base.py     ← BaseVCSClient (abstract)
-    ├── gitlab.py   ← GitLabClient
-    └── github.py   ← GitHubClient
-```
-
----
-
-### ~~Rule های اختصاصی زبان و پروژه~~ ✅ انجام شد
-
-**`RuleLoader` پیاده‌سازی شد** — قوانین سفارشی از `project_rules/` بارگذاری و به prompt inject می‌شوند.
-
-```
-project_rules/
-├── code_review/
-│   ├── reviewer.md          ← قوانین کلی (زبان، سبک، ...)
-│   └── languages/
-│       ├── python.md
-│       └── javascript.md
-└── gitlab/
-    └── commenter.md
-```
-
-```python
-from src.rules import RuleLoader
-loader = RuleLoader()   # از RULES_DIR در .env یا "project_rules"
-
-graph = build_code_review_graph(
-    checkpointer=cp,
-    rule_loader=loader,
-    reviewer_rule_paths=["code_review/reviewer", "code_review/languages/python"],
-    decision_rule_paths=["gitlab/commenter"],
-)
-```
-
----
-
-### تاریخچه و Trend امتیاز
-**اولویت: پایین**
-
-```python
-def get_project_trend(project_id: int, last_n: int = 20) -> list[dict]:
-    """n ریویو آخر یک پروژه را با امتیازشان برمی‌گرداند."""
-```
-
----
-
-### Auto-fix پیشنهادی
-**اولویت: پایین**
-
-```python
-class AutoFixAgent(BaseAgent):
-    """بر اساس کامنت‌های ریویو، patch Git پیشنهاد می‌دهد."""
-```
-
----
-
-## ۳. ایجنت‌های عمومی
+## ۲. ایجنت‌های عمومی
 
 ### ~~ایجنت RAG (Retrieval-Augmented Generation)~~ ✅ انجام شد
 
@@ -234,16 +168,13 @@ class EvaluatorAgent(BaseAgent):
 
 ---
 
-## ۴. ابزارهای توسعه
+## ۳. ابزارهای توسعه
 
 ### ~~CLI~~ ✅ انجام شد
 
 ```bash
-python -m src.cli review --mr 42
-python -m src.cli review --mr 42 --hitl
-python -m src.cli review --mr 42 --lang en
-python -m src.cli scores
-python -m src.cli scores --mr 42 --last 5
+python -m src.cli ingest-business --file catalog.jsonl
+python -m src.cli ingest-technical --path /path/to/java-project --lang en
 ```
 
 پشتیبانی از FA/EN با `--lang` در هر جایی از دستور.
@@ -338,25 +269,4 @@ PROMPT_GUARD_RAISE_ON_WARN=false
 
 داشبورد ساده (FastAPI + HTML):
 - نمایش لاگ‌های real-time
-- تاریخچه ریویوها و امتیازها
 - وضعیت سرویس‌های LLM و Embedding
-
-### ~~SonarQube Integration~~ ✅ انجام شد
-
-**`SonarAnalyzerAgent` پیاده‌سازی شد** — به‌صورت node موازی با `code_reviewer`
-در گراف کد ریویو. چون سرور شرکت **Community Edition** است (بدون پشتیبانی
-branch/PR analysis)، هر MR با یک project key موقت اسکن می‌شود.
-
-```python
-graph = build_code_review_graph(checkpointer=cp, enable_sonar=True)
-```
-
-```bash
-python -m src.cli review --mr 42 --sonar
-```
-
-مستندات کامل: [architecture/sonarqube.md](architecture/sonarqube.md)
-
-باقی‌مانده (خارج از scope فعلی):
-- فیلتر issue‌ها به فقط خطوط تغییریافته در diff (الان کل کد برنچ اسکن می‌شود)
-- استفاده از deep clone برای قابلیت SCM blame در Sonar

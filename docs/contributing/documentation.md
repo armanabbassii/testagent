@@ -18,21 +18,21 @@
 ### فرمت
 
 ```python
-def calculate_score(comments: list[ReviewComment]) -> dict:
-    """امتیاز کلی را از لیست کامنت‌های ریویو محاسبه می‌کند.
+def parse_issue_reference(reference: str, base_url: str = "") -> str:
+    """کلید یا نشانیِ یک issueِ Jira را به کلیدِ issue تبدیل می‌کند.
 
     پارامترها:
-        comments : لیست ReviewComment های تولیدشده توسط CodeReviewerAgent
+        reference : کلید (PROJ-123) یا نشانیِ https://<jira>/browse/PROJ-123
+        base_url  : نشانیِ Jiraِ پیکربندی‌شده؛ نشانیِ میزبانِ دیگر رد می‌شود
 
     برمی‌گرداند:
-        دیکشنری شامل:
-          - total_score : امتیاز کل (عدد منفی یا صفر)
-          - issues      : تفکیک بر اساس severity
-          - categories  : تفکیک بر اساس category
+        کلیدِ issue با حروفِ بزرگ
+
+    خطا:
+        JiraReferenceError اگر ورودی کلید یا نشانیِ issue نباشد
 
     مثال:
-        score = calculate_score(comments)
-        print(score["total_score"])   # -17
+        parse_issue_reference("https://jira.test/browse/demo-7")   # "DEMO-7"
     """
 ```
 
@@ -147,9 +147,9 @@ docs/
 **مثال:**
 
 ```
-feat(code_review): اضافه کردن سیستم امتیازدهی به ریویو
+feat(jira): دریافتِ همه‌ی کامنت‌های issue با صفحه‌بندی
 
-- امتیاز بر اساس severity: critical=-10, major=-7, minor=-3, suggestion=-1
-- ذخیره در JSONL با فیلدهای issues و categories
-- کامنت خلاصه امتیاز روی MR ثبت می‌شود
+- کامنت‌ها صفحه به صفحه تا total خوانده می‌شوند
+- کمبودِ کامنت نسبت به total خطای صریح است
+- نویسنده و تاریخ هر کامنت حفظ می‌شود
 ```

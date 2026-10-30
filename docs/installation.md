@@ -84,16 +84,6 @@ LOGGING_DRIVER_FILE_FORMAT=text   # text | jsonl
 برای debug یک ایجنت خاص:
 
 ```ini
-LOGGING_AGENTS_CODE_REVIEWER_LEVEL=trace
-LOGGING_AGENTS_DECISION_MAKER_ENABLED=false
+LOGGING_AGENTS_SOURCE_SELECTION_LEVEL=trace
+LOGGING_AGENTS_JIRA_IMPORT_ENABLED=false
 ```
-
-## ۶. تنظیم Code Review (اختیاری)
-
-```ini
-GITLAB_URL=https://gitlab.com
-GITLAB_TOKEN=glpat-xxxxxxxxxxxxxxxxxxxx
-GITLAB_PROJECT_ID=12345678
-```
-
-Personal Access Token باید scope های `api` و `read_repository` داشته باشد.

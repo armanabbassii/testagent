@@ -34,6 +34,8 @@ from src.agents.test_case_generator.task_analysis import (
     validate_plan,
 )
 from src.config import LLM_MAX_OUTPUT_TOKENS
+from src.debug import DebugConfig
+from src.debug.levels import DebugLevel
 from src.llm_client import FINISH_REASON_LENGTH, LLMClient, LLMResponse
 from src.token_usage import TokenUsage, collect_usage
 
@@ -1255,3 +1257,202 @@ class TestLLMClientChatReturnContract:
         call_kwargs = patched_openai.return_value.chat.completions.create.call_args.kwargs
         assert call_kwargs["model"]
         assert call_kwargs["messages"][0]["role"] == "system"
+
+
+
+# ── تشخیصِ «هیچ مرحله‌ای تست‌کیس نساخت» ─────────────────────────────────────
+
+_SECRET_IN_TASK = "TASK-ONLY-SECRET-7f3a"
+_RAW_ONLY_MARKER = "RAW-ONLY-REQUIREMENT-91c2"
+
+
+def _empty_payload(state: str, **overrides) -> dict:
+    """پاسخِ کاملِ بدونِ تست‌کیس: کلیدِ test_cases نبود، null، خالی یا غیرِ آرایه."""
+    payload = {
+        "task_summary": "The task only says to implement voucher endpoints.",
+        "identified_requirements": [_RAW_ONLY_MARKER],
+        "clarifications": [
+            "Which voucher operations are in scope is not stated.",
+            "The voucher data model is not defined.",
+        ],
+    }
+    if state == "empty":
+        payload["test_cases"] = []
+    elif state == "null":
+        payload["test_cases"] = None
+    elif state == "string":
+        payload["test_cases"] = "none"
+    payload.update(overrides)
+    return payload
+
+
+def _reply(data: dict, response_id: str) -> LLMResponse:
+    return LLMResponse(json.dumps(data), finish_reason="stop", response_id=response_id)
+
+
+def _run_failing(first, second, memory_handler=None):
+    """پاسخِ اول (یک‌فراخوانی) و دوم (برنامه) را برمی‌گرداند و خطا را می‌گیرد."""
+    responses = iter([first, second])
+    debug = (
+        DebugConfig(global_level=DebugLevel.TRACE, handlers=[memory_handler])
+        if memory_handler is not None
+        else None
+    )
+    with patch("src.agents.test_case_generator.task_analysis.LLMClient") as mock_cls:
+        mock_cls.return_value.chat.side_effect = lambda **kwargs: next(responses)
+        with pytest.raises(TaskAnalysisError) as excinfo:
+            TaskAnalysisGenerator(debug_config=debug).generate(
+                f"Implement voucher endpoints. {_SECRET_IN_TASK}", "user-1"
+            )
+    assert mock_cls.return_value.chat.call_count == 2
+    return excinfo.value
+
+
+class TestNoTestCasesDiagnostics:
+    """وقتی هیچ مرحله‌ای تست‌کیس نمی‌سازد، پیام می‌گوید چرا — بدونِ تضعیفِ اعتبارسنجی."""
+
+    @pytest.mark.parametrize(
+        ("first_state", "second_state", "first_text", "second_text"),
+        [
+            ("missing", "empty", "'test_cases' was missing", "'test_cases' was empty"),
+            ("empty", "missing", "'test_cases' was empty", "'test_cases' was missing"),
+            ("empty", "empty", "'test_cases' was empty", "'test_cases' was empty"),
+            ("null", "string", "'test_cases' was null", "'test_cases' was not an array (str)"),
+        ],
+    )
+    def test_each_stage_reports_what_it_returned(
+        self, first_state, second_state, first_text, second_text
+    ):
+        error = _run_failing(
+            _reply(_empty_payload(first_state), "resp-single"),
+            _reply(_empty_payload(second_state), "resp-plan"),
+        )
+        message = str(error)
+
+        # پیامِ اعتبارسنجیِ قبلی دست‌نخورده اولِ پیام است.
+        assert message.startswith(
+            "LLM output does not match the required test case plan format:\n"
+            "  - 'test_cases' must be a non-empty array."
+        )
+        assert "No test cases were produced by any generation stage:" in message
+        assert f"  - single-call analysis: {first_text} (response id: resp-single)." in message
+        assert (
+            f"  - staged generation (test case plan): {second_text} (response id: resp-plan)."
+            in message
+        )
+
+    def test_the_model_summary_and_clarifications_are_included(self):
+        error = _run_failing(
+            _reply(_empty_payload("empty"), "r1"), _reply(_empty_payload("empty"), "r2")
+        )
+        message = str(error)
+
+        assert (
+            "Model task summary (staged generation (test case plan)): "
+            "The task only says to implement voucher endpoints." in message
+        )
+        assert "Model clarifications (staged generation (test case plan); 2 of 2):" in message
+        assert "  - Which voucher operations are in scope is not stated." in message
+
+    def test_the_original_validation_error_is_the_cause(self):
+        error = _run_failing(
+            _reply(_empty_payload("empty"), "r1"), _reply(_empty_payload("empty"), "r2")
+        )
+
+        assert isinstance(error.__cause__, TaskAnalysisError)
+        assert str(error.__cause__) == (
+            "LLM output does not match the required test case plan format:\n"
+            "  - 'test_cases' must be a non-empty array."
+        )
+
+    def test_clarifications_and_summary_are_limited(self):
+        many = [f"Clarification number {index}." for index in range(1, 6)]
+        long_summary = "word " * 200
+        error = _run_failing(
+            _reply(_empty_payload("empty"), "r1"),
+            _reply(
+                _empty_payload("empty", clarifications=many, task_summary=long_summary), "r2"
+            ),
+        )
+        message = str(error)
+
+        assert "(staged generation (test case plan); 3 of 5):" in message
+        assert "Clarification number 3." in message
+        assert "Clarification number 4." not in message
+        summary_line = next(line for line in message.splitlines() if "Model task summary" in line)
+        summary = summary_line.split("): ", 1)[1]
+        assert len(summary) <= 300
+        assert summary.endswith("…")
+
+    def test_a_truncated_single_call_is_reported_as_truncated(self):
+        truncated = LLMResponse(
+            '{"task_summary": "cut',
+            finish_reason=FINISH_REASON_LENGTH,
+            completion_tokens=LLM_MAX_OUTPUT_TOKENS,
+            max_tokens=LLM_MAX_OUTPUT_TOKENS,
+            response_id="resp-cut",
+        )
+        error = _run_failing(truncated, _reply(_empty_payload("missing"), "resp-plan"))
+        message = str(error)
+
+        assert (
+            "  - single-call analysis: truncated (finish_reason='length'; nothing was read) "
+            "(response id: resp-cut)." in message
+        )
+        assert "'test_cases' was missing (response id: resp-plan)." in message
+
+    def test_no_clarifications_is_said_explicitly(self):
+        error = _run_failing(
+            _reply(_empty_payload("empty", clarifications=[]), "r1"),
+            _reply(_empty_payload("empty", clarifications=[]), "r2"),
+        )
+        assert "The model gave no clarifications." in str(error)
+
+    def test_a_plain_string_response_without_id_is_still_explained(self):
+        error = _run_failing(json.dumps(_empty_payload("empty")), json.dumps(_empty_payload("empty")))
+        message = str(error)
+        assert "'test_cases' was empty." in message
+        assert "response id" not in message
+
+    def test_neither_the_task_nor_the_raw_response_leaks_into_the_error(self):
+        error = _run_failing(
+            _reply(_empty_payload("empty"), "r1"), _reply(_empty_payload("empty"), "r2")
+        )
+        message = str(error)
+
+        assert _SECRET_IN_TASK not in message
+        assert _RAW_ONLY_MARKER not in message
+        assert '"identified_requirements"' not in message
+
+    def test_logs_carry_only_states_ids_and_counts(self, memory_handler):
+        _run_failing(
+            _reply(_empty_payload("empty"), "resp-single"),
+            _reply(_empty_payload("missing"), "resp-plan"),
+            memory_handler,
+        )
+        records = memory_handler.records
+        failure = next(r for r in records if r.message == "هیچ مرحله‌ای تست‌کیس تولید نکرد")
+
+        assert failure.extra == {
+            "stages": ["single-call analysis", "staged generation (test case plan)"],
+            "test_cases": ["empty", "missing"],
+            "response_ids": ["resp-single", "resp-plan"],
+            "clarifications": [2, 2],
+        }
+        logged = " ".join(f"{r.message} {r.extra}" for r in records)
+        for sensitive in (
+            _SECRET_IN_TASK,
+            _RAW_ONLY_MARKER,
+            "The task only says to implement voucher endpoints.",
+            "Which voucher operations are in scope is not stated.",
+        ):
+            assert sensitive not in logged
+
+    def test_an_invalid_but_non_empty_plan_gets_no_diagnostics(self):
+        broken_plan = _plan_payload(1)
+        broken_plan["test_cases"][0]["type"] = "exploratory"
+        error = _run_failing(_reply(_empty_payload("empty"), "r1"), _reply(broken_plan, "r2"))
+        message = str(error)
+
+        assert "'type' must be one of" in message
+        assert "No test cases were produced" not in message
