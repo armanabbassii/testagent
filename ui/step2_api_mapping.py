@@ -41,22 +41,31 @@ if str(_REPO_ROOT) not in sys.path:
 import streamlit as st  # noqa: E402
 
 from src.agents.test_case_generator.api_discovery import split_sources  # noqa: E402
-from src.agents.test_case_generator.api_mapping import (  # noqa: E402
-    ApiMappingError,
-    Step2ApiMappingGenerator,
-    extract_test_cases,
+from src.agents.test_case_generator.api_mapping import extract_test_cases  # noqa: E402
+from src.agents.test_case_generator.source_selection import (  # noqa: E402
+    EVIDENCE_LABELS,
+    SEMANTIC_NOT_RUN,
+    SourceSelection,
 )
 from src.agents.test_case_generator.swagger_snapshots import (  # noqa: E402
-    DEFAULT_SELECTION,
-    SELECTIONS,
+    SELECTION_AUTO,
     SWAGGER_SOURCES,
+    SwaggerSnapshotError,
+    enabled_sources,
     expand_selection,
-    selection_label,
+    selection_for_keys,
+    snapshot_available,
     snapshot_fingerprint,
     snapshot_path,
+    source_for,
 )
-from src.debug import DebugConfig  # noqa: E402
-from ui.components import render_propagated_inputs  # noqa: E402
+from ui.components import render_propagated_inputs, run_step_key  # noqa: E402
+from ui.pipeline import (  # noqa: E402
+    execute_step,
+    explicit_selection,
+    plan_swagger_sources,
+    run_api_mapping,
+)
 from ui.formatting import (  # noqa: E402
     mapping_counts,
     mapping_details,
@@ -71,14 +80,11 @@ from ui.swagger_refresh import (  # noqa: E402
 from ui.workflow import (  # noqa: E402
     INPUT_SWAGGER_SELECTION,
     INPUT_SWAGGER_SNAPSHOTS,
-    INPUT_SWAGGER_SOURCES,
-    RESULT_ARGUMENT,
     WorkflowState,
     run_label,
 )
 
-# شناسه‌ی کاربری که به‌عنوان هدر x-user-id به سرویسِ LLM فرستاده می‌شود
-_UI_USER_ID = "step2-api-mapping-ui"
+_SPINNER = "Discovering APIs and mapping test cases..."
 
 _RESULT_KEY = "api_mapping_result"
 _ERROR_KEY = "api_mapping_error"
@@ -109,29 +115,10 @@ def _run(
 
     هیچ چیزی در session_state نوشته نمی‌شود: نگه‌داشتنِ نتیجه کارِ فراخوان است —
     صفحه‌ی مستقل آن را در session_state می‌گذارد و ویزارد در وضعیتِ جریان.
+    فراخوانیِ Generator در ui/pipeline.py است (مشترک با ویزارد و Run All).
     """
-    sources = split_sources(services_raw)
-
-    try:
-        with st.spinner("Discovering APIs and mapping test cases..."):
-            result = Step2ApiMappingGenerator(
-                debug_config=DebugConfig.from_env()
-            ).generate(
-                step1_result=step1_result,
-                service_sources=sources,
-                user_id=_UI_USER_ID,
-                snapshot_keys=snapshot_keys,
-            )
-    except ValueError as exc:
-        # ورودیِ نامعتبر — مثلاً فهرستِ خالیِ سرویس‌ها
-        return None, f"Invalid input: {exc}"
-    except ApiMappingError as exc:
-        # سندِ Swagger خوانده نشد یا نگاشت با قرارداد نخواند
-        return None, f"API mapping failed:\n\n{exc}"
-    except Exception as exc:  # noqa: BLE001 — خطای شبکه/سرویس نباید UI را بترکاند
-        return None, f"API mapping failed: {type(exc).__name__}: {exc}"
-
-    return result, None
+    with st.spinner(_SPINNER):
+        return run_api_mapping(step1_result, services_raw, snapshot_keys=snapshot_keys)
 
 
 def _store(result: dict | None, error: str | None) -> None:
@@ -199,7 +186,7 @@ def _render_result(result: dict, test_cases: list[dict], selection: str = "") ->
     columns[2].metric("Not resolved", counts["unresolved"])
 
     if selection:
-        st.caption(f"Swagger source: **{selection_label(selection)}**")
+        st.caption(f"Swagger sources: **{selection}**")
 
     _render_mappings(result, test_cases)
 
@@ -315,7 +302,7 @@ def _render_update_buttons() -> None:
                 key=f"workflow_update_{source.key}",
                 disabled=loading,
                 help=f"Fetch {source.remote_url} and replace data/swagger/{source.filename}",
-                use_container_width=True,
+                width="stretch",
             ):
                 start_refresh(st.session_state, source.key)
                 st.rerun()
@@ -334,81 +321,152 @@ def _render_update_buttons() -> None:
         st.rerun()
 
 
-def _stored_selection(workflow: WorkflowState) -> str:
-    """انتخابِ ذخیره‌شده در وضعیت، یا پیش‌فرض — اگر مقدارِ نامعتبری مانده باشد."""
-    stored = workflow.input_value(INPUT_SWAGGER_SELECTION)
-    return stored if stored in SELECTIONS else DEFAULT_SELECTION
+_MODE_AUTO = "Automatic (recommended)"
+_MODE_MANUAL = "Choose manually"
+
+
+def _stored_manual_keys(workflow: WorkflowState) -> list[str]:
+    """کلیدهای انتخابِ دستیِ ذخیره‌شده — یا [] (خودکار یا مقدارِ نامعتبر)."""
+    try:
+        return expand_selection(explicit_selection(workflow))
+    except SwaggerSnapshotError:
+        return []
+
+
+def _render_selection(plan: SourceSelection) -> None:
+    """هر منبعِ ثبت‌شده: فعال؟ snapshot دارد؟ برای این اجرا انتخاب شد؟ چرا؟
+
+    «ثبت‌شده»، «فعال»، «انتخاب‌شده» و «دارای عملیاتِ مرتبط» جدا نشان داده
+    می‌شوند تا معلوم باشد قدم ۲ دقیقاً کدام snapshot را می‌خواند و چرا.
+    """
+    rows = []
+    for source in SWAGGER_SOURCES:
+        evidence = plan.evidence_for(source.key)
+        rows.append(
+            {
+                "Source": source.label,
+                "Enabled": "yes" if source.enabled else "no",
+                "Snapshot": source.filename if snapshot_available(source.key) else "⚠ missing",
+                "Selected": "✅" if source.key in plan.keys and not plan.error else "",
+                "Evidence": "; ".join(
+                    f"{EVIDENCE_LABELS[item.kind]}: {item.detail}" for item in evidence
+                ),
+            }
+        )
+    st.dataframe(rows, hide_index=True, width="stretch")
+
+    unresolved = plan.urls.unresolved
+    unassigned = [match.path for match in plan.endpoints if not match.owners]
+    if unresolved or unassigned:
+        st.caption(
+            "Not assigned to a source: "
+            + ", ".join([*unresolved, *unassigned])
+        )
+    for warning in plan.warnings:
+        st.warning(warning)
+    if plan.semantic == SEMANTIC_NOT_RUN:
+        # پیش‌نمایش LLM را صدا نمی‌زند؛ تحلیلِ متنِ تسک با دکمه‌ی Run انجام می‌شود.
+        st.info(
+            "The task description (Persian, English or mixed) is analysed when Step 2 "
+            "runs. This preview uses only Swagger URLs, endpoint paths and English "
+            "keyword matching."
+            + (f"\n\nPreview result: {plan.error}" if plan.error else "")
+        )
+    elif plan.error:
+        st.error(plan.error)
 
 
 def _render_in_workflow(workflow: WorkflowState) -> None:
-    """قدمِ دوم داخلِ ویزارد: نتیجه‌ی قدم اول خودکار می‌آید، منبعِ Swagger انتخاب می‌شود.
+    """قدمِ دوم داخلِ ویزارد: نتیجه‌ی قدم اول خودکار می‌آید، منابعِ Swagger خودکار.
 
-    فقط snapshotهای انتخاب‌شده خوانده می‌شوند و هیچ درخواستی به شبکه زده
-    نمی‌شود. انتخاب در وضعیتِ جریان می‌ماند و عوض‌کردنش نتیجه را کهنه اعلام
-    می‌کند، پس رفتارِ پایین‌دست قطعی می‌ماند.
+    منابع با source_selection.select_sources از URLِ Swagger، مسیرِ endpoint و
+    متنِ تسک (در برابرِ متادیتای snapshotها) انتخاب می‌شوند؛ فقط همان snapshotها
+    خوانده می‌شوند و هیچ درخواستی به شبکه زده نمی‌شود. کاربر می‌تواند منابع را
+    دستی انتخاب کند؛ انتخابِ دستی جایگزین نمی‌شود و فقط با URLِ Swaggerِ صریح
+    سنجیده می‌شود. انتخاب در وضعیتِ جریان می‌ماند و عوض‌کردنش نتیجه را کهنه
+    اعلام می‌کند.
     """
     render_propagated_inputs(workflow, 2)
 
-    st.subheader("Swagger source")
-    options = list(SELECTIONS)
-    selection = st.radio(
-        "Swagger source",
-        options=options,
-        index=options.index(_stored_selection(workflow)),
-        format_func=selection_label,
+    st.subheader("Swagger sources")
+    manual_keys = _stored_manual_keys(workflow)
+    modes = [_MODE_AUTO, _MODE_MANUAL]
+    mode = st.radio(
+        "Swagger source selection",
+        options=modes,
+        index=1 if manual_keys else 0,
         horizontal=True,
         key="workflow_swagger_selection",
+        help=(
+            "Automatic chooses the sources from the Swagger URLs, endpoint paths and "
+            "task description of Step 1, checked against the local snapshots. Run All "
+            "always uses Automatic."
+        ),
     )
+    selection = SELECTION_AUTO
+    if mode == _MODE_MANUAL:
+        options = [source.key for source in enabled_sources()]
+        chosen = st.multiselect(
+            "Sources to read",
+            options=options,
+            default=[key for key in manual_keys if key in options],
+            format_func=lambda key: source_for(key).label,
+            key="workflow_swagger_manual",
+        )
+        selection = selection_for_keys(chosen)
 
-    keys = expand_selection(selection)
-    st.caption(
-        "Only the selected snapshot(s) are read: "
-        + ", ".join(f"`data/swagger/{snapshot_path(key).name}`" for key in keys)
-        + ". No request is sent to the Swagger host."
-    )
+    # بعد از اجرای خودکار، همان انتخابی که نتیجه‌ی جاری با آن ساخته شده نشان داده
+    # می‌شود؛ وگرنه پیش‌نمایشِ قطعی (بدونِ LLM) از همان انتخابی که Run اجرا می‌کند.
+    used = workflow.swagger_selection
+    if (
+        selection == SELECTION_AUTO
+        and isinstance(used, SourceSelection)
+        and workflow.has_result(2)
+        and not workflow.is_out_of_date(2)
+    ):
+        st.caption("Sources used by the current Step 2 result:")
+        plan = used
+    else:
+        preview = WorkflowState(inputs=dict(workflow.inputs))
+        preview.set_input(INPUT_SWAGGER_SELECTION, selection)
+        plan = plan_swagger_sources(preview)
+    _render_selection(plan)
+    if plan.keys and not plan.error:
+        st.caption(
+            "Only these snapshots are read: "
+            + ", ".join(f"`data/swagger/{snapshot_path(key).name}`" for key in plan.keys)
+            + ". No request is sent to the Swagger host."
+        )
 
     _render_update_buttons()
 
     # محتوای snapshotهایی که آخرین نگاشت از آن‌ها خوانده است. اگر بعد از اجرا
     # عوض شده باشند (Update یا ویرایشِ دستی)، پاورقیِ ویزارد هشدار می‌دهد که
     # نتیجه متعلق به سندِ قدیمی است.
-    workflow.set_input(
-        INPUT_SWAGGER_SNAPSHOTS,
-        snapshot_fingerprint(expand_selection(_stored_selection(workflow))),
-    )
+    workflow.set_input(INPUT_SWAGGER_SNAPSHOTS, snapshot_fingerprint(list(plan.keys)))
 
-    if st.button(run_label(workflow, 2), key="workflow_run_2"):
-        payload = workflow.step_inputs(2)
-        upstream = RESULT_ARGUMENT[1]
-        if upstream not in payload:
-            st.error(
-                "The Step 1 result is not available yet. Run Step 1 and approve "
-                "it first."
-            )
+    if st.button(run_label(workflow, 2), key=run_step_key(2)):
+        if mode == _MODE_MANUAL and not selection:
+            st.error("Choose at least one Swagger source, or switch to Automatic.")
         else:
-            # مسیرهای خوانده‌شده را هم ثبت می‌کنیم تا ورودیِ «منابعِ Swagger»
-            # معنای همیشگی‌اش را نگه دارد و کهنه‌شدن درست گزارش شود.
+            # انتخابِ دستی (یا «خودکار») ذخیره می‌شود؛ execute_step منابع را تعیین
+            # و مسیرها و اثرانگشتِ snapshotها را ثبت می‌کند.
             workflow.set_input(INPUT_SWAGGER_SELECTION, selection)
-            workflow.set_input(
-                INPUT_SWAGGER_SOURCES, "\n".join(str(snapshot_path(key)) for key in keys)
-            )
-            workflow.set_input(INPUT_SWAGGER_SNAPSHOTS, snapshot_fingerprint(keys))
-            with workflow.track_usage(2):
-                result, error = _run(payload[upstream], "", snapshot_keys=keys)
-            if error:
-                workflow.record_error(2, error)
-            else:
-                workflow.record_result(2, result)
-            # کلِ صفحه (از جمله نوارِ قدم‌ها) با وضعیتِ تازه دوباره کشیده شود.
-            st.rerun()
+            with st.spinner(_SPINNER):
+                outcome = execute_step(2, workflow)
+            if outcome.recorded:
+                # کلِ صفحه (از جمله نوارِ قدم‌ها) با وضعیتِ تازه دوباره کشیده شود.
+                st.rerun()
+            st.error(outcome.error)
 
     result = workflow.result(2)
     if result:
         step1_result = workflow.result(1)
+        used = workflow.swagger_selection
         _render_result(
             result,
             extract_test_cases(step1_result) if step1_result else [],
-            _stored_selection(workflow),
+            used.summary() if isinstance(used, SourceSelection) else "",
         )
 
 

@@ -42,12 +42,7 @@ if str(_REPO_ROOT) not in sys.path:
 
 import streamlit as st  # noqa: E402
 
-from src.agents.test_case_generator.postman_generation import (  # noqa: E402
-    PostmanGenerationError,
-    Step4PostmanGenerator,
-)
-from src.debug import DebugConfig  # noqa: E402
-from ui.components import render_propagated_inputs  # noqa: E402
+from ui.components import render_propagated_inputs, run_step_key  # noqa: E402
 from ui.formatting import (  # noqa: E402
     collection_filename,
     collection_json,
@@ -56,9 +51,9 @@ from ui.formatting import (  # noqa: E402
     step4_unresolved_rows,
     step4_warnings,
 )
+from ui.pipeline import execute_step, run_postman_generation  # noqa: E402
 from ui.workflow import (  # noqa: E402
     INPUT_COLLECTION_NAME,
-    RESULT_ARGUMENT,
     WorkflowState,
     run_label,
 )
@@ -80,24 +75,9 @@ def _run(
 
     قطعی است و هیچ LLM/شبکه‌ای درگیر نیست — پس spinner لازم نیست. هیچ چیزی در
     session_state نوشته نمی‌شود: صفحه‌ی مستقل نتیجه را آنجا می‌گذارد و ویزارد
-    در وضعیتِ جریان.
+    در وضعیتِ جریان. فراخوانیِ Generator در ui/pipeline.py است.
     """
-    try:
-        result = Step4PostmanGenerator(
-            debug_config=DebugConfig.from_env(),
-            collection_name=collection_name,
-        ).generate(
-            step1_result=step1_result,
-            step2_result=step2_result,
-            step3_result=step3_result,
-        )
-    except PostmanGenerationError as exc:
-        # ورودیِ ناسازگار یا کالکشنِ نامعتبر
-        return None, f"Collection generation failed:\n\n{exc}"
-    except Exception as exc:  # noqa: BLE001 — خطای غیرمنتظره نباید UI را بترکاند
-        return None, f"Collection generation failed: {type(exc).__name__}: {exc}"
-
-    return result, None
+    return run_postman_generation(step1_result, step2_result, step3_result, collection_name)
 
 
 def _store(result: dict | None, error: str | None) -> None:
@@ -124,7 +104,7 @@ def _render_unresolved(result: dict) -> None:
         "These test cases were not turned into requests. Step 4 did not invent a "
         "mapping for them — resolve them in Step 2 and run this step again."
     )
-    st.dataframe(rows, use_container_width=True, hide_index=True)
+    st.dataframe(rows, width="stretch", hide_index=True)
 
 
 def _render_clarifications(result: dict) -> None:
@@ -168,14 +148,15 @@ def _render_requests(result: dict) -> None:
     if not rows:
         st.caption("No request was generated.")
         return
-    st.dataframe(rows, use_container_width=True, hide_index=True)
+    st.dataframe(rows, width="stretch", hide_index=True)
 
 
-def _render_collection(result: dict) -> None:
+def _render_collection(result: dict, unavailable: str = "") -> None:
     """کالکشنِ کامل را نشان می‌دهد و امکانِ دانلود می‌دهد.
 
     نمایش عمداً پشت expander پنهان نشده است: خروجیِ این قدم خودِ کالکشن است و
-    بازبین باید بتواند بدونِ باز کردن چیزی آن را ببیند.
+    بازبین باید بتواند بدونِ باز کردن چیزی آن را ببیند. ``unavailable`` دلیلِ
+    غیرفعال‌بودنِ دانلود است (مثلاً کالکشنِ کهنه‌ی یک اجرای قبلی).
     """
     st.subheader("Postman collection")
 
@@ -190,17 +171,20 @@ def _render_collection(result: dict) -> None:
         "involved."
     )
 
+    if unavailable:
+        st.warning(unavailable)
     st.download_button(
         "Download collection JSON",
         data=collection_json(collection),
         file_name=filename,
         mime="application/json",
+        disabled=bool(unavailable),
     )
 
     st.json(collection)
 
 
-def _render_result(result: dict) -> None:
+def _render_result(result: dict, unavailable: str = "") -> None:
     """کالکشنِ ساخته‌شده را برای بازبینیِ انسانی نمایش می‌دهد."""
     counts = step4_counts(result)
     columns = st.columns(4)
@@ -209,7 +193,7 @@ def _render_result(result: dict) -> None:
     columns[2].metric("Without a request", counts["unresolved"])
     columns[3].metric("Clarifications", counts["clarifications"])
 
-    _render_collection(result)
+    _render_collection(result, unavailable)
     _render_unresolved(result)
     _render_clarifications(result)
     _render_warnings(result)
@@ -327,34 +311,29 @@ def _render_in_workflow(workflow: WorkflowState) -> None:
             value=workflow.input_value(INPUT_COLLECTION_NAME),
             placeholder=_COLLECTION_NAME_PLACEHOLDER,
         )
-        submitted = st.form_submit_button(run_label(workflow, 4))
+        submitted = st.form_submit_button(run_label(workflow, 4), key=run_step_key(4))
 
     if submitted:
-        payload = workflow.step_inputs(4)
-        upstream = [RESULT_ARGUMENT[source] for source in (1, 2, 3)]
-        if any(name not in payload for name in upstream):
-            st.error(
-                "The Step 1–3 results are not available yet. Run them and approve "
-                "Step 3 first."
-            )
-        else:
-            workflow.set_input(INPUT_COLLECTION_NAME, collection_name)
-            result, error = _run(
-                payload[upstream[0]],
-                payload[upstream[1]],
-                payload[upstream[2]],
-                collection_name,
-            )
-            if error:
-                workflow.record_error(4, error)
-            else:
-                workflow.record_result(4, result)
+        previous_name = workflow.input_value(INPUT_COLLECTION_NAME)
+        workflow.set_input(INPUT_COLLECTION_NAME, collection_name)
+        outcome = execute_step(4, workflow)
+        if outcome.recorded:
             # کلِ صفحه (از جمله نوارِ قدم‌ها) با وضعیتِ تازه دوباره کشیده شود.
             st.rerun()
+        # پیش‌نیاز کم بود: هیچ اجرایی نشد، پس ورودیِ قبلی دست‌نخورده می‌ماند.
+        workflow.set_input(INPUT_COLLECTION_NAME, previous_name)
+        st.error(outcome.error)
 
     result = workflow.result(4)
     if result:
-        _render_result(result)
+        _render_result(
+            result,
+            "This collection belongs to an earlier run and is out of date, so it "
+            "cannot be downloaded. Run Step 4 again (or Run All) to get a current "
+            "collection."
+            if workflow.is_out_of_date(4)
+            else "",
+        )
 
 
 def render_step(workflow: WorkflowState | None = None) -> None:

@@ -23,10 +23,12 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import parse_qs, urlparse
 
 import requests
 
@@ -34,6 +36,7 @@ from src.agents.test_case_generator.api_discovery import (
     DiscoveredService,
     SwaggerLoadError,
     discover_from_spec,
+    swagger_group_name,
 )
 from src.config import SWAGGER_CONNECT_TIMEOUT_SECONDS, SWAGGER_READ_TIMEOUT_SECONDS
 
@@ -48,11 +51,16 @@ _RETRY_HINT = "The existing file was kept. You can try again."
 
 SELECTION_ADMIN = "admin"
 SELECTION_CUSTOMER = "customer"
+SELECTION_CRM = "crm"
+SELECTION_PROVIDER = "provider"
+SELECTION_SITE = "site"
+# انتخابِ خودکار (source_selection.py) — پیش‌فرضِ Run All و قدم ۲.
+SELECTION_AUTO = "auto"
+# مقدارِ قدیمیِ رادیوی قدم ۲ (Admin + Customer) — فقط برای خواندنِ وضعیت‌های
+# ذخیره‌شده‌ی قبلی پذیرفته می‌شود و دیگر هرگز پیش‌فرض یا fallback نیست.
 SELECTION_BOTH = "both"
 
-# ترتیبِ نمایش در UI. پیش‌فرض همان رفتارِ قبلی است (هر دو سرویس).
-SELECTIONS: tuple[str, ...] = (SELECTION_ADMIN, SELECTION_CUSTOMER, SELECTION_BOTH)
-DEFAULT_SELECTION = SELECTION_BOTH
+DEFAULT_SELECTION = SELECTION_AUTO
 
 
 class SwaggerSnapshotError(RuntimeError):
@@ -75,14 +83,42 @@ class SwaggerRefreshError(RuntimeError):
 
 @dataclass(frozen=True)
 class SwaggerSource:
-    """یک منبعِ Swagger: کلیدِ snapshot، برچسبِ انسانی و نشانیِ اصلیِ سند."""
+    """یک منبعِ ثبت‌شده‌ی Swagger — تنها تعریفِ منبع در کلِ پروژه.
+
+    ``key``           : شناسه‌ی پایدار (کلیدِ snapshot و مقدارِ انتخاب) — «admin»
+    ``label``         : برچسبِ انسانی — «Admin»
+    ``filename``      : نامِ snapshotِ محلی در ``data/swagger/``
+    ``remote_url``    : نشانیِ خامِ سندِ OpenAPI — دکمه‌ی Update همین را fetch
+                        می‌کند و همین source_url سرویسِ کشف‌شده در قدم دوم است
+    ``primary_name``  : نامِ گروه در Swagger UI (``urls.primaryName``) و در
+                        ``…/api-docs/<group>``؛ خالی یعنی همان ``label``
+    ``path_prefixes`` : پیشوندهای مسیرِ endpoint که مالکیت را نشان می‌دهند
+                        (``/admin``). مقایسه قطعه‌به‌قطعه است، نه زیررشته‌ای.
+                        خالی یعنی مسیرها پیشوندِ متمایز ندارند و مالکیت فقط با
+                        متادیتای snapshot ثابت می‌شود (مثلِ Site).
+    ``base_paths``    : پیشوندِ gateway که در URLِ کاملِ endpoint پیش از مسیرِ
+                        سند می‌آید (``https://host/api/admin/…`` → ``/admin/…``)
+    ``enabled``       : منبعِ غیرفعال ثبت‌شده می‌ماند (URLش شناخته می‌شود) ولی
+                        هرگز انتخاب نمی‌شود — ارجاع به آن خطای روشن است.
+    """
 
     key: str
     label: str
     filename: str
-    # نشانیِ خامِ سندِ OpenAPI — دکمه‌ی Update همین را fetch می‌کند و همین به‌عنوانِ
-    # source_url سرویسِ کشف‌شده در نتیجه‌ی قدم دوم دیده می‌شود.
     remote_url: str
+    primary_name: str = ""
+    path_prefixes: tuple[str, ...] = ()
+    base_paths: tuple[str, ...] = ("/api",)
+    enabled: bool = True
+
+    @property
+    def group(self) -> str:
+        """نامِ گروهِ Swagger این منبع (``urls.primaryName``)."""
+        return self.primary_name or self.label
+
+    def identifiers(self) -> set[str]:
+        """هر نامی که این منبع با آن شناخته می‌شود (حروفِ کوچک)."""
+        return {self.key.lower(), self.label.lower(), self.group.lower()}
 
 
 @dataclass(frozen=True)
@@ -97,23 +133,39 @@ class RefreshResult:
     size_bytes: int
 
 
-# رجیستریِ منابع — تنها جایی که یک منبعِ تازه اضافه می‌شود.
+# همه‌ی گروه‌ها روی همان backendِ podium منتشر می‌شوند؛ نشانیِ خامِ هر گروه
+# «<این پایه>/<primaryName>» است (همان قاعده‌ی springdoc که Admin و Customer
+# دارند).
+_API_DOCS_BASE = "http://podium-back.devpod.ir/api/v3/api-docs"
+
+
+def _registered(
+    key: str, label: str, prefixes: tuple[str, ...], primary_name: str = ""
+) -> SwaggerSource:
+    group = primary_name or label
+    return SwaggerSource(
+        key=key,
+        label=label,
+        filename=f"{key}.json",
+        remote_url=f"{_API_DOCS_BASE}/{group}",
+        primary_name=primary_name,
+        path_prefixes=prefixes,
+    )
+
+
+# رجیستریِ منابع — تنها جایی که یک منبعِ تازه اضافه می‌شود. منبعِ تازه (مثلاً
+# ACL) فقط یک ردیفِ دیگر است؛ انتخابِ خودکار، تطبیقِ URL، دکمه‌ی Update و
+# انتخابِ دستیِ قدم ۲ همه از همین فهرست می‌خوانند.
 SWAGGER_SOURCES: tuple[SwaggerSource, ...] = (
-    SwaggerSource(
-        key=SELECTION_ADMIN,
-        label="Admin",
-        filename="admin.json",
-        remote_url="http://podium-back.devpod.ir/api/v3/api-docs/Admin",
-    ),
-    SwaggerSource(
-        key=SELECTION_CUSTOMER,
-        label="Customer",
-        filename="customer.json",
-        remote_url="http://podium-back.devpod.ir/api/v3/api-docs/Customer",
-    ),
+    _registered(SELECTION_ADMIN, "Admin", ("/admin",)),
+    _registered(SELECTION_CUSTOMER, "Customer", ("/customer",)),
+    _registered(SELECTION_CRM, "CRM", ("/crm",)),
+    _registered(SELECTION_PROVIDER, "Provider", ("/provider",)),
+    # مسیرهای Site پیشوندِ متمایز ندارند (/serviceSet، …): مالکیت فقط با
+    # متادیتای snapshot ثابت می‌شود، نه با «هر مسیرِ بی‌پیشوند».
+    _registered(SELECTION_SITE, "Site", ()),
 )
 
-_BY_KEY: dict[str, SwaggerSource] = {source.key: source for source in SWAGGER_SOURCES}
 
 
 # ── پرسش‌های پایه ────────────────────────────────────────────────────────────
@@ -124,7 +176,10 @@ def source_for(key: str) -> SwaggerSource:
     پرتاب می‌کند:
         SwaggerSnapshotError : کلید ناشناخته باشد (کلیدهای مجاز نام برده می‌شوند)
     """
-    source = _BY_KEY.get((key or "").strip())
+    # رجیستری هر بار خوانده می‌شود (چند ردیف است): ردیفِ تازه بدونِ هیچ
+    # نگاشتِ جانبی‌ای شناخته می‌شود.
+    wanted = (key or "").strip()
+    source = next((source for source in SWAGGER_SOURCES if source.key == wanted), None)
     if source is None:
         valid = ", ".join(repr(source.key) for source in SWAGGER_SOURCES)
         raise SwaggerSnapshotError(
@@ -133,32 +188,177 @@ def source_for(key: str) -> SwaggerSource:
     return source
 
 
+def enabled_sources(
+    sources: tuple[SwaggerSource, ...] | None = None,
+) -> tuple[SwaggerSource, ...]:
+    """منابعی که اجازه‌ی انتخاب دارند، به ترتیبِ رجیستری."""
+    return tuple(source for source in (sources or SWAGGER_SOURCES) if source.enabled)
+
+
 def selection_label(selection: str) -> str:
     """برچسبِ خوانای یک انتخاب — برای نمایش در UI."""
-    keys = expand_selection(selection)
-    return " + ".join(source_for(key).label for key in keys)
+    if (selection or "").strip().lower() in ("", SELECTION_AUTO):
+        return "Automatic"
+    return " + ".join(source_for(key).label for key in expand_selection(selection))
 
 
 def expand_selection(selection: str) -> list[str]:
-    """انتخابِ کاربر را به فهرستِ مرتب و بی‌تکرارِ کلیدهای snapshot تبدیل می‌کند.
+    """انتخابِ دستی را به فهرستِ مرتب و بی‌تکرارِ کلیدهای snapshot تبدیل می‌کند.
 
-    ``admin`` → ``["admin"]``، ``customer`` → ``["customer"]`` و
-    ``both`` → ``["admin", "customer"]``.
+    یک کلید (``admin``)، چند کلید با ویرگول (``admin,crm``) یا مقدارِ قدیمیِ
+    ``both`` (Admin + Customer). خروجی به ترتیبِ رجیستری است. ``auto`` یا رشته‌ی
+    خالی انتخابِ دستی نیست و فهرستِ خالی برمی‌گرداند.
 
     پرتاب می‌کند:
-        SwaggerSnapshotError : انتخاب ناشناخته باشد
+        SwaggerSnapshotError : کلیدِ ناشناخته (کلیدهای مجاز نام برده می‌شوند)
     """
     value = (selection or "").strip().lower()
+    if value in ("", SELECTION_AUTO):
+        return []
     if value == SELECTION_BOTH:
-        return [source.key for source in SWAGGER_SOURCES]
-    source_for(value)  # ناشناخته‌ها همین‌جا با پیامِ روشن رد می‌شوند
-    return [value]
+        wanted = {SELECTION_ADMIN, SELECTION_CUSTOMER}
+    else:
+        wanted = {part.strip() for part in value.split(",") if part.strip()}
+    for key in wanted:
+        source_for(key)  # ناشناخته‌ها همین‌جا با پیامِ روشن رد می‌شوند
+    return [source.key for source in SWAGGER_SOURCES if source.key in wanted]
+
+
+def selection_for_keys(keys: list[str] | tuple[str, ...]) -> str:
+    """عکسِ expand_selection — کلیدها به ترتیبِ رجیستری، جداشده با ویرگول.
+
+    فهرستِ خالی رشته‌ی خالی است (یعنی «انتخابِ دستی نیست»).
+    """
+    wanted = set(keys)
+    return ",".join(source.key for source in SWAGGER_SOURCES if source.key in wanted)
+
+
+# ── URLهای سرویس در Developed Services ──────────────────────────────────────
+
+# هر http(s) URL در متنِ آزاد؛ نشانه‌گذاریِ پایانِ جمله بعداً حذف می‌شود.
+_URL_RE = re.compile(r"https?://[^\s<>\"'`()\[\]]+", re.IGNORECASE)
+_URL_TRAILING = ".,;:!?"
+
+
+def extract_urls(text: str) -> list[str]:
+    """همه‌ی http(s) URLهای یک متنِ آزاد، به ترتیب و بدونِ تکرار."""
+    seen: set[str] = set()
+    urls: list[str] = []
+    for match in _URL_RE.finditer(text or ""):
+        url = match.group(0).rstrip(_URL_TRAILING)
+        if url and url not in seen:
+            seen.add(url)
+            urls.append(url)
+    return urls
+
+
+def is_swagger_url(url: str) -> bool:
+    """آیا این URL به یک سندِ Swagger/OpenAPI اشاره می‌کند (نه به خودِ یک API)؟
+
+    صفحه‌ی Swagger UI، مسیرِ ``api-docs``، فایلِ ``.json``/``.yaml`` یا کوئریِ
+    ``urls.primaryName``. بقیه (مثلاً ``https://host/api/admin/voucher``)
+    ارجاع به یک endpoint هستند و منبعِ Swagger حساب نمی‌شوند.
+    """
+    parsed = urlparse(url or "")
+    path = parsed.path.lower()
+    if "swagger" in path or "api-docs" in path:
+        return True
+    if path.endswith((".json", ".yaml", ".yml")):
+        return True
+    query = {key.lower() for key in parse_qs(parsed.query)}
+    return "urls.primaryname" in query
+
+
+def _normalized(url: str) -> tuple[str, str]:
+    """(میزبان، مسیر) بدونِ طرح، کوئری، فرگمنت و اسلشِ پایانی — برای مقایسه."""
+    parsed = urlparse(url or "")
+    return parsed.netloc.lower(), parsed.path.rstrip("/").lower()
+
+
+def source_for_url(url: str) -> SwaggerSource | None:
+    """منبعِ ثبت‌شده‌ای که این URL به آن اشاره می‌کند — یا None.
+
+    ترتیب: ۱) همان ``remote_url`` ثبت‌شده؛ ۲) نامِ گروهِ Swagger (Swagger UI با
+    ``urls.primaryName`` یا ``…/api-docs/<Group>``) که با یکی از نام‌های یک
+    منبع (کلید، برچسب، primary name) یکی باشد. میزبان عمداً شرط نیست: همان
+    گروه در محیط‌های مختلف (مثلاً sandpod و devpod) همان تعریفِ سرویس است و
+    snapshotِ محلی منبعِ حقیقت است. URLی که گروهی نام نمی‌برد فقط با تطبیقِ
+    کاملِ نشانی شناخته می‌شود. منبعِ غیرفعال هم برگردانده می‌شود تا فراخوان
+    «غیرفعال» را از «ناشناخته» جدا کند. هیچ درخواستی به شبکه زده نمی‌شود.
+    """
+    target = _normalized(url)
+    for source in SWAGGER_SOURCES:
+        if _normalized(source.remote_url) == target:
+            return source
+    group = swagger_group_name(url).strip().lower()
+    if not group:
+        return None
+    for source in SWAGGER_SOURCES:
+        if group in source.identifiers():
+            return source
+    return None
+
+
+@dataclass(frozen=True)
+class ServiceUrlResolution:
+    """نتیجه‌ی تطبیقِ URLهای Developed Services با منابعِ Swagger.
+
+    ``matched``    : (URL، کلیدِ snapshot) برای هر URLِ Swagger که منبعش شناخته شد
+    ``unresolved`` : URLهای Swagger که به هیچ منبعِ ثبت‌شده‌ای نمی‌رسند — خطا
+    ``endpoints``  : URLهای غیرِ Swagger (ارجاع به endpoint) — فقط زمینه‌ی قدم ۱
+    """
+
+    matched: tuple[tuple[str, str], ...] = ()
+    unresolved: tuple[str, ...] = ()
+    endpoints: tuple[str, ...] = ()
+
+    @property
+    def keys(self) -> list[str]:
+        """کلیدهای snapshot به ترتیبِ رجیستری و بدونِ تکرار."""
+        found = {key for _, key in self.matched}
+        return [source.key for source in SWAGGER_SOURCES if source.key in found]
+
+    def error(self) -> str:
+        """پیامِ خطای کاربر برای URLهای حل‌نشده — یا رشته‌ی خالی."""
+        if not self.unresolved:
+            return ""
+        known = ", ".join(source.group for source in SWAGGER_SOURCES)
+        listed = "\n".join(f"  - {url}" for url in self.unresolved)
+        return (
+            "These Swagger URLs do not match a registered Swagger source:\n"
+            f"{listed}\n\nRegistered groups: {known}. Use a Swagger UI URL with "
+            "?urls.primaryName=<group>, the raw OpenAPI URL (…/v3/api-docs/<group>), "
+            "or remove the URL. A new service must first be added to SWAGGER_SOURCES "
+            "(src/agents/test_case_generator/swagger_snapshots.py). Step 2 was not "
+            "run so that no unrelated Swagger document is used."
+        )
+
+
+def resolve_service_urls(text: str) -> ServiceUrlResolution:
+    """URLهای Developed Services را به کلیدهای snapshot تبدیل می‌کند (بدونِ شبکه)."""
+    matched: list[tuple[str, str]] = []
+    unresolved: list[str] = []
+    endpoints: list[str] = []
+    for url in extract_urls(text):
+        source = source_for_url(url)
+        if source is not None:
+            matched.append((url, source.key))
+        elif is_swagger_url(url):
+            unresolved.append(url)
+        else:
+            endpoints.append(url)
+    return ServiceUrlResolution(tuple(matched), tuple(unresolved), tuple(endpoints))
 
 
 def snapshot_path(key: str, *, directory: Path | str | None = None) -> Path:
     """مسیرِ فایلِ snapshot یک منبع."""
     base = Path(directory) if directory is not None else SNAPSHOT_DIR
     return base / source_for(key).filename
+
+
+def snapshot_available(key: str, *, directory: Path | str | None = None) -> bool:
+    """آیا snapshotِ محلیِ این منبع روی دیسک هست؟ (محتوا بررسی نمی‌شود)"""
+    return snapshot_path(key, directory=directory).is_file()
 
 
 # ── خواندن ───────────────────────────────────────────────────────────────────
@@ -372,22 +572,33 @@ def refresh_snapshot(
 
 __all__ = [
     "DEFAULT_SELECTION",
-    "SELECTIONS",
     "SELECTION_ADMIN",
+    "SELECTION_AUTO",
     "SELECTION_BOTH",
+    "SELECTION_CRM",
     "SELECTION_CUSTOMER",
+    "SELECTION_PROVIDER",
+    "SELECTION_SITE",
     "SNAPSHOT_DIR",
     "SWAGGER_SOURCES",
     "RefreshResult",
+    "ServiceUrlResolution",
     "SwaggerRefreshError",
     "SwaggerSnapshotError",
     "SwaggerSource",
+    "enabled_sources",
     "expand_selection",
+    "extract_urls",
+    "is_swagger_url",
     "load_snapshot",
     "load_snapshots",
     "refresh_snapshot",
+    "resolve_service_urls",
+    "selection_for_keys",
     "selection_label",
+    "snapshot_available",
     "snapshot_fingerprint",
     "snapshot_path",
     "source_for",
+    "source_for_url",
 ]

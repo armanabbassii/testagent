@@ -88,6 +88,28 @@ SWAGGER_READ_TIMEOUT_SECONDS: float = float(
     os.getenv("SWAGGER_READ_TIMEOUT_SECONDS", "120")
 )
 
+# ── Jira (اختیاری — ورودیِ تسک از یک issue در قدمِ اول) ──────────────────────
+# همه اختیاری‌اند: بدونِ آن‌ها ویزارد با توصیفِ دستی کار می‌کند و فقط دریافتِ
+# issue خطای روشنِ پیکربندی می‌دهد. اعتبارسنجی و خواندنِ مقدارها در
+# src/task_sources/jira/settings.py است (لحظه‌ی استفاده، نه لحظه‌ی import).
+#   JIRA_AUTH_METHOD  adfs (پیش‌فرض: SAML 2.0 + فرمِ ADFS با نام کاربری/رمز) | pat
+#   JIRA_SSO_URL      رمز فقط به همین میزبانِ ADFS فرستاده می‌شود
+#   JIRA_TOKEN        Personal Access Token — فقط برای JIRA_AUTH_METHOD=pat
+#   JIRA_CA_BUNDLE    فایلِ PEM برای تأییدِ گواهی (jira.dotin.ir زنجیره‌ی ناقص
+#                     می‌فرستد)؛ خالی = همان پیش‌فرضِ certifi. تأیید هرگز خاموش نمی‌شود.
+JIRA_BASE_URL: str = os.getenv("JIRA_BASE_URL", "")
+JIRA_SSO_URL: str = os.getenv("JIRA_SSO_URL", "")
+JIRA_AUTH_METHOD: str = os.getenv("JIRA_AUTH_METHOD", "adfs")
+JIRA_USERNAME: str = os.getenv("JIRA_USERNAME", "")
+JIRA_PASSWORD: str = os.getenv("JIRA_PASSWORD", "")
+JIRA_TOKEN: str = os.getenv("JIRA_TOKEN", "")
+JIRA_CA_BUNDLE: str = os.getenv("JIRA_CA_BUNDLE", "")
+JIRA_CONNECT_TIMEOUT_SECONDS: float = float(os.getenv("JIRA_CONNECT_TIMEOUT_SECONDS", "10"))
+JIRA_READ_TIMEOUT_SECONDS: float = float(os.getenv("JIRA_READ_TIMEOUT_SECONDS", "60"))
+# سقفِ حجمِ هر پیوست (بایت) و سقفِ متنِ استخراج‌شده از هر پیوست (کاراکتر).
+JIRA_MAX_ATTACHMENT_BYTES: int = int(os.getenv("JIRA_MAX_ATTACHMENT_BYTES", str(10 * 1024 * 1024)))
+JIRA_MAX_ATTACHMENT_CHARS: int = int(os.getenv("JIRA_MAX_ATTACHMENT_CHARS", "100000"))
+
 # ── Embedding ─────────────────────────────────────────────────────────────────
 EMBEDDING_BASE_URL: str = _require("EMBEDDING_BASE_URL")
 EMBEDDING_MODEL: str = _require("EMBEDDING_MODEL")

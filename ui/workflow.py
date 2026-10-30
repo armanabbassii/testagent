@@ -12,8 +12,9 @@ Postman. این ماژول فقط وضعیت را نگه می‌دارد و قو
 
 قواعد:
 
-  * قدم ۱ همیشه باز است؛ قدمِ n فقط با «تأییدِ قدمِ n-1» باز می‌شود. پرش به
-    قدمی که پیش‌نیازش وجود ندارد ممکن نیست.
+  * قدم ۱ همیشه باز است؛ قدمِ n فقط با «تأییدِ قدمِ n-1» باز می‌شود — یا با
+    پذیرشِ خودکارِ Run All (auto_advance) که جدا از تأییدِ انسانی ثبت می‌شود.
+    پرش به قدمی که پیش‌نیازش وجود ندارد ممکن نیست.
   * تأیید بدونِ نتیجه ممکن نیست و روی نتیجه‌ی «کهنه» هم ممکن نیست.
   * نتیجه‌ی تازه برای یک قدم (اگر با نتیجه‌ی قبلی‌اش یکی نباشد) همه‌ی نتایجِ
     قدم‌های بعدی را «کهنه» می‌کند: تأییدشان لغو می‌شود ولی خودِ نتیجه پاک
@@ -57,9 +58,12 @@ INPUT_SWAGGER_SOURCES = "swagger_sources"
 INPUT_SWAGGER_SELECTION = "swagger_selection"
 INPUT_SWAGGER_SNAPSHOTS = "swagger_snapshots"
 INPUT_COLLECTION_NAME = "collection_name"
+# کلیدِ issueِ Jira که توصیفِ تسک از آن ساخته شده ("" یعنی توصیفِ دستی).
+INPUT_JIRA_ISSUE = "jira_issue"
 
 INPUT_LABELS: dict[str, str] = {
     INPUT_TASK_DESCRIPTION: "Task Description",
+    INPUT_JIRA_ISSUE: "Jira issue",
     INPUT_DEVELOPED_SERVICES: "Developed Services",
     INPUT_SWAGGER_SOURCES: "Swagger / OpenAPI sources",
     INPUT_SWAGGER_SELECTION: "Swagger source selection",
@@ -91,9 +95,18 @@ _PROPAGATED: dict[int, tuple[int, ...]] = {
 # اثرانگشتِ محتوای snapshotها هم ورودیِ قدم دوم است: وقتی دکمه‌ی Update (یا
 # ویرایشِ دستی) فایلی را بعد از اجرای نگاشت عوض کند، نتیجه‌ی فعلی متعلق به سندِ
 # قدیمی گزارش می‌شود — بدونِ اجرای خودکارِ دوباره‌ی نگاشت.
+# URLهای Swagger در Developed Services تعیین می‌کنند قدم دوم کدام snapshot را
+# بخواند (ui/pipeline.py)، پس همین متن ورودیِ قدم دوم هم هست.
+# کلیدِ issueِ Jira هم ورودیِ قدمِ اول است: issueِ دیگری یعنی نتیجه‌ی فعلی کهنه
+# است، حتی اگر متنِ توصیف تصادفاً یکی باشد.
 _OWN_INPUTS: dict[int, tuple[str, ...]] = {
-    1: (INPUT_TASK_DESCRIPTION, INPUT_DEVELOPED_SERVICES),
-    2: (INPUT_SWAGGER_SOURCES, INPUT_SWAGGER_SELECTION, INPUT_SWAGGER_SNAPSHOTS),
+    1: (INPUT_TASK_DESCRIPTION, INPUT_DEVELOPED_SERVICES, INPUT_JIRA_ISSUE),
+    2: (
+        INPUT_SWAGGER_SOURCES,
+        INPUT_SWAGGER_SELECTION,
+        INPUT_SWAGGER_SNAPSHOTS,
+        INPUT_DEVELOPED_SERVICES,
+    ),
     4: (INPUT_COLLECTION_NAME,),
 }
 
@@ -105,25 +118,39 @@ _REQUIRED_INPUTS: dict[int, tuple[str, ...]] = {
 
 # ── وضعیت‌های نمایشیِ هر قدم ─────────────────────────────────────────────────
 STATUS_COMPLETED = "completed"
+# نتیجه را Run All پذیرفته و قدمِ بعد را باز کرده — هنوز هیچ انسانی تأییدش نکرده.
+STATUS_AUTO_COMPLETED = "auto_completed"
 STATUS_CURRENT = "current"
 STATUS_AVAILABLE = "available"
 STATUS_STALE = "stale"
 STATUS_LOCKED = "locked"
+STATUS_RUNNING = "running"
+STATUS_FAILED = "failed"
+# نتیجه ثبت شده ولی خودش می‌گوید قابلِ استفاده نیست (قدم ۵ با status=blocked).
+STATUS_BLOCKED = "blocked"
 
 STATUS_MARKERS: dict[str, str] = {
     STATUS_COMPLETED: "✅",
+    STATUS_AUTO_COMPLETED: "☑️",
     STATUS_CURRENT: "🔵",
     STATUS_AVAILABLE: "⚪",
     STATUS_STALE: "⚠️",
     STATUS_LOCKED: "🔒",
+    STATUS_RUNNING: "⏳",
+    STATUS_FAILED: "❌",
+    STATUS_BLOCKED: "⛔",
 }
 
 STATUS_LABELS: dict[str, str] = {
     STATUS_COMPLETED: "done",
+    STATUS_AUTO_COMPLETED: "done by Run All — not reviewed",
     STATUS_CURRENT: "you are here",
     STATUS_AVAILABLE: "ready to run",
     STATUS_STALE: "out of date",
     STATUS_LOCKED: "locked",
+    STATUS_RUNNING: "running",
+    STATUS_FAILED: "failed",
+    STATUS_BLOCKED: "blocked",
 }
 
 # نشانه‌ی «این کلید وجود ندارد» — تا None با «ثبت‌نشده» قاطی نشود.
@@ -201,6 +228,23 @@ class WorkflowState:
     # مصرفِ توکنِ آخرین اجرای هر قدم — جدا از نتیجه‌های کسب‌وکاری.
     usage: dict[int, TokenUsage] = field(default_factory=dict)
     notice: str = ""
+    # قدم‌هایی که Run All بعد از نتیجه‌ی قابلِ استفاده پذیرفته است. جدا از
+    # approved نگه داشته می‌شود تا پیشرفتِ خودکار هرگز «تأییدِ انسانی» دیده
+    # نشود؛ هر دو قدمِ بعد را باز می‌کنند.
+    auto_advanced: set[int] = field(default_factory=set)
+    # قدم‌هایی که نتیجه دارند ولی آن نتیجه خودش «مسدود» است (قدم ۵: blocked).
+    blocked: set[int] = field(default_factory=set)
+    # اجرای Run All: قدمِ در حالِ اجرا (۰ یعنی هیچ)، قفلِ هم‌پوشانی و آخرین نتیجه.
+    running_step: int = 0
+    run_in_progress: bool = False
+    last_run: Any = None
+    # آخرین انتخابِ منابعِ Swaggerِ قدم ۲ (source_selection.SourceSelection):
+    # منابعِ انتخاب‌شده، شواهد و هشدارها — برای نمایش و اشکال‌زدایی، نه ورودی.
+    swagger_selection: Any = None
+    # آخرین issueِ Jiraِ با موفقیت دریافت‌شده (src.task_sources.jira.JiraImport):
+    # برای نمایشِ وضعیتِ استخراج و تشخیصِ issueِ کهنه — متنِ خودش در
+    # INPUT_TASK_DESCRIPTION است، نه این‌جا.
+    task_import: Any = None
 
     # ── پرسش‌های پایه ────────────────────────────────────────────────────────
     def result(self, step: int) -> Any:
@@ -212,6 +256,17 @@ class WorkflowState:
 
     def is_approved(self, step: int) -> bool:
         return step in self.approved
+
+    def is_auto_advanced(self, step: int) -> bool:
+        """Run All این قدم را پذیرفته و هنوز هیچ انسانی تأییدش نکرده است."""
+        return step in self.auto_advanced and step not in self.approved
+
+    def is_accepted(self, step: int) -> bool:
+        """تأییدِ انسانی یا پذیرشِ Run All — هر کدام قدمِ بعد را باز می‌کند."""
+        return step in self.approved or step in self.auto_advanced
+
+    def is_blocked(self, step: int) -> bool:
+        return step in self.blocked
 
     def is_stale(self, step: int) -> bool:
         return step in self.stale
@@ -253,25 +308,48 @@ class WorkflowState:
 
     # ── قفل، وضعیت و ناوبری ─────────────────────────────────────────────────
     def is_unlocked(self, step: int) -> bool:
-        """قدم ۱ همیشه باز است؛ بقیه فقط با تأییدِ قدمِ قبلی باز می‌شوند."""
+        """قدم ۱ همیشه باز است؛ بقیه با تأیید (یا پذیرشِ Run All) قدمِ قبلی باز می‌شوند."""
         if not 1 <= step <= STEP_COUNT:
             return False
         if step == 1:
             return True
-        return (step - 1) in self.approved
+        return self.is_accepted(step - 1)
+
+    def is_out_of_date(self, step: int) -> bool:
+        """نتیجه‌ی این قدم دیگر به ورودی‌های فعلی تعلق ندارد.
+
+        یا خودش کهنه است، یا ورودیِ خودش یا یکی از قدم‌های بالادستش بعد از
+        اجرا عوض شده است — چون این نتیجه از همان نتیجه‌ی بالادستی ساخته شده.
+        """
+        if not self.has_result(step):
+            return False
+        if self.is_stale(step):
+            return True
+        return any(
+            self.has_result(source) and self.pending_input_changes(source)
+            for source in range(1, step + 1)
+        )
 
     def status(self, step: int) -> str:
-        """وضعیتِ نمایشیِ قدم — کهنه > قفل > جاری > تمام‌شده > آماده."""
+        """وضعیتِ نمایشی — در حالِ اجرا > خطا > کهنه > مسدود > قفل > جاری > تمام‌شده > آماده."""
         if not 1 <= step <= STEP_COUNT:
             return STATUS_LOCKED
-        if self.is_stale(step):
+        if step == self.running_step:
+            return STATUS_RUNNING
+        if self.error(step):
+            return STATUS_FAILED
+        if self.is_out_of_date(step):
             return STATUS_STALE
+        if self.is_blocked(step) and self.has_result(step):
+            return STATUS_BLOCKED
         if not self.is_unlocked(step):
             return STATUS_LOCKED
         if step == self.current_step:
             return STATUS_CURRENT
         if self.has_result(step) and self.is_approved(step):
             return STATUS_COMPLETED
+        if self.has_result(step) and self.is_auto_advanced(step):
+            return STATUS_AUTO_COMPLETED
         return STATUS_AVAILABLE
 
     def statuses(self) -> list[tuple[int, str]]:
@@ -284,6 +362,14 @@ class WorkflowState:
             1
             for step in range(1, STEP_COUNT + 1)
             if self.has_result(step) and self.is_approved(step) and not self.is_stale(step)
+        )
+
+    def auto_completed_count(self) -> int:
+        """قدم‌هایی که Run All پذیرفته و هنوز کسی تأییدشان نکرده (کهنه نیستند)."""
+        return sum(
+            1
+            for step in range(1, STEP_COUNT + 1)
+            if self.has_result(step) and self.is_auto_advanced(step) and not self.is_stale(step)
         )
 
     def failed_steps(self) -> list[int]:
@@ -372,6 +458,8 @@ class WorkflowState:
         self.results[step] = result
         self.errors.pop(step, None)
         self.approved.discard(step)
+        self.auto_advanced.discard(step)
+        self.blocked.discard(step)
         self.stale.discard(step)
         self.used_inputs[step] = {name: self.input_value(name) for name in _OWN_INPUTS.get(step, ())}
 
@@ -393,6 +481,8 @@ class WorkflowState:
         had_result = self.has_result(step)
         self.results.pop(step, None)
         self.approved.discard(step)
+        self.auto_advanced.discard(step)
+        self.blocked.discard(step)
         self.stale.discard(step)
         self.used_inputs.pop(step, None)
         self.errors[step] = message
@@ -410,8 +500,39 @@ class WorkflowState:
         if not self.has_result(step) or self.is_stale(step):
             return False
         self.approved.add(step)
+        self.auto_advanced.discard(step)
         self.errors.pop(step, None)
         return True
+
+    def auto_advance(self, step: int) -> bool:
+        """پذیرشِ خودکار (Run All) — همان شرط‌های approve، ولی ثبت به‌عنوانِ خودکار.
+
+        قدمِ بعد را باز می‌کند بی‌آنکه وانمود کند کسی نتیجه را بازبینی کرده
+        است. نتیجه‌ی مسدود پذیرفته نمی‌شود.
+        """
+        if not self.is_unlocked(step):
+            return False
+        if not self.has_result(step) or self.is_stale(step) or self.is_blocked(step):
+            return False
+        if step not in self.approved:
+            self.auto_advanced.add(step)
+        self.errors.pop(step, None)
+        return True
+
+    def mark_blocked(self, step: int) -> None:
+        """نتیجه‌ی ثبت‌شده‌ی این قدم خودش قابلِ استفاده نیست (مثلاً قدم ۵ blocked)."""
+        if self.has_result(step):
+            self.blocked.add(step)
+            self.approved.discard(step)
+            self.auto_advanced.discard(step)
+
+    def invalidate_from(self, step: int) -> list[int]:
+        """نتایجِ این قدم و بعدش را کهنه می‌کند — شروعِ یک اجرای تازه از این قدم.
+
+        نتیجه‌ها پاک نمی‌شوند؛ تا اجرای تازه‌ی هر قدم، نتیجه‌ی قبلی‌اش «out of
+        date» است: نه پاس داده می‌شود و نه قابلِ تأیید است.
+        """
+        return self._invalidate_after(step - 1)
 
     def approve_and_advance(self, step: int) -> bool:
         """تأیید و رفتن به قدمِ بعد — همان کاری که دکمه‌ی «تأیید و ادامه» می‌کند."""
@@ -437,14 +558,22 @@ class WorkflowState:
         self.used_inputs.clear()
         self.usage.clear()
         self.notice = ""
+        self.auto_advanced.clear()
+        self.blocked.clear()
+        self.running_step = 0
+        self.run_in_progress = False
+        self.last_run = None
+        self.swagger_selection = None
+        self.task_import = None
 
     def _invalidate_after(self, step: int) -> list[int]:
         """نتایج/تأییدهای بعد از step را کهنه می‌کند — بدونِ پاک‌کردنِ آن‌ها."""
         invalidated: list[int] = []
         for later in range(step + 1, STEP_COUNT + 1):
-            if self.has_result(later) or later in self.approved:
+            if self.has_result(later) or self.is_accepted(later):
                 self.stale.add(later)
                 self.approved.discard(later)
+                self.auto_advanced.discard(later)
                 invalidated.append(later)
         return invalidated
 
@@ -457,11 +586,18 @@ def run_label(state: WorkflowState, step: int) -> str:
 
 
 def progress_text(state: WorkflowState) -> str:
-    """«Step 2 of 5 · 1 of 5 approved» برای نوارِ کنار."""
-    return (
+    """«Step 2 of 5 · 1 of 5 approved» برای نوارِ کنار.
+
+    قدم‌هایی که فقط Run All پذیرفته جدا شمرده می‌شوند — تأیید حساب نمی‌شوند.
+    """
+    text = (
         f"Step {state.current_step} of {STEP_COUNT} · "
         f"{state.completed_count()} of {STEP_COUNT} approved"
     )
+    automatic = state.auto_completed_count()
+    if automatic:
+        text += f" · {automatic} completed by Run All (not reviewed)"
+    return text
 
 
 # ── نمایشِ مصرفِ توکن ────────────────────────────────────────────────────────
@@ -559,18 +695,23 @@ def usage_rows(state: WorkflowState) -> list[dict[str, str]]:
 __all__ = [
     "INPUT_COLLECTION_NAME",
     "INPUT_DEVELOPED_SERVICES",
+    "INPUT_JIRA_ISSUE",
     "INPUT_LABELS",
     "INPUT_SWAGGER_SELECTION",
     "INPUT_SWAGGER_SNAPSHOTS",
     "INPUT_SWAGGER_SOURCES",
     "INPUT_TASK_DESCRIPTION",
     "RESULT_ARGUMENT",
+    "STATUS_AUTO_COMPLETED",
     "STATUS_AVAILABLE",
+    "STATUS_BLOCKED",
     "STATUS_COMPLETED",
     "STATUS_CURRENT",
+    "STATUS_FAILED",
     "STATUS_LABELS",
     "STATUS_LOCKED",
     "STATUS_MARKERS",
+    "STATUS_RUNNING",
     "STATUS_STALE",
     "STEP_COUNT",
     "STEP_ICONS",

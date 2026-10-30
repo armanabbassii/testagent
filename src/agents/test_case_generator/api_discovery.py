@@ -205,6 +205,26 @@ def _primary_name(source_url: str) -> str:
     return ""
 
 
+def swagger_group_name(source_url: str) -> str:
+    """نامِ گروهِ Swagger یک URL — بدونِ هیچ درخواستِ شبکه.
+
+    دو شکلِ رایجِ springdoc پشتیبانی می‌شود:
+
+      * صفحه‌ی Swagger UI: ``…/swagger-ui/index.html?urls.primaryName=Admin`` → ``Admin``
+      * سندِ خامِ OpenAPI: ``…/v3/api-docs/Admin`` → ``Admin``
+
+    اگر URL گروهی را مشخص نکند رشته‌ی خالی برمی‌گردد.
+    """
+    primary = _primary_name(source_url)
+    if primary:
+        return primary
+    segments = [part for part in urlparse(source_url or "").path.split("/") if part]
+    for index, segment in enumerate(segments[:-1]):
+        if segment.lower() == "api-docs":
+            return segments[index + 1]
+    return ""
+
+
 def _service_name(api_spec: ApiSpec, source_url: str, fallback_name: str) -> str:
     """نامِ سرویس: نامِ صریح، سپس گروهِ Swagger، سپس عنوانِ سند، سپس میزبان."""
     if fallback_name:

@@ -1037,11 +1037,13 @@ class TestTruncationReachesTheUi:
     def test_step1_ui_does_not_relabel_a_truncation_as_a_format_error(self):
         streamlit = pytest.importorskip("streamlit")
         from ui import step1_task_analysis as step1_ui  # noqa: E402
+        from ui import pipeline  # noqa: E402
 
         truncated = _step1_truncated().truncation_message()
 
+        # فراخوانیِ Generator در ui/pipeline.py است؛ صفحه فقط spinner را اضافه می‌کند.
         with patch.object(
-            step1_ui, "TaskAnalysisGenerator"
+            pipeline, "TaskAnalysisGenerator"
         ) as generator_cls, patch.object(streamlit, "spinner", MagicMock()):
             generator_cls.return_value.generate.side_effect = TaskAnalysisError(
                 truncated
@@ -1058,6 +1060,7 @@ class TestTruncationReachesTheUi:
     def test_step2_ui_propagates_the_batch_range_and_the_cause(self):
         streamlit = pytest.importorskip("streamlit")
         from ui import step2_api_mapping as step2_ui  # noqa: E402
+        from ui import pipeline  # noqa: E402
 
         truncated = LLMResponse(
             '{"mappings": [',
@@ -1070,8 +1073,9 @@ class TestTruncationReachesTheUi:
             "(batch 1 of 3, batch size 10)."
         )
 
+        # فراخوانیِ Generator در ui/pipeline.py است؛ صفحه فقط spinner را اضافه می‌کند.
         with patch.object(
-            step2_ui, "Step2ApiMappingGenerator"
+            pipeline, "Step2ApiMappingGenerator"
         ) as generator_cls, patch.object(streamlit, "spinner", MagicMock()):
             generator_cls.return_value.generate.side_effect = ApiMappingError(message)
             result, error = step2_ui._run(

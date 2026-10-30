@@ -1,0 +1,52 @@
+# Streamlit theme for the test case generator wizard (ui/app.py).
+# Read from the directory `streamlit run` is started in — run from the repo root:
+#   uv run --group ui streamlit run ui/app.py
+#
+# Dark developer-tool look: zinc surfaces, a single teal accent, Inter + JetBrains Mono.
+
+[theme]
+base = "dark"
+primaryColor = "#0D9488"
+backgroundColor = "#09090B"
+secondaryBackgroundColor = "#18181B"
+codeBackgroundColor = "#111113"
+textColor = "#FAFAFA"
+linkColor = "#2DD4BF"
+borderColor = "#27272A"
+showWidgetBorder = true
+showSidebarBorder = true
+baseRadius = "8px"
+buttonRadius = "8px"
+linkUnderline = false
+
+font = "'Inter':https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap"
+codeFont = "'JetBrains Mono':https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap"
+codeFontSize = "0.8125rem"
+codeTextColor = "#E4E4E7"
+baseFontSize = 14
+baseFontWeight = 400
+headingFontSizes = ["28px", "22px", "18px", "16px", "14px", "13px"]
+headingFontWeights = [600, 600, 600, 600, 500, 500]
+
+# Status colours used by badges, callouts and coloured text.
+grayColor = "#71717A"
+blueColor = "#60A5FA"
+greenColor = "#34D399"
+redColor = "#F87171"
+yellowColor = "#FACC15"
+orangeColor = "#FB923C"
+violetColor = "#A78BFA"
+
+dataframeBorderColor = "#27272A"
+dataframeHeaderBackgroundColor = "#18181B"
+chartCategoricalColors = ["#2DD4BF", "#60A5FA", "#A78BFA", "#FB923C", "#F87171", "#FACC15", "#A1A1AA"]
+
+[theme.sidebar]
+backgroundColor = "#0C0C0E"
+secondaryBackgroundColor = "#18181B"
+codeBackgroundColor = "#111113"
+textColor = "#E4E4E7"
+borderColor = "#27272A"
+primaryColor = "#0D9488"
+dataframeBorderColor = "#27272A"
+dataframeHeaderBackgroundColor = "#18181B"

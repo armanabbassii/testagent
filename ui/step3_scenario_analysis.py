@@ -40,17 +40,10 @@ if str(_REPO_ROOT) not in sys.path:
 
 import streamlit as st  # noqa: E402
 
-from src.agents.test_case_generator.api_mapping import (  # noqa: E402
-    ApiMappingError,
-    compact_step2_result,
-)
 from src.agents.test_case_generator.scenario_analysis import (  # noqa: E402
-    ScenarioAnalysisError,
-    Step3ScenarioAnalysisGenerator,
     extract_test_cases,
 )
-from src.debug import DebugConfig  # noqa: E402
-from ui.components import render_propagated_inputs  # noqa: E402
+from ui.components import render_propagated_inputs, run_step_key  # noqa: E402
 from ui.formatting import (  # noqa: E402
     clarification_details,
     dependency_details,
@@ -59,14 +52,13 @@ from ui.formatting import (  # noqa: E402
     scenario_details,
     step3_counts,
 )
+from ui.pipeline import execute_step, run_scenario_analysis  # noqa: E402
 from ui.workflow import (  # noqa: E402
-    RESULT_ARGUMENT,
     WorkflowState,
     run_label,
 )
 
-# شناسه‌ی کاربری که به‌عنوان هدر x-user-id به سرویسِ LLM فرستاده می‌شود
-_UI_USER_ID = "step3-scenario-analysis-ui"
+_SPINNER = "Grouping scenarios and analysing dependencies..."
 
 _RESULT_KEY = "scenario_analysis_result"
 _ERROR_KEY = "scenario_analysis_error"
@@ -94,28 +86,11 @@ def _run(
 
     هیچ چیزی در session_state نوشته نمی‌شود: نگه‌داشتنِ نتیجه کارِ فراخوان است —
     صفحه‌ی مستقل آن را در session_state می‌گذارد و ویزارد در وضعیتِ جریان.
+    تبدیلِ فشرده و فراخوانیِ Generator در ui/pipeline.py است (مشترک با ویزارد و
+    Run All).
     """
-    try:
-        contract = compact_step2_result(step2_result)
-    except ApiMappingError as exc:
-        return None, f"Scenario analysis failed:\n\n{exc}"
-
-    try:
-        with st.spinner("Grouping scenarios and analysing dependencies..."):
-            result = Step3ScenarioAnalysisGenerator(
-                debug_config=DebugConfig.from_env()
-            ).generate(
-                step1_result=step1_result,
-                step2_result=contract,
-                user_id=_UI_USER_ID,
-            )
-    except ScenarioAnalysisError as exc:
-        # ورودیِ نامعتبر یا خروجیِ ناسازگار با قرارداد
-        return None, f"Scenario analysis failed:\n\n{exc}"
-    except Exception as exc:  # noqa: BLE001 — خطای شبکه/سرویس نباید UI را بترکاند
-        return None, f"Scenario analysis failed: {type(exc).__name__}: {exc}"
-
-    return result, None
+    with st.spinner(_SPINNER):
+        return run_scenario_analysis(step1_result, step2_result)
 
 
 def _store(result: dict | None, error: str | None) -> None:
@@ -304,23 +279,13 @@ def _render_in_workflow(workflow: WorkflowState) -> None:
         "discovered Swagger catalogue — is sent to the model."
     )
 
-    if st.button(run_label(workflow, 3), key="workflow_run_3"):
-        payload = workflow.step_inputs(3)
-        upstream = [RESULT_ARGUMENT[source] for source in (1, 2)]
-        if any(name not in payload for name in upstream):
-            st.error(
-                "The Step 1 and Step 2 results are not available yet. Run them and "
-                "approve Step 2 first."
-            )
-        else:
-            with workflow.track_usage(3):
-                result, error = _run(payload[upstream[0]], payload[upstream[1]])
-            if error:
-                workflow.record_error(3, error)
-            else:
-                workflow.record_result(3, result)
+    if st.button(run_label(workflow, 3), key=run_step_key(3)):
+        with st.spinner(_SPINNER):
+            outcome = execute_step(3, workflow)
+        if outcome.recorded:
             # کلِ صفحه (از جمله نوارِ قدم‌ها) با وضعیتِ تازه دوباره کشیده شود.
             st.rerun()
+        st.error(outcome.error)
 
     result = workflow.result(3)
     if result:

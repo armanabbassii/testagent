@@ -6,17 +6,23 @@ import pytest
 
 from src.agents.test_case_generator.swagger_snapshots import (
     DEFAULT_SELECTION,
-    SELECTIONS,
     SELECTION_ADMIN,
+    SELECTION_AUTO,
     SELECTION_BOTH,
+    SELECTION_CRM,
     SELECTION_CUSTOMER,
+    SELECTION_PROVIDER,
+    SELECTION_SITE,
     SNAPSHOT_DIR,
     SWAGGER_SOURCES,
     SwaggerSnapshotError,
+    enabled_sources,
     expand_selection,
     load_snapshot,
     load_snapshots,
+    selection_for_keys,
     selection_label,
+    snapshot_available,
     snapshot_path,
     source_for,
 )
@@ -56,15 +62,61 @@ def snapshots(tmp_path):
 # ── رجیستری و انتخاب ─────────────────────────────────────────────────────────
 
 class TestSourceRegistry:
-    def test_the_two_expected_sources_are_registered(self):
+    def test_the_five_initial_sources_are_registered(self):
         assert [source.key for source in SWAGGER_SOURCES] == [
             SELECTION_ADMIN,
             SELECTION_CUSTOMER,
+            SELECTION_CRM,
+            SELECTION_PROVIDER,
+            SELECTION_SITE,
         ]
+
+    @pytest.mark.parametrize(
+        ("key", "group", "prefixes"),
+        [
+            (SELECTION_ADMIN, "Admin", ("/admin",)),
+            (SELECTION_CUSTOMER, "Customer", ("/customer",)),
+            (SELECTION_CRM, "CRM", ("/crm",)),
+            (SELECTION_PROVIDER, "Provider", ("/provider",)),
+            # Site مسیرهای بی‌پیشوند دارد: مالکیت فقط با متادیتا ثابت می‌شود.
+            (SELECTION_SITE, "Site", ()),
+        ],
+    )
+    def test_each_source_has_its_group_snapshot_and_prefixes(self, key, group, prefixes):
+        source = source_for(key)
+        assert source.group == group
+        assert source.filename == f"{key}.json"
+        assert source.remote_url.endswith(f"/v3/api-docs/{group}")
+        assert source.path_prefixes == prefixes
+        assert source.enabled is True
+
+    def test_the_existing_admin_and_customer_urls_are_unchanged(self):
+        assert source_for(SELECTION_ADMIN).remote_url == (
+            "http://podium-back.devpod.ir/api/v3/api-docs/Admin"
+        )
+        assert source_for(SELECTION_CUSTOMER).remote_url == (
+            "http://podium-back.devpod.ir/api/v3/api-docs/Customer"
+        )
 
     def test_every_source_maps_to_a_json_snapshot(self):
         assert source_for(SELECTION_ADMIN).filename == "admin.json"
         assert source_for(SELECTION_CUSTOMER).filename == "customer.json"
+
+    def test_disabled_sources_are_registered_but_not_enabled(self, monkeypatch):
+        from dataclasses import replace
+
+        from src.agents.test_case_generator import swagger_snapshots
+
+        registry = tuple(
+            replace(source, enabled=source.key != SELECTION_CRM) for source in SWAGGER_SOURCES
+        )
+        monkeypatch.setattr(swagger_snapshots, "SWAGGER_SOURCES", registry)
+        assert source_for(SELECTION_CRM).enabled is False
+        assert SELECTION_CRM not in [source.key for source in enabled_sources()]
+
+    def test_snapshot_availability_is_reported_per_source(self, snapshots):
+        assert snapshot_available(SELECTION_ADMIN, directory=snapshots) is True
+        assert snapshot_available(SELECTION_CRM, directory=snapshots) is False
 
     def test_snapshots_live_under_data_swagger(self):
         assert SNAPSHOT_DIR.name == "swagger"
@@ -92,15 +144,20 @@ class TestExpandSelection:
     def test_customer_selects_only_customer(self):
         assert expand_selection(SELECTION_CUSTOMER) == [SELECTION_CUSTOMER]
 
-    def test_both_selects_every_registered_source_in_order(self):
+    def test_the_legacy_both_value_still_reads_admin_and_customer(self):
         assert expand_selection(SELECTION_BOTH) == [SELECTION_ADMIN, SELECTION_CUSTOMER]
 
-    def test_the_default_selection_is_both(self):
-        assert DEFAULT_SELECTION == SELECTION_BOTH
-        assert expand_selection(DEFAULT_SELECTION) == [
-            SELECTION_ADMIN,
-            SELECTION_CUSTOMER,
-        ]
+    def test_the_default_selection_is_automatic_not_both(self):
+        assert DEFAULT_SELECTION == SELECTION_AUTO
+        assert expand_selection(DEFAULT_SELECTION) == []
+        assert expand_selection("") == []
+
+    def test_several_keys_expand_in_registry_order(self):
+        assert expand_selection("site,crm") == [SELECTION_CRM, SELECTION_SITE]
+
+    def test_keys_map_back_to_a_selection(self):
+        assert selection_for_keys([SELECTION_SITE, SELECTION_ADMIN]) == "admin,site"
+        assert selection_for_keys([]) == ""
 
     def test_case_and_whitespace_do_not_matter(self):
         assert expand_selection("  ADMIN  ") == [SELECTION_ADMIN]
@@ -109,14 +166,16 @@ class TestExpandSelection:
         with pytest.raises(SwaggerSnapshotError, match="Unknown Swagger source"):
             expand_selection("everything")
 
-    def test_every_offered_selection_is_resolvable(self):
-        for selection in SELECTIONS:
-            assert expand_selection(selection)
+    def test_every_registered_source_is_selectable(self):
+        for source in SWAGGER_SOURCES:
+            assert expand_selection(source.key) == [source.key]
 
     def test_labels_are_human_readable(self):
         assert selection_label(SELECTION_ADMIN) == "Admin"
         assert selection_label(SELECTION_CUSTOMER) == "Customer"
         assert selection_label(SELECTION_BOTH) == "Admin + Customer"
+        assert selection_label("crm,provider") == "CRM + Provider"
+        assert selection_label(SELECTION_AUTO) == "Automatic"
 
 
 # ── خواندن ───────────────────────────────────────────────────────────────────

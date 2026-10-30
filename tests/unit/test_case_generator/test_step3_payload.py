@@ -363,6 +363,7 @@ class TestStep3UiNeverSendsTheCatalog:
 
     def _captured_step2_result(self) -> dict:
         streamlit = pytest.importorskip("streamlit")
+        from ui import pipeline  # noqa: E402
         from ui import step3_scenario_analysis as step3_ui  # noqa: E402
 
         generator = MagicMock()
@@ -373,8 +374,9 @@ class TestStep3UiNeverSendsTheCatalog:
             "clarifications": [],
         }
 
+        # فراخوانیِ Generator در ui/pipeline.py است؛ صفحه فقط spinner را اضافه می‌کند.
         with patch.object(
-            step3_ui, "Step3ScenarioAnalysisGenerator", return_value=generator
+            pipeline, "Step3ScenarioAnalysisGenerator", return_value=generator
         ), patch.object(streamlit, "spinner", MagicMock()):
             result, error = step3_ui._run(_step1_result(), _step2_result())
 

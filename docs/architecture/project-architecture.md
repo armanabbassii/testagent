@@ -5,6 +5,8 @@
 > بخشِ اصلی سند جریانِ پنج‌قدمیِ `test_case_generator` است؛ بقیه‌ی پروژه
 > (code review، ایجنت‌های عمومی، حافظه) فقط در حدِ نقشه‌ی کلی آمده‌اند و سندهای
 > جداگانه‌ی خودشان را دارند ([index.md](../index.md)).
+> مسیرِ اجرای دکمه‌ها و `Run All` (`ui/pipeline.py`)، مدیریتِ وضعیت و صادرات در
+> [workflow-execution.md](workflow-execution.md) آمده است.
 
 ---
 
@@ -32,8 +34,9 @@
 main.py                         # فقط راهنمای اجرای examples/ را چاپ می‌کند
 ui/                             # ویزاردِ Streamlit جریانِ test_case_generator
 ├── app.py                      # هماهنگ‌کننده‌ی پنج قدم (بدونِ منطقِ کسب‌وکار)
-├── workflow.py                 # WorkflowState: قفل، تأیید، کهنه‌شدن، مصرفِ توکن
-├── step1_… step5_….py          # صفحه‌ی نازکِ هر قدم: render_step + _run
+├── workflow.py                 # WorkflowState: قفل، تأیید/پذیرشِ خودکار، کهنه‌شدن، مصرفِ توکن
+├── pipeline.py                 # execute_step + run_all (بدونِ Streamlit) — تنها محلِ صدا زدنِ Generatorها
+├── step1_… step5_….py          # صفحه‌ی نازکِ هر قدم: render_step + _run (spinner دورِ pipeline)
 ├── formatting.py / components.py
 src/
 ├── config.py                   # خواندنِ .env (LLM_*, EMBEDDING_*, LLM_MAX_OUTPUT_TOKENS, …)
@@ -42,6 +45,9 @@ src/
 ├── token_usage.py              # TokenUsage + collect_usage (جمعِ مصرفِ هر قدم)
 ├── debug/                      # DebugConfig و logger سطح‌بندی‌شده
 ├── observability/              # Langfuse (اختیاری)
+├── task_sources/               # ورودیِ تسک از بیرون → TaskInputِ مستقل از منبع (قدم ۱)
+│   ├── task_input.py / attachments.py / text.py
+│   └── jira/                   # ورودِ ADFS SAML/PAT، REST v2، wiki markup (jira-integration.md)
 ├── agents/
 │   ├── graph.py                # گرافِ LangGraphِ عمومی (router → …, test_case_generator)
 │   ├── code_review/            # گرافِ code review (GitLab، Sonar، reviewer، decision)
@@ -49,7 +55,9 @@ src/
 │       ├── task_analysis.py        # قدم ۱
 │       ├── swagger_analyzer.py     # parse سندِ OpenAPI v2/v3 (مشترک)
 │       ├── api_discovery.py        # قدم ۲ — بخشِ قطعی (کشفِ عملیات‌ها)
-│       ├── swagger_snapshots.py    # قدم ۲ — خواندنِ data/swagger/*.json
+│       ├── swagger_snapshots.py    # قدم ۲ — رجیستریِ منابع و خواندنِ data/swagger/*.json
+│       ├── source_selection.py     # قدم ۲ — انتخابِ خودکار/دستیِ منابعِ Swagger
+│       ├── source_semantics.py     # قدم ۲ — تحلیلِ معناییِ تسک (فارسی/انگلیسی) با LLM
 │       ├── api_relevance.py        # قدم ۲ — فیلترِ قطعیِ نامزدها پیش از LLM
 │       ├── api_mapping.py          # قدم ۲ — نگاشتِ LLM + اعتبارسنجی + قراردادِ فشرده
 │       ├── scenario_analysis.py    # قدم ۳
@@ -61,9 +69,10 @@ src/
 │       ├── prompts/                # پرامپت‌های هر قدم (*.md)
 │       └── test_resolve.py, test_raw_llm.py, test_agent_run.py   # اسکریپت‌های دستی، نه pytest
 ├── checkpointer/ memory/ vector_store/ rules/ security/ cli/ api/
-data/swagger/                   # snapshotهای محلیِ Swagger (admin.json، customer.json)
+data/swagger/                   # snapshotهای محلیِ Swagger (admin.json، customer.json؛ crm/provider/site با Update)
 tests/unit/test_case_generator/ # تست‌های واحدِ همه‌ی قدم‌ها
-tests/unit/ui/                  # تست‌های workflow و formatting (بدونِ اجرای Streamlit)
+tests/unit/task_sources/        # Jira و ADFSِ ساختگی، پیوست‌ها، TaskInput
+tests/unit/ui/                  # تست‌های workflow، pipeline/Run All، formatting و AppTestِ ویزارد
 ```
 
 ---
@@ -75,8 +84,12 @@ tests/unit/ui/                  # تست‌های workflow و formatting (بدو
 ارکستراسیون **LangGraph نیست**؛ `ui/app.py` با `WorkflowState`
 (`ui/workflow.py`) قدم‌ها را هماهنگ می‌کند:
 
-- قدم‌ها **ترتیبی و با تأییدِ انسانی** اجرا می‌شوند: قدمِ n فقط بعد از
-  `approve(n-1)` باز می‌شود (`is_unlocked`). هیچ قدمی خودکار اجرا نمی‌شود.
+- قدم‌ها **ترتیبی** اجرا می‌شوند: قدمِ n فقط بعد از پذیرشِ قدمِ n-1 باز
+  می‌شود (`is_unlocked`) — یا تأییدِ انسانی (`approve`) یا پذیرشِ خودکارِ
+  Run All (`auto_advance`)، که جدا ثبت و جدا نمایش داده می‌شوند.
+- اجرای هر قدم فقط در `ui/pipeline.py::execute_step` است (بدونِ Streamlit)؛
+  دکمه‌ی «Run Step N» و `run_all` (دکمه‌ی Run All در قدم ۱) هر دو همین را صدا
+  می‌زنند. بیرون از Run All هیچ قدمی خودکار اجرا نمی‌شود.
 - هیچ اجرای موازی‌ای بینِ قدم‌ها نیست. موازی‌سازی/تکرار فقط **داخلِ** قدم‌هاست
   (دسته‌بندی و retry در قدم ۱ و ۲).
 - `step_inputs(step)` نتیجه‌های قبلی را طبقِ `_PROPAGATED` پاس می‌دهد:
@@ -132,7 +145,7 @@ flowchart TD
 |------|--------|
 | هدف | تبدیلِ توصیفِ تسک به تست‌کیس‌های کسب‌وکاریِ ساختاریافته |
 | پیاده‌سازی | `TaskAnalysisGenerator` در `task_analysis.py`؛ صفحه: `ui/step1_task_analysis.py` |
-| ورودی | `task_description` (اجباری)، `developed_services` (اختیاری، فقط زمینه) |
+| ورودی | `task_description` (اجباری)، `developed_services` (اختیاری؛ زمینه‌ی پرامپت — URLهای Swagger و endpoint داخلِ آن، همراهِ متنِ تسک، منابعِ قدم ۲ را هم تعیین می‌کنند) |
 | خروجی | `TaskAnalysisResult`: `task_summary`, `identified_requirements`, `test_cases[]` (`TaskTestCase`: id, title, type, priority, preconditions, steps, expected_result, related_service, auth_intent), `clarifications`, `variables[]` (متغیرهای درخواستیِ کاربر — بخشِ K) |
 | LLM | `prompts/step1_task_analysis.md`؛ اگر پاسخ بریده شود یا خالی باشد، تولیدِ مرحله‌ای: `step1_task_plan.md` (برنامه) و `step1_test_case_details.md` (جزئیات در دسته‌ها) |
 | خطا | `ValueError` (ورودیِ خالی)، `TaskAnalysisError` (خروجیِ نامعتبر) — پاسخِ بریده هرگز ترمیم نمی‌شود |
@@ -144,7 +157,8 @@ flowchart TD
 |------|--------|
 | هدف | کشفِ عملیات‌های واقعیِ API و نگاشتِ هر تست‌کیس به یک عملیات (یا `null`) |
 | پیاده‌سازی | `Step2ApiMappingGenerator` و `ApiMappingAgent` در `api_mapping.py`؛ کشف در `api_discovery.py`/`swagger_snapshots.py`؛ parse در `swagger_analyzer.py` |
-| ورودی | `step1_result` + یا `snapshot_keys` (مسیرِ عادیِ ویزارد: `admin`/`customer`/`both`، بدونِ شبکه) یا `service_sources` (URL/فایل) |
+| ورودی | `step1_result` + یا `snapshot_keys` (مسیرِ عادیِ ویزارد: هر زیرمجموعه از `admin`/`customer`/`crm`/`provider`/`site`، بدونِ شبکه) یا `service_sources` (URL/فایل) |
+| انتخابِ snapshot | `ui/pipeline.plan_swagger_sources` → `source_selection.select_sources` (قطعی، بدونِ LLM و شبکه): ۱) URLِ Swagger (`urls.primaryName` یا `…/api-docs/<Group>`)، ۲) مسیرِ endpoint که در متادیتای snapshotها پیدا شود یا پیشوندِ ثبت‌شده‌ی منبع را داشته باشد، ۳) تحلیلِ معناییِ چندزبانه‌ی متنِ تسک (`source_semantics.py`، یک فراخوانیِ LLM فقط در صورتِ نیاز؛ هر منبع/عملیاتِ پیشنهادی با snapshotِ واقعی تأیید می‌شود) و در نبودِ آن تطبیقِ واژه‌ای با مسیر/operationId/tag/summary؛ همه باید فعال و دارای snapshot باشند. شاهدِ ناکافی یا URLِ ناشناخته خطاست و هیچ fallbackی (`both`) نیست. انتخابِ دستیِ قدم ۲ جایگزین نمی‌شود؛ Run All همیشه خودکار است و انتخاب را یک بار ثابت می‌کند (جزئیات: [workflow-execution.md](workflow-execution.md) بخش D) |
 | خروجی | `Step2Result`: `services[]` (`DiscoveredService.to_dict()`: name, source_url, base_url, apis[], authorization, unresolved), `mappings[]` (`ApiMapping`: test_case_id, api{method,path,operation_id}\|null, confidence, reason, clarification), `clarifications[]` |
 | تبدیل‌ها | `SwaggerAnalyzer.parse_spec` → `EndpointSpec` → `_to_discovered_api` → `DiscoveredApi.to_dict()` (فقط method, path, operation_id, summary, parameters, request_body, responses) |
 | LLM | `prompts/step2_api_mapping.md`؛ فقط method/path/operationId/summary به پرامپت می‌رود (`_service_for_prompt`) |
@@ -158,7 +172,7 @@ flowchart TD
 |------|--------|
 | هدف | گروه‌بندیِ سناریو، ترتیبِ اجرا و وابستگی‌های داده بینِ تست‌کیس‌ها |
 | پیاده‌سازی | `Step3ScenarioAnalysisGenerator`/`ScenarioAnalysisAgent` در `scenario_analysis.py` |
-| ورودی | `step1_result` + **قراردادِ فشرده‌ی** قدم ۲ (`compact_step2_result` در `ui/step3_scenario_analysis.py::_run`) — کاتالوگِ کامل حذف می‌شود؛ فقط تعریفِ عملیات‌های نگاشت‌شده (`CompactMapping.operation`) می‌ماند |
+| ورودی | `step1_result` + **قراردادِ فشرده‌ی** قدم ۲ (`compact_step2_result` در `ui/pipeline.py::run_scenario_analysis`، مشترک بینِ دکمه‌ی قدم ۳، Run All و صفحه‌ی مستقل) — کاتالوگِ کامل حذف می‌شود؛ فقط تعریفِ عملیات‌های نگاشت‌شده (`CompactMapping.operation`) می‌ماند |
 | خروجی | `Step3Result`: `scenarios[]`, `execution_order[]`, `data_dependencies[]` (variable_name, source{test_case_id, location: response.body\|response.header, path}, targets[{test_case_id, location: path\|query\|header\|body, parameter}], scope: global\|collection, required, origin: task\|inferred), `clarifications[]` |
 | اعتبارسنجی | `validate_scenario_payload`: ارجاع به تست‌کیس‌های واقعی، `find_cycle` برای حلقه، تطبیقِ پارامترِ مقصد با پارامترهای سند و فیلدِ مبدأ با فیلدهای پاسخ؛ متغیرهای `variables`ِ قدم ۱ پیش از آن به‌صورتِ قطعی به وابستگی تبدیل می‌شوند (`_resolve_requested_variables`) |
 
@@ -179,7 +193,7 @@ flowchart TD
 |------|--------|
 | هدف | بازبینیِ نهایی (`ready`/`needs_review`/`blocked`) و صادراتِ **همان** کالکشنِ قدم ۴ |
 | پیاده‌سازی | `FinalReviewGenerator` در `final_review.py`؛ همان توابعِ اعتبارسنجیِ قدم ۴ را صدا می‌زند (`validate_collection`، `check_variables_are_available`، `validate_step3_references`) |
-| نکته | کالکشن را **تغییر نمی‌دهد**؛ خروجیِ دانلود `collection_json(collection)` در `ui/step5_final_review.py::_render_export` است |
+| نکته | کالکشن را **تغییر نمی‌دهد**؛ خروجیِ دانلود `collection_json(collection)` در `ui/step5_final_review.py::_render_export` است. دانلود برای بازبینیِ `blocked`، کالکشنِ غایب یا نتیجه‌ی کهنه غیرفعال است (`export_unavailable_reason`) |
 
 ---
 

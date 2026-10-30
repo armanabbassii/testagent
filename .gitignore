@@ -89,3 +89,5 @@ htmlcov/
 
 admin.json
 customer.json
+# گواهی/CA bundle (مثلاً JIRA_CA_BUNDLE) — ماشین‌محور، بیرون از مخزن
+*.pem

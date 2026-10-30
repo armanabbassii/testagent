@@ -701,3 +701,70 @@ def collection_name(collection: Any) -> str:
     if not isinstance(collection, dict):
         return ""
     return _case_field(collection.get("info"), "name")
+
+
+# ── دریافتِ issueِ Jira (قدمِ اول) ───────────────────────────────────────────
+
+MESSAGE_SUCCESS = "success"
+MESSAGE_ERROR = "error"
+MESSAGE_WARNING = "warning"
+MESSAGE_INFO = "info"
+
+_STAGE_TITLES = {
+    "configuration": "Jira is not configured",
+    "issue reference": "Invalid Jira issue",
+    "authentication": "Jira sign-in failed",
+    "issue": "Issue not accessible",
+    "comments": "Comments could not be retrieved",
+}
+
+
+def jira_status_messages(result: Any) -> list[tuple[str, str]]:
+    """(سطح، متن) برای هر مرحله‌ی دریافتِ یک JiraImport، به ترتیب.
+
+    فقط نامِ نمایشیِ کاربر و داده‌ی issue — هرگز اعتبارنامه، کوکی یا توکن.
+    """
+    messages: list[tuple[str, str]] = []
+    if result.authenticated:
+        who = result.identity or "the configured account"
+        messages.append((MESSAGE_SUCCESS, f"Signed in to Jira as {who} ({result.auth_method})."))
+    if result.issue_found and result.task_input is not None:
+        messages.append(
+            (MESSAGE_SUCCESS, f"Issue {result.issue_key} retrieved: {result.task_input.title}")
+        )
+    elif result.issue_found:
+        messages.append((MESSAGE_SUCCESS, f"Issue {result.issue_key} found."))
+    if result.error:
+        title = _STAGE_TITLES.get(result.error_stage, "Jira import failed")
+        messages.append((MESSAGE_ERROR, f"{title}: {result.error}"))
+        return messages
+
+    task = result.task_input
+    processed = len(task.processed_attachments())
+    unsupported = sum(1 for item in task.attachments if item.status == "unsupported")
+    failed = len(task.attachments) - processed - unsupported
+    messages.append(
+        (
+            MESSAGE_INFO,
+            f"{len(task.comments)} comment(s) retrieved · {len(task.attachments)} "
+            f"attachment(s) found · {processed} processed · {unsupported} unsupported · "
+            f"{failed} failed or too large",
+        )
+    )
+    messages += [(MESSAGE_WARNING, warning) for warning in result.warnings]
+    return messages
+
+
+def jira_attachment_rows(task: Any) -> list[dict[str, str]]:
+    """یک ردیف برای هر پیوست، با وضعیتِ پردازش و دلیلش."""
+    return [
+        {
+            "File": item.filename,
+            "Type": item.media_type or "—",
+            "Size": f"{item.size:,} bytes",
+            "Status": item.status_label,
+            "Extracted": f"{len(item.content):,} chars" if item.processed else "—",
+            "Detail": item.detail or "",
+        }
+        for item in task.attachments
+    ]

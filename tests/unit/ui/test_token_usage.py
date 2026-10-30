@@ -234,9 +234,12 @@ class TestSidebarRendering:
         app = self._run()
 
         assert app.exception == []
-        assert [header.value for header in app.sidebar.subheader] == [
-            "Reset",
-            "LLM Token Usage",
+        assert [header.value for header in app.sidebar.subheader] == ["Workflow"]
+        # مصرفِ توکن و بازنشانی بخش‌های جمع‌شونده‌ی سایدبارند.
+        # AppTest expanders را با نوعِ «status» (Expandable) می‌شناسد.
+        assert [section.label for section in app.sidebar.status] == [
+            "LLM token usage",
+            "Reset workflow",
         ]
         assert len(app.sidebar.dataframe) == 1
 
@@ -279,3 +282,5 @@ class TestSidebarRendering:
         assert table.iloc[0]["Prompt"] == "33,142"
         assert table.iloc[0]["Cached"] == "3,592"
         assert table.iloc[-1]["Total"] == "40,524"
+        # جمعِ کل در عنوانِ بخشِ جمع‌شده هم دیده می‌شود.
+        assert app.sidebar.status[0].label == "LLM token usage · 40,524 tokens"

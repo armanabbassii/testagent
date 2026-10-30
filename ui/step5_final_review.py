@@ -45,13 +45,11 @@ if str(_REPO_ROOT) not in sys.path:
 import streamlit as st  # noqa: E402
 
 from src.agents.test_case_generator.final_review import (  # noqa: E402
-    FinalReviewGenerator,
     STATUS_BLOCKED,
     STATUS_NEEDS_REVIEW,
     STATUS_READY,
 )
-from src.debug import DebugConfig  # noqa: E402
-from ui.components import render_propagated_inputs  # noqa: E402
+from ui.components import render_propagated_inputs, run_step_key  # noqa: E402
 from ui.formatting import (  # noqa: E402
     collection_filename,
     collection_json,
@@ -65,8 +63,8 @@ from ui.formatting import (  # noqa: E402
     step5_summary,
     step5_warnings,
 )
+from ui.pipeline import execute_step, run_final_review  # noqa: E402
 from ui.workflow import (  # noqa: E402
-    RESULT_ARGUMENT,
     WorkflowState,
     run_label,
 )
@@ -87,9 +85,6 @@ _INPUT_KEYS = (
     ),
 )
 
-# نتیجه‌های قدم‌های قبلی که این قدم مستقیم مصرف می‌کند.
-_UPSTREAM = (1, 2, 3, 4)
-
 
 def _run(
     step1_result: object,
@@ -101,19 +96,9 @@ def _run(
 
     قطعی است و هیچ LLM/شبکه‌ای درگیر نیست — پس spinner لازم نیست. هیچ چیزی در
     session_state نوشته نمی‌شود: صفحه‌ی مستقل نتیجه را آنجا می‌گذارد و ویزارد
-    در وضعیتِ جریان.
+    در وضعیتِ جریان. فراخوانیِ Generator در ui/pipeline.py است.
     """
-    try:
-        result = FinalReviewGenerator(debug_config=DebugConfig.from_env()).generate(
-            step1_result=step1_result,
-            step2_result=step2_result,
-            step3_result=step3_result,
-            step4_result=step4_result,
-        )
-    except Exception as exc:  # noqa: BLE001 — خطای غیرمنتظره نباید UI را بترکاند
-        return None, f"Final review failed: {type(exc).__name__}: {exc}"
-
-    return result, None
+    return run_final_review(step1_result, step2_result, step3_result, step4_result)
 
 
 def _store(result: dict | None, error: str | None) -> None:
@@ -194,7 +179,7 @@ def _render_issues(result: dict) -> None:
         f"{len(rows)} blocking issue(s) found. The collection is shown below for "
         f"review, but it should not be used as-is until they are resolved."
     )
-    st.dataframe(rows, use_container_width=True, hide_index=True)
+    st.dataframe(rows, width="stretch", hide_index=True)
 
 
 def _render_warnings(result: dict) -> None:
@@ -223,7 +208,7 @@ def _render_review_items(result: dict) -> None:
         "They require a human answer — but they do not make the collection itself "
         "invalid."
     )
-    st.dataframe(rows, use_container_width=True, hide_index=True)
+    st.dataframe(rows, width="stretch", hide_index=True)
 
 
 def _render_collection(result: dict) -> None:
@@ -241,7 +226,29 @@ def _render_collection(result: dict) -> None:
     st.json(collection)
 
 
-def _render_export(result: dict) -> None:
+def export_unavailable_reason(result: dict, out_of_date: bool = False) -> str:
+    """چرا این کالکشن نباید به‌عنوانِ artifactِ نهایی دانلود شود — یا "".
+
+    کالکشنِ مسدود، غایب یا متعلق به اجرای قبلی هرگز به‌عنوانِ نتیجه‌ی موفق
+    عرضه نمی‌شود. کالکشنِ قدم ۴ همچنان در صفحه‌ی همان قدم دیده می‌شود.
+    """
+    if out_of_date:
+        return (
+            "This review belongs to an earlier run and is out of date, so its "
+            "collection cannot be exported. Run Step 5 again (or Run All)."
+        )
+    if not postman_collection(result):
+        return "The review carries no Step 4 collection, so there is nothing to export."
+    if step5_status(result) == STATUS_BLOCKED:
+        return (
+            "The review is blocked, so this collection is not a valid final artifact "
+            "and cannot be exported from here. Resolve the blocking issues above and "
+            "run the workflow again."
+        )
+    return ""
+
+
+def _render_export(result: dict, out_of_date: bool = False) -> None:
     """صادرات — همان کالکشنِ قدم چهارم، بدونِ هیچ تغییری."""
     st.subheader("Export")
 
@@ -254,11 +261,15 @@ def _render_export(result: dict) -> None:
         "the review result lives only in this page's JSON, never inside the "
         "collection."
     )
+    unavailable = export_unavailable_reason(result, out_of_date)
+    if unavailable:
+        st.warning(unavailable)
     st.download_button(
         "Download collection JSON",
         data=collection_json(collection),
         file_name=filename,
         mime="application/json",
+        disabled=bool(unavailable),
     )
 
 
@@ -300,7 +311,7 @@ def _render_approval(result: dict) -> None:
         )
 
 
-def _render_result(result: dict) -> None:
+def _render_result(result: dict, out_of_date: bool = False) -> None:
     """گزارشِ بازبینی را برای تصمیمِ انسانی نمایش می‌دهد."""
     _render_status(result)
     _render_metrics(result)
@@ -308,7 +319,7 @@ def _render_result(result: dict) -> None:
     _render_warnings(result)
     _render_review_items(result)
     _render_collection(result)
-    _render_export(result)
+    _render_export(result, out_of_date)
 
 
 def _render_inputs() -> None:
@@ -361,26 +372,16 @@ def _render_in_workflow(workflow: WorkflowState) -> None:
         "results above are exactly what it reviews and exports."
     )
 
-    if st.button(run_label(workflow, 5), key="workflow_run_5"):
-        payload = workflow.step_inputs(5)
-        upstream = [RESULT_ARGUMENT[source] for source in _UPSTREAM]
-        if any(name not in payload for name in upstream):
-            st.error(
-                "The Step 1–4 results are not available yet. Run them and approve "
-                "Step 4 first."
-            )
-        else:
-            result, error = _run(*(payload[name] for name in upstream))
-            if error:
-                workflow.record_error(5, error)
-            else:
-                workflow.record_result(5, result)
+    if st.button(run_label(workflow, 5), key=run_step_key(5)):
+        outcome = execute_step(5, workflow)
+        if outcome.recorded:
             # کلِ صفحه (از جمله نوارِ قدم‌ها) با وضعیتِ تازه دوباره کشیده شود.
             st.rerun()
+        st.error(outcome.error)
 
     result = workflow.result(5)
     if result:
-        _render_result(result)
+        _render_result(result, out_of_date=workflow.is_out_of_date(5))
 
 
 def render_step(workflow: WorkflowState | None = None) -> None:

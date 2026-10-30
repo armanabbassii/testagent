@@ -9,17 +9,25 @@ Local OpenAPI/JSON snapshots that Step 2 reads during a normal run. Step 2 does
 | --- | --- |
 | `admin.json` | `http://podium-back.devpod.ir/api/v3/api-docs/Admin` |
 | `customer.json` | `http://podium-back.devpod.ir/api/v3/api-docs/Customer` |
+| `crm.json` | `http://podium-back.devpod.ir/api/v3/api-docs/CRM` (not fetched yet) |
+| `provider.json` | `http://podium-back.devpod.ir/api/v3/api-docs/Provider` (not fetched yet) |
+| `site.json` | `http://podium-back.devpod.ir/api/v3/api-docs/Site` (not fetched yet) |
 
-The URLs are registered in `SWAGGER_SOURCES`
-(`src/agents/test_case_generator/swagger_snapshots.py`).
+The sources are registered in `SWAGGER_SOURCES`
+(`src/agents/test_case_generator/swagger_snapshots.py`). The CRM, Provider and
+Site URLs follow the same group pattern as Admin and Customer; use their Update
+buttons in Step 2 to fetch them. Step 2 chooses which snapshots to read
+automatically (`source_selection.py`); a run that needs a missing snapshot stops
+with an error naming the file. To add a source (for example ACL), add one
+registry entry and save its snapshot here as `<key>.json`.
 
 **Never commit credentials.** No tokens, cookies, API keys or `Authorization`
 values belong in these files. A snapshot is the public API description only.
 
 ## Refreshing
 
-In the Step 2 page of the wizard, `Update Admin` and `Update Customer` each fetch
-their source URL (a fresh request on every click) and replace **only** their own
+In the Step 2 page of the wizard, each `Update <source>` button fetches
+its source URL (a fresh request on every click) and replace **only** their own
 file. `refresh_snapshot` does the work:
 
 1. Download the complete response (timeouts: `SWAGGER_CONNECT_TIMEOUT_SECONDS`,

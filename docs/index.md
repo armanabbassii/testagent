@@ -14,6 +14,8 @@
 | [how-to/new-agent.md](how-to/new-agent.md) | ایجاد ایجنت جدید |
 | [how-to/new-log-driver.md](how-to/new-log-driver.md) | ایجاد درایور لاگ جدید |
 | [architecture/project-architecture.md](architecture/project-architecture.md) | معماری پروژه و جریانِ پنج‌قدمیِ Test Case Generator (از Swagger تا Postman) |
+| [architecture/workflow-execution.md](architecture/workflow-execution.md) | مسیرِ اجرای ویزارد، `execute_step` و `Run All`، رجیستری و انتخابِ خودکارِ منابعِ Swagger برای قدم ۲ (افزودنِ منبعِ تازه)، مدیریتِ وضعیت و صادرات (اجرای دسته‌ای: فقط پیشنهادی) |
+| [architecture/jira-integration.md](architecture/jira-integration.md) | ورودیِ تسک از یک issueِ Jira: تنظیمات، ورودِ ADFS SAML و PAT، `JIRA_CA_BUNDLE`، پیوست‌ها، `TaskInput` و محدودیت‌ها |
 | [architecture/core-clients.md](architecture/core-clients.md) | LLMClient و EmbeddingClient |
 | [architecture/checkpointer.md](architecture/checkpointer.md) | Redis Checkpointer — نحوه کار و تنظیم |
 | [architecture/observability.md](architecture/observability.md) | Observability |
