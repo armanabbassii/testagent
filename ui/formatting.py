@@ -521,6 +521,12 @@ def step4_request_rows(result: Any) -> list[dict[str, str]]:
                 "Request": _case_field(request, "name"),
                 "Method": _case_field(request, "method"),
                 "Path": _case_field(request, "path"),
+                "Host": (
+                    "{{" + _case_field(request, "host_variable") + "}}"
+                    + _case_field(request, "base_path")
+                    if _case_field(request, "host_variable")
+                    else _EMPTY_VALUE
+                ),
                 "Scenario": _case_field(request, "scenario") or _EMPTY_VALUE,
             }
         )
@@ -768,3 +774,205 @@ def jira_attachment_rows(task: Any) -> list[dict[str, str]]:
         }
         for item in task.attachments
     ]
+
+
+# ── تصمیم‌های محیط و میزبانِ هر تست‌کیس ──────────────────────────────────────
+# فقط نمایش: تصمیم‌ها در قدم ۱ سنجیده و در قدم ۲ قطعی شده‌اند؛ این‌جا فقط
+# توضیح داده می‌شود چرا یک تست‌کیس {{base_url}} یا {{base_url_vdi}} گرفته و
+# آن تصمیم از کدام جمله و کدام منبع آمده است.
+
+
+def _decision_records(step1_result: Any) -> list[dict]:
+    if not isinstance(step1_result, dict):
+        return []
+    records = [
+        item
+        for key in ("environment_decisions", "rejected_environment_decisions")
+        for item in step1_result.get(key) or []
+        if isinstance(item, dict)
+    ]
+    return sorted(records, key=lambda item: _decision_number(_case_field(item, "id")))
+
+
+def _decision_number(decision_id: str) -> int:
+    digits = decision_id.rsplit("-", 1)[-1]
+    return int(digits) if digits.isdigit() else 0
+
+
+def _decision_evidence(record: dict) -> str:
+    evidence = record.get("evidence") if isinstance(record.get("evidence"), dict) else {}
+    return _case_field(evidence, "original") or _case_field(evidence, "as_returned")
+
+
+def decision_source_label(record: Any) -> str:
+    """«Comment 3 (comment 123456)» — از کجا آمده، با شناسه‌ی واقعیِ منبع."""
+    source = record.get("source") if isinstance(record, dict) else None
+    if not isinstance(source, dict):
+        return _EMPTY_VALUE
+    label = _case_field(source, "label")
+    kind = _case_field(source, "type")
+    reference = _case_field(source, "reference")
+    detail = " ".join(part for part in (kind, reference) if part)
+    if label and detail:
+        return f"{label} ({detail})"
+    return label or detail or _EMPTY_VALUE
+
+
+def _decision_service(record: dict) -> str:
+    if _case_field(record, "scope") != "service":
+        return "whole task" if _case_field(record, "scope") == "task" else _EMPTY_VALUE
+    service = record.get("service") if isinstance(record.get("service"), dict) else {}
+    operation = " ".join(
+        part for part in (_case_field(service, "method"), _case_field(service, "path")) if part
+    )
+    name = _case_field(service, "name")
+    label = f"{name} ({operation})" if name and operation else operation or name
+    hints = [str(item) for item in record.get("test_case_ids") or []]
+    if hints:
+        label = f"{label} → {', '.join(hints)}" if label else ", ".join(hints)
+    return label or _EMPTY_VALUE
+
+
+def environment_decision_rows(step1_result: Any) -> list[dict[str, str]]:
+    """یک ردیف برای هر تصمیمِ استخراج‌شده — پذیرفته یا ردشده، هیچ‌کدام پنهان نمی‌شود."""
+    rows = []
+    for record in _decision_records(step1_result):
+        rejection = record.get("rejection") if isinstance(record.get("rejection"), dict) else {}
+        status = _case_field(record, "status")
+        if rejection:
+            status = f"{status} ({_case_field(rejection, 'code')})"
+        notes = [_case_field(rejection, "message")] + [
+            str(item) for item in record.get("warnings") or []
+        ]
+        rows.append(
+            {
+                "Decision": _case_field(record, "id"),
+                "Status": status,
+                "Scope": _case_field(record, "scope") or _EMPTY_VALUE,
+                "Environment": _case_field(record, "environment") or _EMPTY_VALUE,
+                "Service": _decision_service(record),
+                "Evidence": _decision_evidence(record) or _EMPTY_VALUE,
+                "Source": decision_source_label(record),
+                "Note": "; ".join(note for note in notes if note),
+            }
+        )
+    return rows
+
+
+def environment_warnings(step1_result: Any) -> list[str]:
+    if not isinstance(step1_result, dict):
+        return []
+    return [
+        str(item).strip()
+        for item in step1_result.get("environment_warnings") or []
+        if str(item or "").strip()
+    ]
+
+
+def _host_resolution(step2_result: Any) -> dict:
+    value = step2_result.get("host_resolution") if isinstance(step2_result, dict) else None
+    return value if isinstance(value, dict) else {}
+
+
+def host_selection_rows(step2_result: Any) -> list[dict[str, str]]:
+    """میزبانِ هر تست‌کیس — یا وضعیتی که اجرایش را متوقف کرده است."""
+    rows = []
+    for item in _host_resolution(step2_result).get("selections") or []:
+        if not isinstance(item, dict):
+            continue
+        variable = _case_field(item, "variable")
+        rows.append(
+            {
+                "Test case": _case_field(item, "test_case_id"),
+                "Host": "{{" + variable + "}}" if variable else _EMPTY_VALUE,
+                "Status": _case_field(item, "host_status"),
+                "Basis": _case_field(item, "basis") or _EMPTY_VALUE,
+                "Decisions": ", ".join(str(d) for d in item.get("decision_ids") or [])
+                or _EMPTY_VALUE,
+            }
+        )
+    return rows
+
+
+_BASIS_TEXT = {
+    "default": "No environment statement applies, so the default host is used.",
+    "task": "A task-wide environment statement applies.",
+    "service": "A service-level environment statement applies.",
+}
+
+
+def host_explanations(step1_result: Any, step2_result: Any) -> list[dict[str, Any]]:
+    """برای هر تست‌کیس: چرا این میزبان (یا چرا اجرا نمی‌شود) و شاهدش از کجا آمده."""
+    records = {_case_field(item, "id"): item for item in _decision_records(step1_result)}
+    explanations = []
+    for item in _host_resolution(step2_result).get("selections") or []:
+        if not isinstance(item, dict):
+            continue
+        case_id = _case_field(item, "test_case_id")
+        variable = _case_field(item, "variable")
+        status = _case_field(item, "host_status")
+        lines = []
+        if variable:
+            lines.append(_BASIS_TEXT.get(_case_field(item, "basis"), ""))
+        lines += [
+            _case_field(cause, "message")
+            for cause in item.get("review_causes") or []
+            if isinstance(cause, dict)
+        ]
+        for decision_id in item.get("decision_ids") or []:
+            record = records.get(str(decision_id))
+            if record is None:
+                lines.append(f"{decision_id}: not found in the Step 1 result.")
+                continue
+            source = record.get("source") if isinstance(record.get("source"), dict) else {}
+            digest = _case_field(source, "sha256")[:12]
+            lines.append(
+                f"{decision_id} ({_case_field(record, 'status')}, "
+                f"{_case_field(record, 'environment') or '?'}, "
+                f"{_case_field(record, 'scope') or '?'}): "
+                f"\"{_decision_evidence(record) or _EMPTY_VALUE}\" — "
+                f"{decision_source_label(record)}"
+                + (f", source sha256 {digest}…" if digest else "")
+            )
+        explanations.append(
+            {
+                "test_case_id": case_id,
+                "heading": f"{case_id} → " + ("{{" + variable + "}}" if variable else status),
+                "status": status,
+                "lines": [line for line in lines if line],
+            }
+        )
+    return explanations
+
+
+def unmatched_decision_rows(step2_result: Any) -> list[dict[str, str]]:
+    """تصمیم‌های سرویسی که به هیچ تست‌کیسی گره نخوردند — به هیچ‌کس داده نشده‌اند."""
+    return [
+        {
+            "Decision": _case_field(item, "id"),
+            "Environment": _case_field(item, "environment") or _EMPTY_VALUE,
+            "Reason": _case_field(item, "reason"),
+        }
+        for item in _host_resolution(step2_result).get("decisions") or []
+        if isinstance(item, dict) and item.get("status") == "UNMATCHED"
+    ]
+
+
+def environment_issue_review(step2_result: Any) -> dict[str, Any]:
+    """بازبینیِ سطحِ issue — جدا از خطای اجرا؛ NEEDS_REVIEW خطا نیست."""
+    resolution = _host_resolution(step2_result)
+    review = resolution.get("issue_review")
+    review = review if isinstance(review, dict) else {}
+    return {
+        "status": _case_field(review, "status") or "NONE",
+        "reasons": [
+            _case_field(reason, "message")
+            for reason in review.get("reasons") or []
+            if isinstance(reason, dict) and _case_field(reason, "message")
+        ],
+        "clarifications": [
+            str(item).strip()
+            for item in resolution.get("clarifications") or []
+            if str(item or "").strip()
+        ],
+    }

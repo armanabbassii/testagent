@@ -19,6 +19,18 @@ cd local-llm-project
 uv sync
 ```
 
+### Node.js و Newman (فقط برای Batch Testing)
+
+اجرای کالکشن‌ها در Batch Testing به Node.js و Newmanِ محلیِ مخزن نیاز دارد
+(نسخه‌های ثابت در `package.json`):
+
+```bash
+npm ci
+```
+
+ویزاردِ Single Issue بدونِ آن کار می‌کند. جزئیات:
+[architecture/batch-testing.md](architecture/batch-testing.md).
+
 ## ۲. تنظیم فایل `.env`
 
 ```bash

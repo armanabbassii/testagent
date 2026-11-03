@@ -331,6 +331,61 @@ Do not generate duplicate test cases that verify exactly the same behavior.
 If two scenarios are materially different, keep both.
 
 ==================================================
+ENVIRONMENT DECISIONS
+==================================================
+
+List every sentence in the task — its description, its comments and the
+readable text of its attachments — that explicitly says where a service must
+run or be tested: in VDI, or in the normal (non-VDI) environment.
+
+For each such sentence add one entry to "environment_decisions":
+
+- "evidence": an exact quotation of the sentence, copied verbatim from its
+  source (the description, the comment or the attachment text) — character
+  for character:
+  - do not correct spelling or typos, even obvious ones (keep "ادرس" as
+    "ادرس"; do not write "آدرس");
+  - do not change the case of Latin letters (keep "vdi" as "vdi");
+  - do not insert, remove or replace spaces or half-spaces (keep "تست ها" as
+    "تست ها"; do not write "تست‌ها" or "تستها");
+  - keep the original punctuation and wording;
+  - do not translate, shorten, merge, summarize, paraphrase or grammatically
+    improve it.
+  Decide "scope" and "environment" from what the sentence means; only the
+  "evidence" text must stay an exact quotation.
+- "source_type": "description", "comment" or "attachment" — where the sentence
+  appears. "source_reference": the comment heading (for example "Comment 3")
+  or the attachment file name; "" for the description.
+- "scope": "task" when the sentence applies to the whole task; "service" when
+  it applies to a specific service. For "service", give "service" with
+  "method" and "path" when the task states them (otherwise
+  "Unknown - requires API mapping") and "name" as the task calls the service;
+  add "test_case_ids" for the test cases of that service when you know them.
+- "environment": "vdi" or "normal".
+
+Rules:
+
+- Never decide an environment from a service name, a URL, a host, a Swagger
+  document or anything that is not an explicit statement.
+- If the task states nothing about the environment, return
+  "environment_decisions": [].
+- If two sentences disagree, list both. Do not choose between them.
+- These entries do not change the test cases; generate the test cases exactly
+  as the other sections describe.
+
+Example entry:
+
+{
+  "scope": "service",
+  "service": {"method": "POST", "path": "/admin/example", "name": "create example"},
+  "test_case_ids": ["TC-001"],
+  "environment": "vdi",
+  "evidence": "<the exact sentence from the task>",
+  "source_type": "comment",
+  "source_reference": "Comment 2"
+}
+
+==================================================
 OUTPUT FORMAT
 ==================================================
 
@@ -367,7 +422,8 @@ Use exactly this top-level structure:
     }
   ],
   "clarifications": [],
-  "variables": []
+  "variables": [],
+  "environment_decisions": []
 }
 
 When the task explicitly requests a variable, "variables" looks like:

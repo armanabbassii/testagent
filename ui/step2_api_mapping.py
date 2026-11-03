@@ -66,6 +66,7 @@ from ui.pipeline import (  # noqa: E402
     plan_swagger_sources,
     run_api_mapping,
 )
+from ui.environment_view import render_host_resolution  # noqa: E402
 from ui.formatting import (  # noqa: E402
     mapping_counts,
     mapping_details,
@@ -172,7 +173,12 @@ def _render_mappings(result: dict, test_cases: list[dict]) -> None:
         st.divider()
 
 
-def _render_result(result: dict, test_cases: list[dict], selection: str = "") -> None:
+def _render_result(
+    result: dict,
+    test_cases: list[dict],
+    selection: str = "",
+    step1_result: dict | None = None,
+) -> None:
     """نتیجه‌ی قدم دوم را برای بازبینیِ انسانی نمایش می‌دهد.
 
     اولویتِ نمایش با نگاشت‌هاست: کاربر باید «TC-001 → GET /admin/voucher/{id}»
@@ -189,6 +195,7 @@ def _render_result(result: dict, test_cases: list[dict], selection: str = "") ->
         st.caption(f"Swagger sources: **{selection}**")
 
     _render_mappings(result, test_cases)
+    render_host_resolution(step1_result, result)
 
     if result["clarifications"]:
         st.subheader("Clarifications")
@@ -467,6 +474,7 @@ def _render_in_workflow(workflow: WorkflowState) -> None:
             result,
             extract_test_cases(step1_result) if step1_result else [],
             used.summary() if isinstance(used, SourceSelection) else "",
+            step1_result,
         )
 
 

@@ -6,6 +6,9 @@ src/task_sources/jira/client.py — کلاینتِ REST برای Jira Server (AP
 فقط یک بار دوباره ساخته می‌شود؛ اگر باز هم رد شود خطای صریح است — هیچ
 حلقه‌ی ورودی وجود ندارد. هر کدِ خطا نوعِ خودش را دارد و هیچ شکستی به نتیجه‌ی
 خالی تبدیل نمی‌شود.
+
+دسترسی فقط‌خواندنی است: هر درخواستِ REST جز GET پیش از ارسال رد می‌شود
+(JiraWriteBlockedError). ورودِ ADFS از auth.py می‌گذرد، نه از این مسیر.
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ from src.task_sources.jira.errors import (
     JiraRateLimitError,
     JiraResponseError,
     JiraServerError,
+    JiraWriteBlockedError,
 )
 from src.task_sources.jira.settings import JiraSettings
 from src.task_sources.jira.transport import send
@@ -32,6 +36,8 @@ from src.task_sources.jira.transport import send
 API = "/rest/api/2"
 ISSUE_FIELDS = "summary,description,attachment,issuetype,status"
 COMMENT_PAGE_SIZE = 50
+# تنها متدهای مجاز؛ نوشتن در Jira (کامنت، پیوست، transition، ویرایش) فعلاً ممنوع است.
+READ_ONLY_METHODS = frozenset({"GET"})
 _DOWNLOAD_CHUNK = 64 * 1024
 # مسیرهایی که redirect به آن‌ها یعنی «نشست معتبر نیست».
 _LOGIN_PATHS = ("/login.jsp", "/plugins/servlet/samlsso")
@@ -118,6 +124,11 @@ class JiraClient:
 
     def _request(self, method: str, path_or_url: str, **kwargs: Any) -> requests.Response:
         """درخواست با نشستِ فعلی؛ نشستِ منقضی فقط یک بار دوباره ساخته می‌شود."""
+        if method.upper() not in READ_ONLY_METHODS:
+            raise JiraWriteBlockedError(
+                f"Jira access is read-only; refusing to send {method.upper()} "
+                f"{urlsplit(path_or_url).path or path_or_url}."
+            )
         with self._lock:
             self.ensure_authenticated()
             response = self._send(method, path_or_url, **kwargs)
@@ -180,6 +191,10 @@ class JiraClient:
         return self._decode(self._request("GET", path, params=params or None))
 
     # ── عملیات ──────────────────────────────────────────────────────────────
+    def get_json(self, path: str, **params: Any) -> Any:
+        """GETِ دلخواه روی همین Jira (مثلاً Agile API) با همان ورود و خطاهای تایپ‌دار."""
+        return self._json(path, **params)
+
     def myself(self) -> dict[str, Any]:
         return self._json(f"{API}/myself")
 
@@ -232,4 +247,4 @@ class JiraClient:
             response.close()
 
 
-__all__ = ["API", "COMMENT_PAGE_SIZE", "ISSUE_FIELDS", "JiraClient"]
+__all__ = ["API", "COMMENT_PAGE_SIZE", "ISSUE_FIELDS", "READ_ONLY_METHODS", "JiraClient"]

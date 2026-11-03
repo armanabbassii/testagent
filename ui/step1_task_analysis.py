@@ -42,6 +42,7 @@ if str(_REPO_ROOT) not in sys.path:
 import streamlit as st  # noqa: E402
 
 from ui.components import RUN_ALL_KEY, request_run_all, run_step_key  # noqa: E402
+from ui.environment_view import render_environment_decisions  # noqa: E402
 from ui.formatting import (  # noqa: E402
     MESSAGE_ERROR,
     MESSAGE_INFO,
@@ -145,6 +146,8 @@ def _render_result(result: dict) -> None:
         )
         for item in result["clarifications"]:
             st.warning(item)
+
+    render_environment_decisions(result)
 
     variables = requested_variable_rows(result)
     if variables:

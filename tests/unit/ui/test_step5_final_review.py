@@ -32,7 +32,7 @@ def _collection() -> dict:
             "name": "Voucher management API Tests",
             "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
         },
-        "variable": [{"key": "baseUrl", "value": "https://admin.example.com"}],
+        "variable": [{"key": "token", "value": ""}],
         "item": [
             {
                 "name": "SC-001 — Voucher lifecycle",

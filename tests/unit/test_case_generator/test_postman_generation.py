@@ -8,9 +8,11 @@
 
 from __future__ import annotations
 
+import json
 import pytest
 
 from src.agents.test_case_generator import postman_generation
+from src.agents.test_case_generator.host_selection import resolve_hosts
 from src.agents.test_case_generator.postman_generation import (
     PostmanGenerationError,
     Step4PostmanGenerator,
@@ -306,11 +308,12 @@ class TestBasicGeneration:
         _, item = _find(result["collection"], "TC-001")
         assert item["name"] == "TC-001"
 
-    def test_collection_declares_the_base_url_and_token_variables(self):
+    def test_collection_declares_only_the_token_variable(self):
+        """میزبان از Postman Environment می‌آید؛ میزبانِ Swagger در کالکشن نیست."""
         result = _generate()
         variables = {v["key"]: v["value"] for v in result["collection"]["variable"]}
-        assert variables["baseUrl"] == "https://admin.example.com/api"
-        assert variables["token"] == ""
+        assert variables == {"token": ""}
+        assert "admin.example.com" not in json.dumps(result["collection"])
 
     def test_module_pulls_in_no_llm_and_no_http_client(self):
         """قدم چهارم قطعی است: نه LLM، نه درخواستِ شبکه‌ای."""
@@ -434,9 +437,11 @@ class TestDataDependencies:
         collection = _generate()["collection"]
         _, item = _find(collection, "TC-003")
         request = item["request"]
-        assert request["url"]["path"] == ["admin", "voucher", "{{voucherId}}"]
+        assert request["url"]["path"] == ["api", "admin", "voucher", "{{voucherId}}"]
         assert "variable" not in request["url"]
-        assert request["url"]["raw"].startswith("{{baseUrl}}/admin/voucher/{{voucherId}}")
+        assert request["url"]["raw"].startswith(
+            "{{base_url}}/api/admin/voucher/{{voucherId}}"
+        )
         assert "dryRun={{voucherId}}" in request["url"]["raw"]
         assert _headers(item)["X-Voucher-Id"] == "{{voucherId}}"
         assert '"code": "{{voucherId}}"' in request["body"]["raw"]
@@ -477,7 +482,7 @@ class TestDataDependencies:
 
     def test_an_unknown_variable_is_not_accepted_silently(self):
         collection = {
-            "variable": [{"key": "baseUrl", "value": "https://x"}],
+            "variable": [{"key": "token", "value": ""}],
             "item": [
                 {
                     "name": "folder",
@@ -487,8 +492,8 @@ class TestDataDependencies:
                             "request": {
                                 "method": "GET",
                                 "url": {
-                                    "raw": "{{baseUrl}}/a/{{nobodySetsThis}}",
-                                    "host": ["{{baseUrl}}"],
+                                    "raw": "{{base_url}}/a/{{nobodySetsThis}}",
+                                    "host": ["{{base_url}}"],
                                 },
                             },
                         }
@@ -502,7 +507,7 @@ class TestDataDependencies:
 
     def test_an_extracted_variable_counts_as_available(self):
         collection = {
-            "variable": [{"key": "baseUrl", "value": "https://x"}],
+            "variable": [{"key": "token", "value": ""}],
             "item": [
                 {
                     "name": "folder",
@@ -512,8 +517,8 @@ class TestDataDependencies:
                             "request": {
                                 "method": "GET",
                                 "url": {
-                                    "raw": "{{baseUrl}}/a/{{voucherId}}",
-                                    "host": ["{{baseUrl}}"],
+                                    "raw": "{{base_url}}/a/{{voucherId}}",
+                                    "host": ["{{base_url}}"],
                                 },
                             },
                         }
@@ -928,15 +933,33 @@ class TestArtifactValidation:
 
     def test_a_duplicate_variable_is_reported(self):
         collection = _generate()["collection"]
-        collection["variable"].append({"key": "baseUrl", "value": "https://other"})
+        collection["variable"].append({"key": "token", "value": "other"})
         problems = validate_collection(collection)
         assert any("duplicate collection variable" in problem for problem in problems)
 
-    def test_a_missing_base_url_variable_is_reported(self):
+    @pytest.mark.parametrize("key", ["base_url", "base_url_vdi"])
+    def test_a_host_variable_in_the_collection_is_reported(self, key):
         collection = _generate()["collection"]
-        collection["variable"] = [{"key": "token", "value": ""}]
+        collection["variable"].append({"key": key, "value": "http://podium.example"})
         problems = validate_collection(collection)
-        assert any("baseUrl" in problem for problem in problems)
+        assert any("defines the host variable" in problem for problem in problems)
+
+    @pytest.mark.parametrize(
+        "host",
+        [["{{baseUrl}}"], ["http://podium-back.devpod.ir"], ["{{base_url}}", "x"]],
+    )
+    def test_a_host_outside_the_allow_list_is_reported(self, host):
+        collection = _generate()["collection"]
+        collection["item"][0]["item"][0]["request"]["url"]["host"] = host
+        problems = validate_collection(collection)
+        assert any("as its URL host" in problem for problem in problems)
+
+    def test_a_literal_host_in_the_raw_url_is_reported(self):
+        collection = _generate()["collection"]
+        url = collection["item"][0]["item"][0]["request"]["url"]
+        url["raw"] = "{{base_url}}http://podium-back.devpod.ir/api/admin/voucher"
+        problems = validate_collection(collection)
+        assert any("does not start with" in problem for problem in problems)
 
     def test_an_empty_collection_is_reported(self):
         collection = _generate()["collection"]
@@ -966,6 +989,8 @@ class TestArtifactValidation:
 # ── چند سرویس ───────────────────────────────────────────────────────────────
 
 class TestMultipleServices:
+    """هر درخواست میزبانِ تست‌کیسِ خودش و مسیرِ پایه‌ی سرورِ خودش را می‌گیرد."""
+
     def _with_report_service(self) -> dict:
         step2 = _step2_result()
         step2["mappings"][2]["api"] = {
@@ -975,56 +1000,51 @@ class TestMultipleServices:
         }
         return step2
 
-    def test_the_first_service_keeps_the_plain_base_url_variable(self):
+    def test_each_service_keeps_its_own_base_path(self):
         collection = _generate(step2=self._with_report_service())["collection"]
-        _, item = _find(collection, "TC-001")
-        assert item["request"]["url"]["host"] == ["{{baseUrl}}"]
+        _, admin = _find(collection, "TC-001")
+        _, report = _find(collection, "TC-003")
+        assert admin["request"]["url"]["raw"].startswith("{{base_url}}/api/admin/voucher")
+        assert report["request"]["url"]["raw"].startswith("{{base_url}}/report/voucher/")
 
-    def test_the_second_service_gets_its_own_variable(self):
+    def test_no_service_adds_a_collection_variable(self):
         collection = _generate(step2=self._with_report_service())["collection"]
-        _, item = _find(collection, "TC-003")
-        assert item["request"]["url"]["host"] == ["{{baseUrl_report}}"]
-        variables = {v["key"]: v["value"] for v in collection["variable"]}
-        assert variables["baseUrl_report"] == "https://report.example.com"
+        assert [v["key"] for v in collection["variable"]] == ["token"]
+        dumped = json.dumps(collection)
+        assert "report.example.com" not in dumped
+        assert "admin.example.com" not in dumped
 
-    def test_a_single_service_does_not_add_extra_variables(self):
-        collection = _generate()["collection"]
-        assert {v["key"] for v in collection["variable"]} == {"baseUrl", "token"}
-
-    def test_two_services_with_the_same_name_get_distinct_variables(self):
-        step2 = _step2_result()
-        step2["services"][1]["name"] = "Admin"
-        step2["mappings"][2]["api"] = {
-            "method": "GET",
-            "path": "/report/voucher/{id}",
-            "operation_id": "voucherReport",
-        }
-        step2["services"].append(
+    def test_services_use_the_host_selected_for_each_test_case(self):
+        step1 = _step1_result()
+        step1["environment_decisions"] = [
             {
-                "name": "Admin",
-                "base_url": "https://audit.example.com",
-                "authorization": None,
-                "apis": [
-                    {
-                        "method": "GET",
-                        "path": "/audit/voucher/{id}",
-                        "operation_id": "auditVoucher",
-                        "parameters": [],
-                        "request_body": None,
-                        "responses": {"200": {"fields": ["id"]}},
-                    }
-                ],
-                "unresolved": [],
+                "id": "ENV-1",
+                "status": "ACCEPTED",
+                "scope": "service",
+                "service": {"method": "GET", "path": "/report/voucher/{id}", "name": ""},
+                "test_case_ids": [],
+                "environment": "vdi",
             }
-        )
-        step2["mappings"][3]["api"] = {
-            "method": "GET",
-            "path": "/audit/voucher/{id}",
-            "operation_id": "auditVoucher",
-        }
+        ]
+        step2 = self._with_report_service()
+        step2["host_resolution"] = resolve_hosts(step1, step2["mappings"], step2["services"])
+
+        result = _generate(step1=step1, step2=step2)
+
+        _, admin = _find(result["collection"], "TC-001")
+        _, report = _find(result["collection"], "TC-003")
+        assert admin["request"]["url"]["host"] == ["{{base_url}}"]
+        assert report["request"]["url"]["host"] == ["{{base_url_vdi}}"]
+        rows = {row["test_case_id"]: row for row in result["requests"]}
+        assert rows["TC-003"]["host_variable"] == "base_url_vdi"
+        assert rows["TC-003"]["host_basis"] == "service"
+        assert rows["TC-001"]["host_basis"] == "default"
+
+    def test_two_services_with_the_same_name_need_no_renaming(self):
+        step2 = self._with_report_service()
+        step2["services"][1]["name"] = "Admin"
         result = _generate(step2=step2)
-        variables = {v["key"]: v["value"] for v in result["collection"]["variable"]}
-        assert variables["baseUrl"] == "https://admin.example.com/api"
-        assert variables["baseUrl_admin"] == "https://report.example.com"
-        assert variables["baseUrl_admin_2"] == "https://audit.example.com"
-        assert any("renamed" in warning for warning in result["warnings"])
+        assert not any("renamed" in warning for warning in result["warnings"])
+        assert [v["key"] for v in result["collection"]["variable"]] == ["token"]
+
+

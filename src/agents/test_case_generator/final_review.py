@@ -46,6 +46,17 @@ from typing import Any
 from typing_extensions import TypedDict
 
 from src.agents.test_case_generator.api_discovery import operation_key
+from src.agents.test_case_generator.host_selection import (
+    CAUSE_REJECTED,
+    CAUSE_UNMATCHED,
+    HOST_RESOLVED,
+    HostResolutionError,
+    base_path_of,
+    host_reference,
+    host_resolution_of,
+    selections_by_case,
+    strip_base_path,
+)
 from src.agents.test_case_generator.postman_generation import (
     PostmanGenerationError,
     check_dependency_wiring,
@@ -78,6 +89,7 @@ STATUS_BLOCKED = "blocked"
 
 _CLARIFICATION = "clarification"
 _UNRESOLVED_TEST_CASE = "unresolved_test_case"
+_ENVIRONMENT_REVIEW = "environment_review"
 
 #: قراردادِ نام‌گذاریِ درخواستِ قدم چهارم: «<case_id> — <title>»
 _SEPARATOR = " — "
@@ -117,6 +129,9 @@ class ReviewSection(TypedDict):
     issues: list[ReviewIssue]
     warnings: list[str]
     unresolved_clarifications: list[ReviewItem]
+    # یادداشت‌های اطلاعاتی (مثلاً «VDI ذکر شده ولی تصمیمی آن را پوشش نمی‌دهد») —
+    # نمایش داده می‌شوند ولی وضعیت را needs_review نمی‌کنند.
+    information: list[str]
 
 
 class ReviewMetrics(TypedDict):
@@ -278,6 +293,13 @@ class _GeneratedRequest:
     method: str
     path: str
     case_id: str
+    # «{{base_url}}» یا «{{base_url_vdi}}» — همان چیزی که در url.host آمده است.
+    host: str = ""
+
+
+def _request_host(url: Any) -> str:
+    host = url.get("host") if isinstance(url, dict) else None
+    return str(host[0]) if isinstance(host, list) and len(host) == 1 else ""
 
 
 def _generated_requests(
@@ -296,6 +318,7 @@ def _generated_requests(
                 method=_text(request.get("method")).upper(),
                 path=_request_path(request.get("url")),
                 case_id=_case_id_for(name, by_name, known),
+                host=_request_host(request.get("url")),
             )
         )
     return records
@@ -416,7 +439,10 @@ def _mapping_issues(
             continue
 
         expected = operation_key(_text(api.get("method")), _text(api.get("path")))
-        actual = operation_key(record.method, record.path)
+        # URLِ درخواست مسیرِ پایه‌ی سرورِ Swagger (مثلاً «/api») را هم دارد.
+        found = index.get(expected)
+        base_path = base_path_of(_text(found[0].get("base_url"))) if found else ""
+        actual = operation_key(record.method, strip_base_path(record.path, base_path))
         if expected != actual:
             issues.append(
                 _issue(
@@ -553,17 +579,99 @@ def _metadata_issues(
             )
 
         path = _text(row.get("path"))
-        if path and operation_key(method, path) != operation_key(method, record.path):
+        full_path = _text(row.get("base_path")) + path
+        if path and operation_key(method, full_path) != operation_key(method, record.path):
             issues.append(
                 _issue(
                     "inconsistent_step4",
                     4,
                     case_id,
-                    f"Request {name!r} is {path} in the Step 4 result but "
+                    f"Request {name!r} is {full_path} in the Step 4 result but "
                     f"{record.path} in the generated collection.",
                 )
             )
     return issues
+
+
+# ── قاعده‌ی ۶: میزبانِ هر درخواست همان انتخابِ ذخیره‌شده‌ی قدم ۲ ─────────────
+
+def _host_issues(
+    records: list[_GeneratedRequest], selections: dict[str, dict]
+) -> list[ReviewIssue]:
+    """میزبان دوباره تعیین نمی‌شود؛ فقط با انتخابِ ذخیره‌شده مقایسه می‌شود."""
+    issues: list[ReviewIssue] = []
+    for record in records:
+        if not record.case_id:
+            continue
+        selection = selections.get(record.case_id)
+        if selection is None:
+            issues.append(
+                _issue(
+                    "missing_host_selection",
+                    2,
+                    record.case_id,
+                    f"Test case {record.case_id!r} has a generated request but no host "
+                    f"selection in Step 2.",
+                )
+            )
+        elif selection.get("host_status") != HOST_RESOLVED:
+            issues.append(
+                _issue(
+                    "unresolved_host_request",
+                    4,
+                    record.case_id,
+                    f"Test case {record.case_id!r} has a generated request although its "
+                    f"host is {selection.get('host_status')} and must not run.",
+                )
+            )
+        elif record.host != host_reference(_text(selection.get("variable"))):
+            issues.append(
+                _issue(
+                    "host_mismatch",
+                    4,
+                    record.case_id,
+                    f"Request {record.name!r} uses {record.host or 'no host'}, but Step 2 "
+                    f"selected {host_reference(_text(selection.get('variable')))} for "
+                    f"{record.case_id!r}.",
+                )
+            )
+    return issues
+
+
+def _environment_items(host_resolution: dict) -> list[ReviewItem]:
+    """بازبینی‌های سطحِ issue که به یک تست‌کیسِ مشخص تعلق ندارند.
+
+    تست‌کیس‌های CONFLICT/NEEDS_REVIEW از قبل در unresolvedِ قدم ۴ هستند؛ این‌جا
+    فقط تصمیم‌های گره‌نخورده و ردشده‌ی بی‌دامنه می‌آیند.
+    """
+    reasons = (host_resolution.get("issue_review") or {}).get("reasons") or []
+    return [
+        ReviewItem(
+            kind=_ENVIRONMENT_REVIEW,
+            source_step=2,
+            test_case_id="",
+            message=_text(reason.get("message")),
+        )
+        for reason in reasons
+        if isinstance(reason, dict)
+        and reason.get("kind") in (CAUSE_UNMATCHED, CAUSE_REJECTED)
+        and _text(reason.get("message"))
+    ]
+
+
+def _environment_warnings(step1_result: Any) -> list[str]:
+    """یادداشت‌های اطلاعاتیِ مرحله‌ی A (ذکرِ VDIِ پوشش‌داده‌نشده، ارجاعِ اصلاح‌شده، …).
+
+    بازدارنده نیستند: هر چیزی که میزبان را تغییر دهد یا اجرا را متوقف کند (تعارض،
+    تصمیمِ ردشده یا گره‌نخورده) از انتخابِ میزبانِ قدم ۲ می‌آید، نه از این‌ها.
+    """
+    if not isinstance(step1_result, dict):
+        return []
+    return [
+        warning.strip()
+        for warning in step1_result.get("environment_warnings") or []
+        if isinstance(warning, str) and warning.strip()
+    ]
 
 
 # ── مواردِ بازِ بازبینی ─────────────────────────────────────────────────────
@@ -765,6 +873,7 @@ class FinalReviewGenerator:
             )
 
         warnings = _step4_warnings(metadata)
+        information = _environment_warnings(step1_result)
         if collection and metadata is None:
             warnings.append(
                 "Only the Postman collection was provided, without the Step 4 "
@@ -798,8 +907,15 @@ class FinalReviewGenerator:
             issues.extend(
                 _coverage_issues(test_cases, records, _reported_unresolved(metadata))
             )
+        host_resolution: dict = {}
         if step2_ok:
             issues.extend(_mapping_issues(records, mappings, services))
+            try:
+                host_resolution = host_resolution_of(step1_result, step2_result)
+            except HostResolutionError as exc:
+                issues.append(_issue("missing_host_selection", 2, "", str(exc)))
+            else:
+                issues.extend(_host_issues(records, selections_by_case(host_resolution)))
         if metadata is not None:
             issues.extend(_metadata_issues(metadata, records))
 
@@ -808,6 +924,7 @@ class FinalReviewGenerator:
             + _clarification_items(step2_result, 2)
             + _clarification_items(step3_result, 3)
             + _unresolved_items(metadata)
+            + _environment_items(host_resolution)
         )
 
         issues = _dedupe(issues)
@@ -841,6 +958,7 @@ class FinalReviewGenerator:
                 issues=issues,
                 warnings=warnings,
                 unresolved_clarifications=unresolved,
+                information=information,
             ),
             metrics=metrics,
             # کالکشن دقیقاً همان شیئی است که قدم چهارم ساخته — نه دوباره ساخته

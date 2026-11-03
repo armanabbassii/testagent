@@ -68,8 +68,12 @@ from src.agents.test_case_generator.swagger_analyzer import (
     filter_endpoints,
     strip_ui_fragment,
 )
+from src.agents.test_case_generator.host_selection import (
+    BASE_URL,
+    apply_host,
+    base_path_of,
+)
 from src.agents.test_case_generator.testcase_generator import (
-    DEFAULT_BASE_URL_VAR,
     ResolvedStep,
     TestCaseGenerationError,
     TestCaseGenerator,
@@ -106,18 +110,6 @@ def _safe_filename(title: str) -> str:
     """
     slug = _UNSAFE_FILENAME_RE.sub("_", (title or "").strip().lower()).strip("_")
     return slug or "api"
-
-
-def _base_url_var(source_name: str, single_source: bool) -> str:
-    """نامِ متغیرِ base URL برای یک منبعِ Swagger.
-
-    وقتی سناریو فقط یک منبع دارد، همان `baseUrl`ِ همیشگی استفاده می‌شود تا
-    کالکشن با حالتِ Swagger یکسان بماند. با چند منبع، هر سرویس متغیرِ خودش را
-    می‌گیرد (مثلاً baseUrl_admin).
-    """
-    if single_source:
-        return DEFAULT_BASE_URL_VAR
-    return f"{DEFAULT_BASE_URL_VAR}_{_safe_filename(source_name)}"
 
 
 class TestCaseGeneratorAgent(BaseAgent):
@@ -249,11 +241,14 @@ class TestCaseGeneratorAgent(BaseAgent):
         self._log.info("تولید تست‌کیس ساختاریافته کامل شد")
 
         # ── ۴. ساخت Postman Collection ──────────────────────────────────────────
+        # این مسیر توصیفِ تسکی ندارد که محیطی را صریحاً بخواهد، پس طبقِ قراردادِ
+        # مشترکِ host_selection همه‌ی درخواست‌ها {{base_url}} + مسیرِ پایه‌ی سرور
+        # را می‌گیرند؛ میزبانِ Swagger در کالکشن نوشته نمی‌شود.
+        apply_host(suite, BASE_URL, base_path_of(spec.base_url))
         self._log.info("شروع ساخت Postman Collection")
         try:
             collection = self._postman_builder.build(
                 suite=suite,
-                base_url=spec.base_url,
                 collection_name=f"{spec.title} API Tests",
             )
         except PostmanBuildError as exc:
@@ -340,13 +335,10 @@ class TestCaseGeneratorAgent(BaseAgent):
             )
 
         # ── ۵. ساخت Postman Collection ────────────────────────────────────────
-        base_url, extra_variables = self._collection_variables(scenario, specs)
         try:
             collection = self._postman_builder.build(
                 suite=suite,
-                base_url=base_url,
                 collection_name=scenario.name,
-                extra_variables=extra_variables,
             )
         except PostmanBuildError as exc:
             self._log.error("ساخت کالکشنِ سناریو شکست خورد", error=str(exc))
@@ -401,7 +393,6 @@ class TestCaseGeneratorAgent(BaseAgent):
 
         برمی‌گرداند: (قدم‌های resolve شده، پیام‌های خطا برای قدم‌های ناموفق)
         """
-        single_source = len(specs) == 1
         resolved: list[ResolvedStep] = []
         errors: list[str] = []
 
@@ -442,37 +433,14 @@ class TestCaseGeneratorAgent(BaseAgent):
                     endpoint=endpoint,
                     source_name=step.swagger,
                     base_url=spec.base_url,
-                    base_url_var=_base_url_var(step.swagger, single_source),
+                    # سناریو توصیفِ تسکی ندارد → میزبانِ پیش‌فرض؛ هر منبع مسیرِ پایه‌ی
+                    # سرورِ خودش را نگه می‌دارد.
+                    base_url_var=BASE_URL,
+                    base_path=base_path_of(spec.base_url),
                 )
             )
 
         return resolved, errors
-
-    @staticmethod
-    def _collection_variables(
-        scenario: Scenario, specs: dict[str, ApiSpec]
-    ) -> tuple[str, list[dict]]:
-        """(مقدارِ baseUrl، متغیرهای اضافیِ کالکشن) را برمی‌گرداند.
-
-        با یک منبع، فقط baseUrl تعریف می‌شود. با چند منبع، علاوه بر baseUrl (که
-        به منبعِ اول اشاره می‌کند) برای هر منبع یک متغیرِ اختصاصی ساخته می‌شود.
-        """
-        single_source = len(specs) == 1
-        first = scenario.swagger_sources[0].name if scenario.swagger_sources else ""
-        base_url = specs[first].base_url if first in specs else ""
-
-        if single_source:
-            return base_url, []
-
-        extras = [
-            {
-                "key": _base_url_var(source.name, single_source=False),
-                "value": (specs[source.name].base_url or "").rstrip("/"),
-            }
-            for source in scenario.swagger_sources
-            if source.name in specs
-        ]
-        return base_url, extras
 
     # ── کمکی‌ها ───────────────────────────────────────────────────────────────
 

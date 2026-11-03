@@ -46,7 +46,6 @@ def _suite(*cases: dict) -> dict:
 def _build(**kwargs) -> dict:
     params = {
         "suite": _suite(),
-        "base_url": "https://admin.example.com/api/",
         "collection_name": "Admin API Tests",
     }
     params.update(kwargs)
@@ -75,9 +74,10 @@ class TestCollectionShape:
     def test_collection_keeps_the_given_name(self):
         assert _build()["info"]["name"] == "Admin API Tests"
 
-    def test_base_url_has_its_trailing_slash_stripped(self):
-        variables = {v["key"]: v["value"] for v in _build()["variable"]}
-        assert variables["baseUrl"] == "https://admin.example.com/api"
+    def test_no_host_variable_is_declared_in_the_collection(self):
+        """میزبان فقط از Postman Environment می‌آید — کالکشن آن را تعریف نمی‌کند."""
+        keys = [v["key"] for v in _build()["variable"]]
+        assert keys == ["token"]
 
     def test_a_token_variable_is_declared_empty(self):
         variables = {v["key"]: v["value"] for v in _build()["variable"]}
@@ -107,13 +107,13 @@ class TestCollectionShape:
 class TestUrl:
     def test_the_host_is_the_base_url_variable(self):
         url = _item(_build())["request"]["url"]
-        assert url["host"] == ["{{baseUrl}}"]
+        assert url["host"] == ["{{base_url}}"]
 
     def test_path_placeholders_become_postman_path_variables(self):
         collection = _build(suite=_suite(_case(path_params={"id": "42"})))
         url = _item(collection)["request"]["url"]
         assert url["path"] == ["admin", "voucher", ":id"]
-        assert url["raw"].startswith("{{baseUrl}}/admin/voucher/:id")
+        assert url["raw"].startswith("{{base_url}}/admin/voucher/:id")
 
     def test_path_variable_values_come_from_path_params(self):
         collection = _build(suite=_suite(_case(path_params={"id": "42"})))
@@ -124,7 +124,7 @@ class TestUrl:
         """«{{voucherId}}» مستقیم در مسیر می‌نشیند — نه «:id» با جدولِ متغیر."""
         url = _item(_build())["request"]["url"]
         assert url["path"] == ["admin", "voucher", "{{voucherId}}"]
-        assert url["raw"].startswith("{{baseUrl}}/admin/voucher/{{voucherId}}")
+        assert url["raw"].startswith("{{base_url}}/admin/voucher/{{voucherId}}")
         assert ":id" not in url["raw"]
         assert "variable" not in url
 
@@ -143,9 +143,23 @@ class TestUrl:
         )
         assert "variable" not in _item(collection)["request"]["url"]
 
-    def test_a_custom_base_url_variable_is_used(self):
-        collection = _build(suite=_suite(_case(base_url_var="baseUrl_report")))
-        assert _item(collection)["request"]["url"]["host"] == ["{{baseUrl_report}}"]
+    def test_the_vdi_host_variable_is_used(self):
+        collection = _build(suite=_suite(_case(base_url_var="base_url_vdi")))
+        assert _item(collection)["request"]["url"]["host"] == ["{{base_url_vdi}}"]
+
+    def test_any_other_host_variable_is_rejected(self):
+        with pytest.raises(PostmanBuildError, match="host variable 'baseUrl_report'"):
+            _build(suite=_suite(_case(base_url_var="baseUrl_report")))
+
+    def test_the_base_path_comes_before_the_operation_path(self):
+        collection = _build(
+            suite=_suite(_case(base_path="/api", path_params={"id": "42"}))
+        )
+        url = _item(collection)["request"]["url"]
+        assert url["path"] == ["api", "admin", "voucher", ":id"]
+        assert url["raw"] == "{{base_url}}/api/admin/voucher/:id?dryRun=false"
+        assert url["variable"] == [{"key": "id", "value": "42"}]
+        assert "://" not in url["raw"]
 
     def test_the_method_is_uppercased(self):
         assert _item(_build())["request"]["method"] == "POST"
@@ -345,18 +359,21 @@ class TestExtraVariables:
         variables = {
             v["key"]: v["value"]
             for v in _build(
-                extra_variables=[{"key": "baseUrl_report", "value": "https://r.example"}]
+                extra_variables=[{"key": "reportId", "value": "7"}]
             )["variable"]
         }
-        assert variables["baseUrl_report"] == "https://r.example"
+        assert variables["reportId"] == "7"
 
     def test_a_reserved_key_is_not_redefined(self):
-        variables = _build(
-            extra_variables=[{"key": "baseUrl", "value": "https://evil.example"}]
-        )["variable"]
-        assert [v for v in variables if v["key"] == "baseUrl"][0]["value"] == (
-            "https://admin.example.com/api"
-        )
+        variables = _build(extra_variables=[{"key": "token", "value": "x"}])["variable"]
+        assert [v for v in variables if v["key"] == "token"] == [
+            {"key": "token", "value": ""}
+        ]
+
+    @pytest.mark.parametrize("key", ["base_url", "base_url_vdi"])
+    def test_a_host_variable_cannot_be_added_to_the_collection(self, key):
+        with pytest.raises(PostmanBuildError, match="must not define the host variable"):
+            _build(extra_variables=[{"key": key, "value": "http://podium.example"}])
 
     def test_duplicate_extra_keys_are_dropped(self):
         variables = _build(
@@ -372,10 +389,10 @@ class TestExtraVariables:
             v["key"]
             for v in _build(extra_variables=["nope", {"value": "no key"}])["variable"]
         ]
-        assert keys == ["baseUrl", "token"]
+        assert keys == ["token"]
 
     def test_missing_extra_variables_is_fine(self):
-        assert len(_build()["variable"]) == 2
+        assert len(_build()["variable"]) == 1
 
 
 # ── خطاها ────────────────────────────────────────────────────────────────────
@@ -389,9 +406,10 @@ class TestErrors:
         with pytest.raises(PostmanBuildError, match="no controllers"):
             _build(suite=[])
 
-    def test_an_empty_base_url_is_rejected(self):
-        with pytest.raises(PostmanBuildError, match="base_url is empty"):
-            _build(base_url="   ")
+    def test_a_base_url_argument_is_no_longer_accepted(self):
+        """میزبانِ Swagger دیگر به کالکشن راه ندارد."""
+        with pytest.raises(TypeError):
+            _build(base_url="https://admin.example.com/api")
 
     def test_a_case_without_a_method_is_rejected(self):
         with pytest.raises(PostmanBuildError, match="missing its HTTP 'method'"):

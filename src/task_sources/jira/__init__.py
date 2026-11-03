@@ -19,6 +19,7 @@ from src.task_sources.jira.errors import (
     JiraReferenceError,
     JiraResponseError,
     JiraServerError,
+    JiraWriteBlockedError,
 )
 from src.task_sources.jira.importer import JiraImport, import_issue
 from src.task_sources.jira.keys import parse_issue_reference
@@ -41,6 +42,7 @@ __all__ = [
     "JiraResponseError",
     "JiraServerError",
     "JiraSettings",
+    "JiraWriteBlockedError",
     "import_issue",
     "parse_issue_reference",
 ]

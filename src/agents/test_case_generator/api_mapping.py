@@ -24,7 +24,7 @@ from collections import Counter
 from pathlib import Path
 from typing import Any
 
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
 from src.agents.test_case_generator.api_discovery import (
     DiscoveredApi,
@@ -39,6 +39,7 @@ from src.agents.test_case_generator.api_relevance import (
     RelevanceSelection,
     select_candidates,
 )
+from src.agents.test_case_generator.host_selection import HOST_RESOLVED, resolve_hosts
 from src.agents.test_case_generator.json_output import (
     JsonExtractionError,
     extract_json_object,
@@ -129,6 +130,9 @@ class Step2Result(TypedDict):
     services: list[dict[str, Any]]
     mappings: list[ApiMapping]
     clarifications: list[str]
+    # انتخابِ قطعیِ میزبانِ هر تست‌کیس (host_selection.resolve_hosts) — قدم‌های
+    # ۴ و ۵ فقط همین را می‌خوانند و محیط را دوباره تعیین نمی‌کنند.
+    host_resolution: NotRequired[dict[str, Any]]
 
 
 class CompactMapping(TypedDict):
@@ -930,7 +934,21 @@ class Step2ApiMappingGenerator:
                 unmapped=sum(1 for mapping in mappings if mapping["api"] is None),
             )
 
-        return build_result(services, mappings, list(load_errors) + clarifications)
+        result = build_result(services, mappings, list(load_errors) + clarifications)
+        result["host_resolution"] = resolve_hosts(
+            step1_result, result["mappings"], result["services"]
+        )
+        review = result["host_resolution"]["issue_review"]
+        self._log.info(
+            "میزبانِ تست‌کیس‌ها تعیین شد",
+            issue_review=review["status"],
+            not_resolved=sum(
+                1
+                for item in result["host_resolution"]["selections"]
+                if item["host_status"] != HOST_RESOLVED
+            ),
+        )
+        return result
 
 
 __all__ = [

@@ -431,8 +431,8 @@ class TestCoverage:
                 "request": {
                     "method": "GET",
                     "url": {
-                        "raw": "{{baseUrl}}/admin/ghost",
-                        "host": ["{{baseUrl}}"],
+                        "raw": "{{base_url}}/admin/ghost",
+                        "host": ["{{base_url}}"],
                         "path": ["admin", "ghost"],
                     },
                 },
@@ -553,7 +553,7 @@ class TestCollectionValidation:
         step1, step2, step3 = _step1_result(), _step2_result(), _step3_result()
         step4 = _tampered(_build(step1, step2, step3))
         _find_request(step4["collection"], "TC-001")["request"]["url"]["raw"] = (
-            "{{baseUrl}}/admin/voucher?token={{mysteryToken}}"
+            "{{base_url}}/admin/voucher?token={{mysteryToken}}"
         )
 
         result = _review(step1, step2, step3, step4)

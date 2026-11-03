@@ -23,6 +23,10 @@ from __future__ import annotations
 import json
 import re
 
+from src.agents.test_case_generator.host_selection import (
+    HOST_VARIABLES,
+    host_reference,
+)
 from src.agents.test_case_generator.testcase_generator import (
     DEFAULT_BASE_URL_VAR,
     Assertion,
@@ -116,8 +120,7 @@ class PostmanBuilder:
 
     استفاده:
         builder = PostmanBuilder()
-        collection = builder.build(suite, base_url="https://api.example.com",
-                                   collection_name="Generated API Tests")
+        collection = builder.build(suite, collection_name="Generated API Tests")
     """
 
     name = "postman_builder"
@@ -130,7 +133,6 @@ class PostmanBuilder:
     def build(
         self,
         suite: TestCaseSuite,
-        base_url: str,
         collection_name: str = "Generated API Tests",
         extra_variables: list[dict] | None = None,
         description: str = "",
@@ -139,30 +141,25 @@ class PostmanBuilder:
 
         پارامترها:
             suite            : خروجیِ TestCaseGenerator
-            base_url         : base URLِ مشتق‌شده از Swagger (مقدارِ متغیر baseUrl)
             collection_name  : نامِ کالکشن
             extra_variables  : متغیرهای اضافیِ سطحِ کالکشن به شکلِ
-                               [{"key": ..., "value": ...}] — برای سناریوهایی که
-                               چند منبعِ Swagger (چند سرویس) دارند و هر کدام
-                               base URLِ خودشان را می‌خواهند. متغیرهایی که کلیدشان
-                               از قبل تعریف شده باشد نادیده گرفته می‌شوند.
+                               [{"key": ..., "value": ...}]. متغیرهایی که کلیدشان
+                               از قبل تعریف شده باشد نادیده گرفته می‌شوند؛ متغیرِ
+                               میزبان (base_url/base_url_vdi) مجاز نیست.
+
+        میزبانِ هر درخواست {{base_url}} یا {{base_url_vdi}} است و مقدارش فقط از
+        Postman Environment می‌آید؛ کالکشن هیچ متغیرِ میزبانی تعریف نمی‌کند.
             description      : توضیحاتِ سطحِ کالکشن (info.description). خالی باشد،
                                اصلاً اضافه نمی‌شود تا خروجیِ قبلی یکسان بماند.
 
         پرتاب می‌کند:
-            PostmanBuildError : suite بدونِ controller، base_url خالی، یا یک
-                                تست‌کیس فاقدِ method/path باشد.
+            PostmanBuildError : suite بدونِ controller، متغیرِ میزبانِ غیرمجاز، یا
+                                یک تست‌کیس فاقدِ method/path باشد.
         """
         controllers = suite.get("controllers") if isinstance(suite, dict) else None
         if not isinstance(controllers, list) or not controllers:
             raise PostmanBuildError(
                 "suite has no controllers — nothing to build a Postman collection from."
-            )
-
-        base_url = (base_url or "").strip()
-        if not base_url:
-            raise PostmanBuildError(
-                "base_url is empty — the collection needs a baseUrl value."
             )
 
         self._log.info(
@@ -173,10 +170,7 @@ class PostmanBuilder:
 
         items = [self._build_folder(controller) for controller in controllers]
 
-        variables = [
-            {"key": _BASE_URL_VAR, "value": base_url.rstrip("/")},
-            {"key": _TOKEN_VAR, "value": ""},
-        ]
+        variables = [{"key": _TOKEN_VAR, "value": ""}]
         variables.extend(self._extra_variables(extra_variables, variables))
 
         info: dict = {
@@ -211,6 +205,11 @@ class PostmanBuilder:
             if not isinstance(variable, dict):
                 continue
             key = str(variable.get("key") or "").strip()
+            if key in HOST_VARIABLES:
+                raise PostmanBuildError(
+                    f"the collection must not define the host variable {key!r} — "
+                    "its value comes from the Postman environment."
+                )
             if not key or key in seen:
                 continue
             seen.add(key)
@@ -258,6 +257,14 @@ class PostmanBuilder:
         body = case.get("body")
         has_body = isinstance(body, dict)
 
+        host_var = str(case.get("base_url_var") or _BASE_URL_VAR)
+        if host_var not in HOST_VARIABLES:
+            raise PostmanBuildError(
+                f"test case '{name}' uses the host variable {host_var!r}; only "
+                + " and ".join(repr(item) for item in HOST_VARIABLES)
+                + " are allowed."
+            )
+
         request: dict = {
             "method": method.upper(),
             "header": self._build_headers(case.get("headers") or {}, has_body),
@@ -265,7 +272,8 @@ class PostmanBuilder:
                 path,
                 case.get("path_params") or {},
                 case.get("query_params") or {},
-                str(case.get("base_url_var") or _BASE_URL_VAR),
+                host_var,
+                str(case.get("base_path") or ""),
             ),
         }
 
@@ -326,8 +334,9 @@ class PostmanBuilder:
         path_params: dict,
         query_params: dict,
         base_url_var: str = _BASE_URL_VAR,
+        base_path: str = "",
     ) -> dict:
-        """path را به آبجکتِ URLِ Postman (با {{baseUrl}}) تبدیل می‌کند.
+        """path را به آبجکتِ URLِ Postman (با {{base_url}}) تبدیل می‌کند.
 
         پارامترهای مسیر به شکلِ {name} به «:name» تبدیل می‌شوند و مقدارشان از
         path_params برداشته می‌شود. query_params به entryهای query نگاشت می‌شود؛
@@ -338,8 +347,9 @@ class PostmanBuilder:
         در مسیر می‌نشیند — «/voucher/{{voucherId}}» به‌جای «/voucher/:id». این‌طور
         مصرفِ متغیر در خودِ URL دیده می‌شود و به جدولِ path variables وابسته نیست.
 
-        base_url_var نامِ متغیرِ base URLِ این درخواست است؛ وقتی یک سناریو چند
-        منبعِ Swagger دارد، هر قدم می‌تواند میزبانِ خودش را داشته باشد.
+        base_url_var متغیرِ میزبانِ این درخواست است (base_url یا base_url_vdi) و
+        base_path مسیرِ پایه‌ی سرورِ Swagger (مثلاً «/api») که پیش از مسیرِ عملیات
+        در URL می‌نشیند: {{base_url}}/api/admin/… — میزبانِ واقعی هرگز.
         """
         inlined: set[str] = set()
 
@@ -353,7 +363,8 @@ class PostmanBuilder:
 
         colon_path = _PATH_VAR_RE.sub(segment_for, path)
 
-        segments = [seg for seg in colon_path.split("/") if seg != ""]
+        segments = [seg for seg in base_path.split("/") if seg != ""]
+        segments += [seg for seg in colon_path.split("/") if seg != ""]
 
         query = [
             {"key": str(key), "value": self._stringify(value)}
@@ -370,7 +381,7 @@ class PostmanBuilder:
                 {"key": var_name, "value": self._stringify(path_params.get(var_name, ""))}
             )
 
-        host_var = "{{" + (base_url_var or _BASE_URL_VAR) + "}}"
+        host_var = host_reference(base_url_var or _BASE_URL_VAR)
         raw = host_var
         if segments:
             raw += "/" + "/".join(segments)

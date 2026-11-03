@@ -20,6 +20,7 @@ from src.task_sources.jira import (
     JiraRateLimitError,
     JiraResponseError,
     JiraServerError,
+    JiraWriteBlockedError,
 )
 from tests.unit.task_sources.fake_jira import (
     ASSERTION,
@@ -368,3 +369,34 @@ class TestAttachments:
     def test_a_missing_file_is_an_error(self, server):
         with pytest.raises(JiraNotFoundError):
             _client(server).download(f"{JIRA}/secure/attachment/9/gone.txt", 100)
+
+
+class TestReadOnly:
+    """هیچ درخواستی جز GET به Jira نمی‌رسد — نه کامنت، نه پیوست، نه transition."""
+
+    @pytest.mark.parametrize("method", ["POST", "PUT", "DELETE", "PATCH", "post"])
+    def test_a_write_is_refused_before_anything_is_sent(self, server, method):
+        client = _client(server)
+
+        with pytest.raises(JiraWriteBlockedError, match="read-only"):
+            client._request(method, "/rest/api/2/issue/DEMO-7/comment", json={"body": "x"})
+
+        assert server.calls == []
+        assert server.sign_ins == 0
+
+    def test_a_write_is_refused_on_an_open_session_too(self, server):
+        client = _client(server)
+        client.authenticate()
+        before = len(server.calls)
+
+        with pytest.raises(JiraWriteBlockedError):
+            client._request("POST", "/rest/api/2/issue/DEMO-7/attachments")
+
+        assert len(server.calls) == before
+
+    def test_reads_still_work_and_use_only_get(self, server):
+        client = _client(server)
+
+        assert client.get_json("/rest/api/2/issue/DEMO-7")["key"] == "DEMO-7"
+        rest_calls = [call for call in server.calls_to("jira.test") if "/rest/" in call.url]
+        assert {call.method for call in rest_calls} == {"GET"}

@@ -1,5 +1,5 @@
 """
-ui/app.py — ویزاردِ یک‌صفحه‌ایِ جریانِ test_case_generator
+ui/app.py — ویزاردِ یک‌صفحه‌ایِ جریانِ test_case_generator (+ ناوبری به Batch Testing)
 
     uv run --group ui streamlit run ui/app.py
 
@@ -35,6 +35,7 @@ import streamlit as st  # noqa: E402
 
 from src.agents.test_case_generator.source_selection import SourceSelection  # noqa: E402
 from ui import (  # noqa: E402
+    batch_app,
     step1_task_analysis,
     step2_api_mapping,
     step3_scenario_analysis,
@@ -413,13 +414,8 @@ def _render_header(state: WorkflowState) -> None:
     )
 
 
-def main() -> None:
-    st.set_page_config(
-        page_title="Test case generator",
-        page_icon=":material/route:",
-        layout="wide",
-    )
-
+def single_issue_page() -> None:
+    """ویزاردِ تک‌issue — همان رفتارِ قبلی، حالا یکی از دو صفحه‌ی ناوبری."""
     apply_execution_button_styles(STEP_COUNT)
     state = get_state()
 
@@ -434,6 +430,33 @@ def main() -> None:
     _render_step(state)
     _render_footer(state)
     _render_sidebar(state)
+
+
+def main() -> None:
+    st.set_page_config(
+        page_title="Test case generator",
+        page_icon=":material/route:",
+        layout="wide",
+    )
+    # دو جریانِ جدا: ویزاردِ تک‌issue (پیش‌فرض) و Batch Testing (ui/batch_app.py)
+    page = st.navigation(
+        [
+            st.Page(
+                single_issue_page,
+                title="Single issue",
+                icon=":material/route:",
+                url_path="single-issue",
+                default=True,
+            ),
+            st.Page(
+                batch_app.render,
+                title="Batch testing",
+                icon=":material/playlist_play:",
+                url_path="batch-testing",
+            ),
+        ]
+    )
+    page.run()
 
 
 if __name__ == "__main__":

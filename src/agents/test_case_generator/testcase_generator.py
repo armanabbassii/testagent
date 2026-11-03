@@ -25,6 +25,7 @@ from pathlib import Path
 
 from typing_extensions import NotRequired, TypedDict
 
+from src.agents.test_case_generator.host_selection import BASE_URL
 from src.agents.test_case_generator.json_output import (
     JsonExtractionError,
     extract_json_object,
@@ -47,8 +48,9 @@ _AUTH_VALUE = "Bearer {{token}}"
 
 _VALID_TYPES = ("positive", "negative")
 
-# نامِ پیش‌فرضِ متغیرِ base URL در کالکشن — postman_builder همین را استفاده می‌کند
-DEFAULT_BASE_URL_VAR = "baseUrl"
+# متغیرِ میزبانِ پیش‌فرض ({{base_url}}) — قراردادِ مشترکِ host_selection؛ مقدارش
+# از Postman Environment می‌آید و در کالکشن تعریف نمی‌شود.
+DEFAULT_BASE_URL_VAR = BASE_URL
 
 # قرارداد خروجی — چون system.md و rules.md فرمت JSON را توصیف نمی‌کنند،
 # این بخش به system prompt اضافه می‌شود.
@@ -151,9 +153,10 @@ class TestCase(TypedDict):
     assertions: list[Assertion]
     save_variables: list[SaveVariable]
     assumptions: list[str]
-    # نامِ متغیرِ base URL برای این درخواست — وقتی یک سناریو چند منبعِ Swagger
-    # (چند سرویس) دارد، هر قدم می‌تواند میزبانِ خودش را داشته باشد.
+    # متغیرِ میزبانِ این درخواست: base_url یا base_url_vdi (host_selection).
     base_url_var: NotRequired[str]
+    # مسیرِ پایه‌ی سرورِ Swagger (مثلاً «/api») که پیش از مسیرِ عملیات در URL می‌آید.
+    base_path: NotRequired[str]
     # متغیرهایی که باید پیش از ارسال ست شده باشند؛ PostmanBuilder برایشان یک
     # pre-request guard می‌سازد تا درخواست با مقدارِ خالی/کهنه فرستاده نشود.
     required_variables: NotRequired[list[RequiredVariable]]
@@ -479,6 +482,7 @@ class ResolvedStep:
     source_name: str
     base_url: str
     base_url_var: str = DEFAULT_BASE_URL_VAR
+    base_path: str = ""
 
 
 @dataclass
@@ -669,6 +673,7 @@ def _build_positive_case(resolved: ResolvedStep, base: _StepRequest) -> TestCase
         save_variables=save_variables,
         assumptions=assumptions,
         base_url_var=resolved.base_url_var,
+        base_path=resolved.base_path,
     )
 
 
@@ -904,6 +909,7 @@ def _build_negative_case(
         save_variables=[],
         assumptions=assumptions,
         base_url_var=resolved.base_url_var,
+        base_path=resolved.base_path,
     )
 
 

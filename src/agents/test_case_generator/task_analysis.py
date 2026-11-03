@@ -28,12 +28,17 @@ from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
-from typing_extensions import TypedDict
+from typing import Any
+
+from typing_extensions import NotRequired, TypedDict
 
 from src.agents.test_case_generator.auth_intent import (
     DEFAULT_AUTH_INTENT,
     AuthIntentError,
     normalize_auth_intent,
+)
+from src.agents.test_case_generator.environment_decisions import (
+    extract_environment_decisions,
 )
 from src.agents.test_case_generator.json_output import (
     JsonExtractionError,
@@ -46,6 +51,7 @@ from src.agents.test_case_generator.variable_dependencies import (
 from src.config import LLM_MAX_OUTPUT_TOKENS
 from src.debug import DebugConfig
 from src.llm_client import LLMClient, truncation_message
+from src.task_sources.sources import TaskSource, sources_from_text
 
 _PROMPT_PATH = Path(__file__).parent / "prompts" / "step1_task_analysis.md"
 
@@ -231,6 +237,12 @@ class TaskAnalysisResult(TypedDict):
     # این‌جا به بعد داده‌ی ساختاریافته است، نه متن. نتیجه‌ی قدیمیِ بدونِ این
     # فیلد یعنی «هیچ متغیری خواسته نشده».
     variables: list[RequestedVariable]
+    # تصمیم‌های محیطِ سنجیده‌شده (environment_decisions.py) — نتیجه‌ی قدیمیِ
+    # بدونِ این فیلدها یعنی «هیچ تصمیمی»، پس همه‌ی تست‌کیس‌ها base_url می‌گیرند.
+    environment_decisions: NotRequired[list[dict]]
+    rejected_environment_decisions: NotRequired[list[dict]]
+    environment_sources: NotRequired[list[dict]]
+    environment_warnings: NotRequired[list[str]]
 
 
 class PlannedTestCase(TypedDict):
@@ -259,6 +271,8 @@ class TaskAnalysisPlan(TypedDict):
     clarifications: list[str]
     # در برنامه می‌آید چون شناسه‌ی تست‌کیس‌ها همین‌جا قطعی می‌شود.
     variables: list[RequestedVariable]
+    # خروجیِ خامِ مدل برای تصمیم‌های محیط — بعد از ساختِ نتیجه سنجیده می‌شود.
+    environment_decisions: NotRequired[Any]
 
 
 class TestCaseDetails(TypedDict):
@@ -1027,8 +1041,13 @@ class TaskAnalysisGenerator:
         task_description: str,
         user_id: str,
         developed_services: str = "",
+        sources: tuple[TaskSource, ...] | None = None,
     ) -> TaskAnalysisResult:
         """تست‌کیس‌ها را از توصیفِ تسک تولید می‌کند.
+
+        ``sources`` منابعی است که شاهدِ تصمیم‌های محیط در آن‌ها سنجیده می‌شود
+        (Description/Comments/پیوست‌های Jira)؛ None یعنی یک منبعِ description با
+        همین متن. پرامپت از آن ساخته نمی‌شود — مدل همان task_description را می‌بیند.
 
         پرتاب می‌کند:
             ValueError           : توصیفِ تسک خالی باشد
@@ -1066,7 +1085,7 @@ class TaskAnalysisGenerator:
                 finish_reason="length",
                 batch_size=self._batch_size,
             )
-            result = self._generate_staged(
+            result, raw_decisions = self._generate_staged(
                 llm,
                 task_description,
                 developed_services,
@@ -1078,10 +1097,17 @@ class TaskAnalysisGenerator:
                 ),
             )
         else:
-            result = self._analyze_single_call(
+            result, raw_decisions = self._analyze_single_call(
                 llm, raw, task_description, developed_services
             )
 
+        result.update(
+            extract_environment_decisions(
+                raw_decisions,
+                sources if sources is not None else sources_from_text(task_description),
+                [case["id"] for case in result["test_cases"]],
+            )
+        )
         self._log_result(result)
         return result
 
@@ -1091,8 +1117,10 @@ class TaskAnalysisGenerator:
         raw: str,
         task_description: str,
         developed_services: str,
-    ) -> TaskAnalysisResult:
+    ) -> tuple[TaskAnalysisResult, Any]:
         """پاسخِ کاملِ مسیرِ یک‌فراخوانی را اعتبارسنجی می‌کند.
+
+        خروجی: (نتیجه، environment_decisionsِ خامِ همان پاسخی که پذیرفته شد).
 
         اگر پاسخ JSONِ کامل باشد ولی هیچ تست‌کیسی نداشته باشد، «نتیجه‌ی خالی»
         پذیرفته نمی‌شود؛ به‌جای آن همان تولیدِ مرحله‌ای اجرا می‌شود که برای
@@ -1121,7 +1149,7 @@ class TaskAnalysisGenerator:
                 _EMPTY_SINGLE_RESPONSE,
                 single_call=attempt,
             )
-        return validate_analysis(data)
+        return validate_analysis(data), data.get("environment_decisions")
 
     def _chat(self, llm: LLMClient, system_prompt: str, user_message: str) -> str:
         """همه‌ی فراخوانی‌ها همان temperature و سقفِ توکن را می‌گیرند."""
@@ -1139,7 +1167,7 @@ class TaskAnalysisGenerator:
         developed_services: str,
         fallback_reason: str,
         single_call: GenerationAttempt | None = None,
-    ) -> TaskAnalysisResult:
+    ) -> tuple[TaskAnalysisResult, Any]:
         """برنامه‌ی فشرده می‌سازد و جزئیات را دسته‌به‌دسته گسترش می‌دهد.
 
         ``single_call`` می‌گوید پاسخِ یک‌فراخوانی چرا کنار گذاشته شد — فقط برای
@@ -1149,7 +1177,7 @@ class TaskAnalysisGenerator:
             llm, task_description, developed_services, fallback_reason, single_call
         )
         details = self._expand_all(llm, task_description, plan["test_cases"])
-        return _assemble_result(plan, details)
+        return _assemble_result(plan, details), plan.get("environment_decisions")
 
     def _plan(
         self,
@@ -1180,7 +1208,9 @@ class TaskAnalysisGenerator:
         except JsonExtractionError as exc:
             raise TaskAnalysisError(str(exc)) from exc
         if not _has_no_test_cases(data):
-            return validate_plan(data)
+            plan = validate_plan(data)
+            plan["environment_decisions"] = data.get("environment_decisions")
+            return plan
 
         # هیچ مرحله‌ای تست‌کیس نساخت: همان اعتبارسنجی خطا می‌دهد؛ پیامش فقط با
         # تشخیصِ مرحله‌ها کامل می‌شود و خطای اصلی به‌عنوانِ علت حفظ می‌شود.

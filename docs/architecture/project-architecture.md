@@ -18,6 +18,7 @@
 | کاربرد | ورودی | خروجی | نقطه‌ی ورود |
 |--------|-------|-------|-------------|
 | **تولیدِ تست‌کیس و Postman (ویزاردِ HITL)** | توصیفِ تسک + snapshotِ Swagger | Postman Collection v2.1 | `ui/app.py` (Streamlit) |
+| **Batch Testing** | issueهای واجدِ شرایطِ یک بُردِ Jira | برای هر issue: همان پنج قدم + اجرای Newman، با تاریخچه و artifact | صفحه‌ی «Batch testing» در `ui/app.py` — [batch-testing.md](batch-testing.md) |
 | تولیدِ تست‌کیس از Swagger/سناریوی YAML (جریانِ قدیمی) | URLِ Swagger یا فایلِ YAML در پیامِ کاربر | فایلِ `*.postman_collection.json` | `TestCaseGeneratorAgent` در `src/agents/graph.py` |
 
 اصلِ معماریِ مشترک: **LLM فقط «معنا» را تفسیر می‌کند و پایتون همه‌چیز را
@@ -36,7 +37,8 @@ ui/                             # ویزاردِ Streamlit جریانِ test_cas
 ├── workflow.py                 # WorkflowState: قفل، تأیید/پذیرشِ خودکار، کهنه‌شدن، مصرفِ توکن
 ├── pipeline.py                 # execute_step + run_all (بدونِ Streamlit) — تنها محلِ صدا زدنِ Generatorها
 ├── step1_… step5_….py          # صفحه‌ی نازکِ هر قدم: render_step + _run (spinner دورِ pipeline)
-├── formatting.py / components.py
+├── formatting.py / components.py / environment_view.py
+├── batch_app.py                # صفحه‌ی «Batch testing» در ناوبریِ app.py (batch-testing.md)
 src/
 ├── config.py                   # خواندنِ .env (LLM_*, EMBEDDING_*, LLM_MAX_OUTPUT_TOKENS, …)
 ├── llm_client.py               # LLMClient + LLMResponse (finish_reason، usage)
@@ -46,7 +48,9 @@ src/
 ├── observability/              # Langfuse (اختیاری)
 ├── task_sources/               # ورودیِ تسک از بیرون → TaskInputِ مستقل از منبع (قدم ۱)
 │   ├── task_input.py / attachments.py / text.py
-│   └── jira/                   # ورودِ ADFS SAML/PAT، REST v2، wiki markup (jira-integration.md)
+│   └── jira/                   # ورودِ ADFS SAML/PAT، REST v2، wiki markup، agile.py (بُرد/ستون/اسپرینت) — jira-integration.md
+├── batch_testing/              # کشفِ issueهای بُرد، SQLite، runner، اجرای هر issue، artifactها (batch-testing.md)
+├── test_execution/newman/      # موتورِ اجرای Newman: preflight، پروسه، پاک‌سازی، طبقه‌بندی (batch-testing.md)
 ├── agents/
 │   ├── graph.py                # گرافِ LangGraphِ عمومی (router → …, test_case_generator)
 │   └── test_case_generator/    # ← موضوعِ اصلیِ این سند
@@ -70,7 +74,10 @@ src/
 data/swagger/                   # snapshotهای محلیِ Swagger (admin.json، customer.json؛ crm/provider/site با Update)
 tests/unit/test_case_generator/ # تست‌های واحدِ همه‌ی قدم‌ها
 tests/unit/task_sources/        # Jira و ADFSِ ساختگی، پیوست‌ها، TaskInput
-tests/unit/ui/                  # تست‌های workflow، pipeline/Run All، formatting و AppTestِ ویزارد
+tests/unit/ui/                  # تست‌های workflow، pipeline/Run All، formatting و AppTestِ ویزارد و صفحه‌ی Batch
+tests/unit/batch_testing/       # کشف، SQLite، runner، بازیابی، اجرای issue، artifactها، سرویس
+tests/unit/test_execution/      # موتورِ Newman (ساختگی + اجرای واقعی روی سرورِ محلی)
+data/batch_testing/, artifacts/batch_testing/   # پایگاه و artifactهای Batch (محلی؛ در .gitignore)
 ```
 
 ---
@@ -163,6 +170,44 @@ flowchart TD
 | اعتبارسنجی | `validate_mapping_payload`: هر تست‌کیس دقیقاً یک نگاشت؛ هر `api` باید با `operation_key` یا operationIdِ یکتا به یک عملیاتِ کشف‌شده resolve شود |
 | retry | دسته‌های `DEFAULT_MAPPING_BATCH_SIZE=10`؛ JSONِ نامعتبر یک بار (`MALFORMED_JSON_RETRIES`) دوباره؛ بریدگی دوباره تلاش نمی‌شود؛ اگر فیلترِ ارتباط چیزی کم کرده باشد، تست‌کیس‌های حل‌نشده یک بار در برابرِ کاتالوگِ کامل دوباره بررسی می‌شوند |
 | خطا | `ValueError`، `ApiMappingError`؛ خطای بارگذاریِ یک منبع جمع می‌شود و به `clarifications` می‌رود |
+| انتخابِ میزبان | پایانِ قدم ۲، قطعی: `host_selection.resolve_hosts` → `Step2Result.host_resolution` (یک انتخاب برای هر تست‌کیس + `issue_review`). جزئیات: «انتخابِ میزبانِ هر تست‌کیس» در پایینِ همین بخش |
+
+#### انتخابِ میزبانِ هر تست‌کیس (`environment_decisions.py` → `host_selection.py`)
+
+URLِ هر درخواست `{{base_url}}` یا `{{base_url_vdi}}` + مسیرِ پایه‌ی Swagger + مسیرِ
+عملیات است؛ مقدارِ دو متغیر فقط از Postman Environment می‌آید و کالکشن هیچ‌کدام
+را تعریف نمی‌کند (ویزارد، Batch و `agent.py` همین قرارداد را دارند).
+
+1. **مرحله‌ی A (قدم ۱):** مدل فقط جمله‌های صریحِ «این سرویس / کلِ تسک در VDI یا
+   محیطِ عادی اجرا شود» را با منبعشان (Description، یک Comment، متنِ یک پیوست)
+   گزارش می‌کند. `environment_decisions.py` هر تصمیم را جدا می‌سنجد: شاهد باید
+   عیناً (پس از نرمال‌سازیِ v2) در همان منبع باشد و شاهدِ ذخیره‌شده برشِ دقیقِ متنِ
+   منبع است. نرمال‌سازیِ v2: NFKC، ي/ك → ی/ک، حذفِ کشیده و نشانه‌های نامرئیِ جهت،
+   یکی‌کردنِ فاصله‌ها، و برابریِ فاصله / نیم‌فاصله / چسبیده فقط میانِ حروفِ فارسی و
+   در مرزِ پیشوندِ «می/نمی» یا پسوندِ «ها/های/…/تر/ترین» (`تست ها` = `تست‌ها` =
+   `تستها`). حروفِ لاتین به بزرگی/کوچکی حساس‌اند (`vdi` ≠ `VDI`) و املا نرمال
+   نمی‌شود (`ادرس` ≠ `آدرس`). برشی که دوباره به همان شاهد نرمال نشود رد می‌شود.
+   نتیجه‌های ذخیره‌شده با `normalization: "v1"` معتبر می‌مانند. تصمیمِ نامعتبر قدم ۱ را نمی‌شکند و
+   با دلیل در `rejected_environment_decisions` می‌ماند.
+2. **مرحله‌ی B (پایانِ قدم ۲):** برای هر تست‌کیس دقیقاً یک انتخاب ذخیره می‌شود و
+   قدم‌های بعد آن را فقط می‌خوانند:
+
+| حالت | نتیجه |
+|---|---|
+| هیچ تصمیمِ مرتبطی نیست | `RESOLVED`، `base_url` (`basis=default`) |
+| تصمیمِ سرویس و تصمیمِ کلِ تسک | تصمیمِ سرویس مقدم است (`RESOLVED`) |
+| دو محیطِ متفاوت در یک سطح | `CONFLICT` |
+| تصمیمِ ردشده‌ای که می‌توانست میزبان را عوض کند | `NEEDS_REVIEW` (هرگز بازگشتِ بی‌صدا به `base_url`) |
+| تصمیمِ سرویسی که به هیچ تست‌کیسی گره نخورد | `UNMATCHED`: به هیچ تست‌کیسی داده نمی‌شود؛ فقط بازبینیِ سطحِ issue |
+
+3. **قدم ۴** فقط برای تست‌کیسِ `RESOLVED` درخواست می‌سازد؛ `CONFLICT` و
+   `NEEDS_REVIEW` با `host_status` و دلیل در `unresolved` می‌آیند و بقیه‌ی کالکشن
+   ساخته می‌شود.
+4. **قدم ۵** میزبان را دوباره تعیین نمی‌کند: درخواستی بدونِ انتخابِ قدم ۲
+   (`missing_host_selection`)، درخواستی برای تست‌کیسِ غیرِ `RESOLVED`
+   (`unresolved_host_request`) یا میزبانی جز انتخابِ ذخیره‌شده (`host_mismatch`)
+   بازبینی را `blocked` می‌کند. تصمیم‌های `UNMATCHED`/ردشده‌ی بی‌دامنه فقط موردِ
+   بازبینی‌اند (`needs_review`).
 
 ### قدم ۳ — Scenario & Dependency Analysis
 
@@ -253,11 +298,11 @@ flowchart TD
 | بخش | منبع |
 |-----|------|
 | `method` / `path` | عملیاتِ کشف‌شده در قدم ۲ |
-| URL | `{{baseUrl}}` (یا `{{baseUrl_<service>}}` برای سرویس‌های بعدی) + مسیر با `:param`؛ پارامترِ مسیری که مقدارش یک متغیرِ وابستگی است مستقیم در مسیر می‌نشیند (`/voucher/{{voucherId}}`)؛ query از ارجاع‌های وابستگیِ قدم ۳ |
+| URL | `{{base_url}}` یا `{{base_url_vdi}}` (انتخابِ ذخیره‌شده‌ی قدم ۲ برای همان تست‌کیس) + مسیرِ پایه‌ی سرورِ Swagger (`/api`) + مسیر با `:param`؛ پارامترِ مسیری که مقدارش یک متغیرِ وابستگی است مستقیم در مسیر می‌نشیند (`/voucher/{{voucherId}}`)؛ query از ارجاع‌های وابستگیِ قدم ۳ |
 | `header` | `PostmanBuilder._build_headers(case["headers"], has_body)` |
 | `body` | `request_body`ِ سند + فیلدهای مقصدِ وابستگی؛ mode `raw` / JSON |
 | `event` | `test`: assertionِ کدِ وضعیت (فقط وقتی یک کدِ موفقِ یکتا مستند باشد) + اسکریپتِ استخراجِ محافظت‌شده‌ی متغیر؛ `prerequest`: guardِ مصرف‌کننده (بخشِ K) |
-| متغیرهای کالکشن | `baseUrl`، `token` (خالی)، و `baseUrl_<service>` |
+| متغیرهای کالکشن | فقط `token` (خالی). متغیرهای میزبان در کالکشن تعریف نمی‌شوند؛ مقدارشان از Postman Environment می‌آید (`dev`: `base_url`، `base_url_vdi`) |
 
 **احراز هویت:** `PostmanBuilder._build_headers` روی **هر** درخواست دقیقاً یک
 `{"key": "Authorization", "value": "{{token}}", "type": "text"}` می‌گذارد —
@@ -492,3 +537,11 @@ pm.test("Response provides result.body.id and saves it as global variable 'vouch
 LLM → قدم ۴ → قدم ۵ → JSONِ صادرشده) را می‌سنجد و اسکریپت‌های تولیدشده را با
 Node و یک شبیه‌سازِ کوچکِ `pm` واقعاً اجرا می‌کند (بدونِ Node همان تست‌ها skip
 می‌شوند).
+
+## L. Batch Testing
+
+صفحه‌ی «Batch testing» (`ui/batch_app.py`) issueهای واجدِ شرایطِ یک بُردِ Jira را
+یکی‌یکی از همین پنج قدم (`run_all`) و سپس Newman می‌گذراند. همه‌چیز — شرایطِ
+واجدِ شرایط بودن، وضعیت‌ها، کنترل‌ها، بازیابی، فرضِ «یک پروسه‌ی سرور»، Newman،
+artifactها و محدودیت‌ها — در [batch-testing.md](batch-testing.md) است و این‌جا
+تکرار نمی‌شود.

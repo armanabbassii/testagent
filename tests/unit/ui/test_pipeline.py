@@ -25,6 +25,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from src.task_sources.sources import sources_from_text
 from src.agents.test_case_generator import swagger_snapshots
 from src.agents.test_case_generator.api_mapping import (
     ApiMappingAgent,
@@ -62,6 +63,7 @@ from ui.pipeline import (
     RUN_FAILED,
     RUN_INTERRUPTED,
     RUN_REJECTED,
+    RUN_STOPPED,
     RUN_SUCCEEDED,
     STEP_BLOCKED,
     STEP_COMPLETED,
@@ -219,6 +221,8 @@ class TestExecuteStep:
             "task_description": _TASK,
             "user_id": pipeline.USER_IDS[1],
             "developed_services": f"Admin: {_ADMIN_UI}",
+            # متنِ دستی → یک منبعِ description با همان متن (شاهدِ تصمیم‌های محیط)
+            "sources": sources_from_text(_TASK),
         }
         assert state.result(1) == fakes.outputs[1]
 
@@ -803,3 +807,163 @@ class TestExportGuards:
 
     def test_a_review_without_a_collection_cannot_be_exported(self):
         assert "no Step 4 collection" in self.reason({"review": {"status": "ready"}})
+
+
+class TestRunAllBeforeStepHook:
+    """Milestone 4.3 — the optional before_step(step, state) hook of run_all."""
+
+    @staticmethod
+    def _recording(stop_at: int | None = None, calls: list | None = None):
+        calls = calls if calls is not None else []
+
+        def hook(step, state):
+            calls.append((step, state))
+            return step != stop_at
+
+        return hook, calls
+
+    def test_without_a_hook_nothing_changes(self, fakes):
+        outcome = run_all(_state(_ADMIN_UI))
+        assert (outcome.status, outcome.stopped, outcome.stopped_step) == (RUN_SUCCEEDED, False, 0)
+        assert fakes.order == [1, 2, 3, 4, 5]
+
+    def test_a_hook_that_always_allows_gives_the_same_run(self, fakes):
+        plain = _state(_ADMIN_UI)
+        run_all(plain)
+        fakes.order.clear()
+        hooked = _state(_ADMIN_UI)
+        hook, calls = self._recording()
+
+        outcome = run_all(hooked, before_step=hook)
+
+        assert outcome.status == RUN_SUCCEEDED
+        assert fakes.order == [1, 2, 3, 4, 5]
+        assert [step for step, _ in calls] == [1, 2, 3, 4, 5]
+        assert hooked.results == plain.results
+        assert hooked.auto_advanced == plain.auto_advanced
+
+    def test_the_hook_gets_the_step_number_and_the_same_state(self, fakes):
+        state = _state()
+        hook, calls = self._recording()
+        run_all(state, before_step=hook)
+        assert all(received is state for _, received in calls)
+
+    def test_the_hook_runs_immediately_before_each_step(self, fakes):
+        events: list[tuple] = []
+
+        def hook(step, state):
+            events.append(("hook", step, tuple(fakes.order)))
+            return True
+
+        run_all(
+            _state(),
+            before_step=hook,
+            on_progress=lambda step, status: events.append(("progress", step, status)),
+        )
+        assert events[:4] == [
+            ("hook", 1, ()),
+            ("progress", 1, STEP_RUNNING),
+            ("progress", 1, STEP_COMPLETED),
+            ("hook", 2, (1,)),
+        ]
+        hooks = [event for event in events if event[0] == "hook"]
+        assert [event[2] for event in hooks] == [(), (1,), (1, 2), (1, 2, 3), (1, 2, 3, 4)]
+
+    def test_returning_false_stops_that_step_and_every_later_one(self, fakes):
+        state = _state()
+        progress: list[tuple] = []
+        hook, calls = self._recording(stop_at=3)
+
+        outcome = run_all(
+            state, before_step=hook, on_progress=lambda *event: progress.append(event)
+        )
+
+        assert fakes.order == [1, 2]
+        assert [step for step, _ in calls] == [1, 2, 3]
+        assert (outcome.status, outcome.stopped, outcome.stopped_step) == (RUN_STOPPED, True, 3)
+        assert not outcome.succeeded
+        assert (outcome.completed_steps, outcome.failed_step, outcome.error) == ((1, 2), 0, "")
+        assert all(step != 3 for step, _ in progress)
+        assert state.last_run == outcome
+        assert (state.run_in_progress, state.running_step) == (False, 0)
+
+    def test_completed_results_stay_and_the_stopped_step_is_not_completed(self, fakes):
+        state = _state()
+        hook, _ = self._recording(stop_at=3)
+        run_all(state, before_step=hook)
+
+        assert state.result(1) == fakes.outputs[1] and state.result(2) == fakes.outputs[2]
+        assert not state.is_stale(1) and not state.is_stale(2)
+        assert state.auto_advanced == {1, 2}
+        for step in (3, 4, 5):
+            assert not state.has_result(step)
+            assert not state.is_accepted(step)
+            assert step not in state.approved
+
+    def test_stopping_before_the_first_step_runs_nothing(self, fakes):
+        state = _state()
+        hook, _ = self._recording(stop_at=1)
+        outcome = run_all(state, before_step=hook)
+        assert (outcome.status, outcome.completed_steps, outcome.stopped_step) == (
+            RUN_STOPPED,
+            (),
+            1,
+        )
+        assert fakes.order == []
+
+    def test_a_stopped_run_can_continue_from_the_stopped_step(self, fakes):
+        state = _state()
+        hook, _ = self._recording(stop_at=3)
+        run_all(state, before_step=hook)
+        fakes.order.clear()
+
+        outcome = run_all(state, start=3)
+
+        assert (outcome.status, outcome.completed_steps) == (RUN_SUCCEEDED, (3, 4, 5))
+        assert fakes.order == [3, 4, 5]
+
+    def test_the_hook_respects_start(self, fakes):
+        state = _state()
+        run_all(state)
+        fakes.order.clear()
+        hook, calls = self._recording()
+
+        run_all(state, start=4, before_step=hook)
+
+        assert [step for step, _ in calls] == [4, 5]
+        assert fakes.order == [4, 5]
+
+    def test_a_hook_exception_skips_the_step_and_propagates(self, fakes):
+        state = _state()
+
+        def hook(step, state):
+            if step == 2:
+                raise RuntimeError("hook failed")
+            return True
+
+        with pytest.raises(RuntimeError, match="hook failed"):
+            run_all(state, before_step=hook)
+
+        assert fakes.order == [1]
+        assert not state.has_result(2)
+        assert state.last_run.status == RUN_INTERRUPTED
+        assert state.last_run.completed_steps == (1,)
+        assert state.run_in_progress is False
+
+    def test_a_stopped_run_is_distinct_from_failed_and_blocked_runs(self, fakes):
+        state = _state()
+        hook, _ = self._recording(stop_at=2)
+        outcome = run_all(state, before_step=hook)
+        assert outcome.status not in (RUN_SUCCEEDED, RUN_FAILED, RUN_BLOCKED, RUN_INTERRUPTED)
+        assert state.errors == {}
+
+    def test_step_by_step_execution_is_unaffected(self, fakes):
+        state = _state()
+        for step in range(1, 6):
+            assert execute_step(step, state).status in (STEP_COMPLETED, STEP_BLOCKED)
+            state.approve_and_advance(step)
+        assert fakes.order == [1, 2, 3, 4, 5]
+
+    def test_the_single_issue_app_does_not_use_the_hook(self):
+        app = (Path(__file__).resolve().parents[3] / "ui" / "app.py").read_text(encoding="utf-8")
+        assert "before_step" not in app

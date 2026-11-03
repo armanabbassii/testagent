@@ -733,14 +733,14 @@ class TestB_RequiredValue:
 class TestC_ConsumerSubstitution:
     def test_the_positive_retrieval_uses_the_variable_in_its_path(self, voucher):
         url = _item(voucher["collection"], "TC-003")["request"]["url"]
-        assert url["raw"] == "{{baseUrl}}/admin/voucher/{{voucherId}}"
-        assert url["path"] == ["admin", "voucher", "{{voucherId}}"]
+        assert url["raw"] == "{{base_url}}/api/admin/voucher/{{voucherId}}"
+        assert url["path"] == ["api", "admin", "voucher", "{{voucherId}}"]
         assert "variable" not in url
         assert ":id" not in url["raw"]
 
     def test_unrelated_request_data_is_preserved(self, voucher):
         request = _item(voucher["collection"], "TC-005")["request"]
-        assert request["url"]["raw"] == "{{baseUrl}}/admin/voucher/{{voucherId}}"
+        assert request["url"]["raw"] == "{{base_url}}/api/admin/voucher/{{voucherId}}"
         assert json.loads(request["body"]["raw"]) == {"name": "string"}
         headers = {h["key"]: h["value"] for h in request["header"]}
         assert headers["Authorization"] == "{{token}}"
@@ -837,7 +837,7 @@ class TestD_GenericNamesAndPaths:
         request = _item(collection, "TC-002")["request"]
         reference = "{{" + name + "}}"
         if location == "path":
-            assert request["url"]["raw"] == f"{{{{baseUrl}}}}/things/{reference}/use"
+            assert request["url"]["raw"] == f"{{{{base_url}}}}/things/{reference}/use"
         elif location == "query":
             assert request["url"]["query"] == [{"key": parameter, "value": reference}]
         elif location == "header":
@@ -1001,7 +1001,7 @@ class TestG_NegativeScenarios:
         """پیشنهادِ اشتباهِ LLM (TC-004 به‌عنوانِ مقصد) کنار گذاشته شده است."""
         item = _item(voucher["collection"], "TC-004")
         assert "{{voucherId}}" not in json.dumps(item)
-        assert item["request"]["url"]["raw"] == "{{baseUrl}}/admin/voucher/:id"
+        assert item["request"]["url"]["raw"] == "{{base_url}}/api/admin/voucher/:id"
         assert _script(item, "prerequest") == []
 
     def test_a_negative_source_is_rejected_in_step1(self):
@@ -1103,7 +1103,7 @@ class TestI_BackwardCompatibility:
         assert result["review"]["review"]["issues"] == []
         # پارامترِ مسیرِ بدونِ مقدار همان رفتارِ قبلی را دارد
         url = _item(result["collection"], "TC-003")["request"]["url"]
-        assert url["raw"] == "{{baseUrl}}/admin/voucher/:id"
+        assert url["raw"] == "{{base_url}}/api/admin/voucher/:id"
         assert url["variable"] == [{"key": "id", "value": ""}]
 
     def test_an_old_step1_result_without_the_field_still_works(self):

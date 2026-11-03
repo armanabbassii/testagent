@@ -21,8 +21,8 @@ ui/pipeline.py — اجرای قدم‌های ویزارد بدونِ Streamlit
 from __future__ import annotations
 
 import threading
-from collections.abc import Callable
-from contextlib import nullcontext
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from typing import Any
 
@@ -75,6 +75,7 @@ from src.task_sources.jira import (
     parse_issue_reference,
 )
 from src.task_sources.jira.importer import STAGE_CONFIGURATION
+from src.task_sources.sources import TaskSource, sources_for_task
 from ui.formatting import postman_collection
 from ui.workflow import (
     INPUT_COLLECTION_NAME,
@@ -112,8 +113,12 @@ RUN_FAILED = "failed"
 RUN_BLOCKED = "blocked"
 RUN_INTERRUPTED = "interrupted"
 RUN_REJECTED = "rejected"
+# فقط با before_step: فراخوان (مثلاً Batch) پیش از یک قدم اجرا را متوقف کرد.
+RUN_STOPPED = "stopped"
 
 ProgressCallback = Callable[[int, str], None]
+# before_step(step, state) → True یعنی «این قدم اجرا شود»، False یعنی «توقف».
+BeforeStepHook = Callable[[int, WorkflowState], bool]
 
 
 @dataclass(frozen=True)
@@ -144,10 +149,17 @@ class RunOutcome:
     completed_steps: tuple[int, ...] = ()
     failed_step: int = 0
     error: str = ""
+    # قدمی که before_step پیش از آن اجرا را متوقف کرد (RUN_STOPPED)؛ ۰ یعنی توقفی نبود.
+    stopped_step: int = 0
 
     @property
     def succeeded(self) -> bool:
         return self.status == RUN_SUCCEEDED
+
+    @property
+    def stopped(self) -> bool:
+        """before_step اجرا را عمداً متوقف کرد — نه موفقیت، نه شکست."""
+        return self.status == RUN_STOPPED
 
     @property
     def last_completed_step(self) -> int:
@@ -159,14 +171,20 @@ class RunOutcome:
 # Generator و متنِ پیام‌های خطایش فقط یک پیاده‌سازی دارد.
 
 def run_task_analysis(
-    task_description: str, developed_services: str
+    task_description: str,
+    developed_services: str,
+    sources: tuple[TaskSource, ...] | None = None,
 ) -> tuple[dict | None, str | None]:
-    """قدم ۱ — TaskAnalysisGenerator."""
+    """قدم ۱ — TaskAnalysisGenerator.
+
+    ``sources`` منابعِ شاهدِ تصمیم‌های محیط است (task_sources)؛ None یعنی همین متن.
+    """
     try:
         result = TaskAnalysisGenerator(debug_config=DebugConfig.from_env()).generate(
             task_description=task_description,
             user_id=USER_IDS[1],
             developed_services=developed_services,
+            sources=sources,
         )
     except ValueError as exc:
         # ورودیِ نامعتبر — مثلاً توصیفِ تسکِ خالی که پیش از این‌جا گرفته می‌شود
@@ -333,6 +351,17 @@ def _jira_client(settings: JiraSettings) -> JiraClient:
     return client
 
 
+@contextmanager
+def jira_session() -> Iterator[JiraClient]:
+    """همان کلاینت و قفلِ دریافتِ issue، برای کشفِ فقط‌خواندنیِ Batch Testing.
+
+    تنظیماتِ ناقص JiraConfigError می‌دهد؛ در طولِ بلوک دریافت‌های دیگر پشتِ هم می‌مانند.
+    """
+    with _jira_lock:
+        settings = JiraSettings.from_config().validate()
+        yield _jira_client(settings)
+
+
 def load_jira_task(state: WorkflowState, reference: str) -> JiraImport:
     """یک issue را دریافت و — فقط اگر موفق بود — به ورودیِ قدمِ اول تبدیل می‌کند.
 
@@ -353,6 +382,17 @@ def load_jira_task(state: WorkflowState, reference: str) -> JiraImport:
         state.set_input(INPUT_TASK_DESCRIPTION, result.task_input.to_task_description())
         state.set_input(INPUT_JIRA_ISSUE, result.issue_key)
     return result
+
+
+def task_sources(state: WorkflowState) -> tuple[TaskSource, ...]:
+    """منابعِ متنِ فعلیِ قدم ۱ — ویزارد و Batch هر دو از همین‌جا می‌گیرند.
+
+    issueِ دریافت‌شده فقط وقتی منبع است که متنِ فعلی دقیقاً متنِ ساخته‌شده از آن
+    باشد؛ در غیرِ این صورت (حالتِ دستی یا متنِ ویرایش‌شده) کلِ متن یک منبع است.
+    """
+    imported = state.task_import
+    task_input = imported.task_input if imported is not None and imported.ok else None
+    return sources_for_task(state.input_value(INPUT_TASK_DESCRIPTION), task_input)
 
 
 def jira_input_problem(state: WorkflowState, reference: str) -> str:
@@ -474,6 +514,7 @@ def _invoke(
         return run_task_analysis(
             state.input_value(INPUT_TASK_DESCRIPTION),
             state.input_value(INPUT_DEVELOPED_SERVICES),
+            task_sources(state),
         )
     if step == 2:
         return run_api_mapping(upstream[0], "", snapshot_keys=list(snapshot_keys))
@@ -585,6 +626,7 @@ def run_all(
     *,
     start: int = 1,
     on_progress: ProgressCallback | None = None,
+    before_step: BeforeStepHook | None = None,
 ) -> RunOutcome:
     """قدم‌های ``start`` تا ۵ را پشتِ سرِ هم اجرا می‌کند.
 
@@ -604,6 +646,18 @@ def run_all(
     ``on_progress(step, status)`` پیش و پس از هر قدم صدا زده می‌شود (برای UI).
     اگر اجرا وسطِ کار با یک استثنا قطع شود (مثلاً rerunِ Streamlit)، قفل آزاد و
     ``RUN_INTERRUPTED`` ثبت می‌شود و استثنا دوباره بالا می‌رود.
+
+    ``before_step(step, state)`` (اختیاری، برای Batch) درست پیش از هر قدم صدا زده
+    می‌شود — پیش از هر تغییری در وضعیت برای آن قدم و پیش از on_progress:
+
+      * True  → قدم مثلِ همیشه اجرا می‌شود؛
+      * False → این قدم و قدم‌های بعدی اجرا نمی‌شوند؛ ``RUN_STOPPED`` با
+        ``stopped_step`` برمی‌گردد. نتیجه‌ی قدم‌های اجراشده دست نمی‌خورد و قدمِ
+        متوقف‌شده «انجام‌شده» یا پذیرفته ثبت نمی‌شود؛
+      * استثنا → قدم اجرا نمی‌شود و همان استثنا بالا می‌رود (همان قاعده‌ی هر
+        استثنای دیگر: ``RUN_INTERRUPTED`` ثبت و قفل آزاد می‌شود).
+
+    بدونِ before_step رفتار دقیقاً همان قبلی است.
     """
     if not 1 <= start <= STEP_COUNT:
         raise ValueError(f"Run All must start between Step 1 and Step {STEP_COUNT}.")
@@ -629,6 +683,9 @@ def run_all(
         state.invalidate_from(start)
 
         for step in range(start, STEP_COUNT + 1):
+            if before_step is not None and not before_step(step, state):
+                outcome = RunOutcome(RUN_STOPPED, start, tuple(completed), stopped_step=step)
+                break
             state.go_to(step)
             state.running_step = step
             _notify(on_progress, step, STEP_RUNNING)
@@ -673,18 +730,21 @@ __all__ = [
     "RUN_FAILED",
     "RUN_INTERRUPTED",
     "RUN_REJECTED",
+    "RUN_STOPPED",
     "RUN_SUCCEEDED",
     "STEP_BLOCKED",
     "STEP_COMPLETED",
     "STEP_FAILED",
     "STEP_RUNNING",
     "USER_IDS",
+    "BeforeStepHook",
     "RunOutcome",
     "StepOutcome",
     "blocked_reason",
     "execute_step",
     "explicit_selection",
     "jira_input_problem",
+    "jira_session",
     "load_jira_task",
     "plan_swagger_sources",
     "run_all",
@@ -693,5 +753,6 @@ __all__ = [
     "run_postman_generation",
     "run_scenario_analysis",
     "run_task_analysis",
+    "task_sources",
     "unusable_reason",
 ]

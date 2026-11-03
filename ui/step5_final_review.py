@@ -193,6 +193,16 @@ def _render_warnings(result: dict) -> None:
         st.warning(warning)
 
 
+def _render_information(result: dict) -> None:
+    """یادداشت‌های اطلاعاتی — وضعیت را عوض نمی‌کنند."""
+    notes = [str(note) for note in (result.get("review") or {}).get("information") or [] if note]
+    if not notes:
+        return
+    st.subheader("Information")
+    for note in notes:
+        st.info(note)
+
+
 def _render_review_items(result: dict) -> None:
     """مواردِ حل‌نشده — هیچ‌کدام حدس زده نشده و همه با منبعشان می‌مانند."""
     st.subheader("Unresolved clarifications")
@@ -317,6 +327,7 @@ def _render_result(result: dict, out_of_date: bool = False) -> None:
     _render_metrics(result)
     _render_issues(result)
     _render_warnings(result)
+    _render_information(result)
     _render_review_items(result)
     _render_collection(result)
     _render_export(result, out_of_date)

@@ -204,7 +204,6 @@ def _built(headers: dict | None, body: dict | None = None) -> dict:
         case["headers"] = headers
     collection = PostmanBuilder().build(
         suite={"controllers": [{"name": "Admin", "test_cases": [case]}]},
-        base_url="https://admin.example.com",
     )
     return json.loads(json.dumps(collection))["item"][0]["item"][0]
 
@@ -307,7 +306,7 @@ class TestHeaderNormalization:
         item = _built({"Authorization": "x"}, body={"code": "SUMMER"})
         request = item["request"]
         assert request["method"] == "POST"
-        assert request["url"]["raw"] == "{{baseUrl}}/admin/voucher"
+        assert request["url"]["raw"] == "{{base_url}}/admin/voucher"
         assert json.loads(request["body"]["raw"]) == {"code": "SUMMER"}
 
 

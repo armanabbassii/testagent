@@ -35,7 +35,15 @@ from ui.formatting import (
     jira_attachment_rows,
     jira_status_messages,
 )
-from ui.pipeline import RUN_SUCCEEDED, execute_step, jira_input_problem, load_jira_task, run_all
+from src.task_sources.sources import sources_from_task_input, sources_from_text
+from ui.pipeline import (
+    RUN_SUCCEEDED,
+    execute_step,
+    jira_input_problem,
+    load_jira_task,
+    run_all,
+    task_sources,
+)
 from ui.workflow import (
     INPUT_DEVELOPED_SERVICES,
     INPUT_JIRA_ISSUE,
@@ -282,3 +290,49 @@ class TestStatusFormatting:
         assert rows[0]["Extracted"] == "13 chars"
         assert rows[1]["Extracted"] == "—"
         assert rows[2]["Detail"] == "not text"
+
+
+class TestEnvironmentSources:
+    """تکِ issue و Batch همان ورودی را به قدم ۱ می‌دهند: متن + منابعِ شاهد."""
+
+    def test_a_fetched_issue_gives_step_one_its_jira_sources(self, importer, fakes):
+        state = WorkflowState()
+        load_jira_task(state, "DEMO-7")
+
+        execute_step(1, state)
+
+        sources = fakes.last(1)["sources"]
+        assert sources == sources_from_task_input(_task())
+        assert [source.label for source in sources] == [
+            "Description",
+            "Comment 1",
+            "Attachment: curl.txt",
+        ]
+
+    def test_batch_style_state_gives_identical_step_one_input(self, importer, fakes):
+        single = WorkflowState()
+        load_jira_task(single, "DEMO-7")
+        execute_step(1, single)
+        single_call = fakes.last(1)
+
+        # Batch بدونِ UI همان وضعیت را می‌سازد: issueِ دریافت‌شده + متنِ ساخته‌شده از آن.
+        batch = WorkflowState()
+        batch.task_import = _success("DEMO-7")
+        batch.set_input(INPUT_TASK_DESCRIPTION, batch.task_import.task_input.to_task_description())
+        execute_step(1, batch)
+
+        assert fakes.last(1) == single_call
+        assert task_sources(batch) == task_sources(single)
+
+    def test_an_edited_description_is_treated_as_manual_text(self, importer):
+        state = WorkflowState()
+        load_jira_task(state, "DEMO-7")
+        edited = state.input_value(INPUT_TASK_DESCRIPTION) + "\nRun everything in VDI."
+        state.set_input(INPUT_TASK_DESCRIPTION, edited)
+
+        assert task_sources(state) == sources_from_text(edited)
+
+    def test_manual_mode_has_one_description_source(self):
+        state = WorkflowState()
+        state.set_input(INPUT_TASK_DESCRIPTION, "Manual task.")
+        assert task_sources(state) == sources_from_text("Manual task.")

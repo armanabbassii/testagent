@@ -23,6 +23,10 @@ from src.agents.test_case_generator.api_mapping import (
     ApiMappingError,
     compact_step2_result,
 )
+from src.agents.test_case_generator.host_selection import (
+    resolve_hosts,
+    selections_by_case,
+)
 from src.agents.test_case_generator.postman_generation import _plan
 from src.agents.test_case_generator.scenario_analysis import (
     ScenarioAnalysisError,
@@ -446,6 +450,9 @@ class TestIdentitySurvivesToStepFour:
             clarifications=[],
             services=_services(),
             mappings=_step2_result()["mappings"],
+            selections=selections_by_case(
+                resolve_hosts(_step1_result(), _step2_result()["mappings"], _services())
+            ),
         )
 
     def test_every_step_one_id_is_either_a_request_or_unresolved(self):

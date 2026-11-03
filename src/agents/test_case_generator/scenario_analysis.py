@@ -28,6 +28,9 @@ from typing import Any
 
 from typing_extensions import NotRequired, TypedDict
 
+from src.agents.test_case_generator.environment_decisions import (
+    without_environment_fields,
+)
 from src.agents.test_case_generator.api_discovery import operation_key
 from src.agents.test_case_generator.api_mapping import (
     ApiMappingError,
@@ -194,9 +197,15 @@ def render_prompt(
     step1_result: Any,
     step2_result: Any,
 ) -> str:
-    """قالب را با نتیجه‌ی کاملِ قدم اول و دوم پر می‌کند."""
+    """قالب را با نتیجه‌ی کاملِ قدم اول و دوم پر می‌کند.
+
+    فیلدهای تصمیمِ محیطِ قدم اول عمداً حذف می‌شوند: میزبان در قدم ۲ قطعی شده و
+    ورودیِ مدلِ این قدم نباید با آن عوض شود.
+    """
     values = {
-        "step1_result": json.dumps(step1_result, ensure_ascii=False, indent=2),
+        "step1_result": json.dumps(
+            without_environment_fields(step1_result), ensure_ascii=False, indent=2
+        ),
         "step2_result": json.dumps(step2_result, ensure_ascii=False, indent=2),
     }
     return _PLACEHOLDER_RE.sub(lambda match: values[match.group(1)], template)

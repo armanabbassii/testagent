@@ -133,6 +133,11 @@ class FakeJira:
     file_status: dict[str, int] = field(default_factory=dict)
     file_headers: dict[str, dict[str, str]] = field(default_factory=dict)
     errors: dict[str, BaseException] = field(default_factory=dict)
+    # Agile/search: بُردها (صفحه‌بندی با isLast)، پاسخِ ثابتِ مسیرها، و نتیجه‌ی هر JQL.
+    # JQLِ ناشناخته 400 می‌گیرد تا JQLِ اشتباه در تست پنهان نماند.
+    boards: list[dict[str, Any]] = field(default_factory=list)
+    routes: dict[str, Any] = field(default_factory=dict)
+    searches: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     retry_after: str = ""
     calls: list[Call] = field(default_factory=list)
     sign_ins: int = 0
@@ -257,6 +262,24 @@ class FakeJira:
             )
         if path == "/rest/api/2/text":
             return make_response(url, text="<html>not json</html>")
+        start, size = int(params.get("startAt", 0)), int(params.get("maxResults", 50))
+        if path == "/rest/agile/1.0/board":
+            page = self.boards[start : start + size]
+            return make_response(
+                url,
+                body={"startAt": start, "values": page, "isLast": start + size >= len(self.boards)},
+            )
+        if path == "/rest/api/2/search":
+            jql = params.get("jql")
+            if jql not in self.searches:
+                return make_response(url, 400, body={"errorMessages": [f"unexpected JQL: {jql}"]})
+            items = self.searches[jql]
+            return make_response(
+                url,
+                body={"startAt": start, "total": len(items), "issues": items[start : start + size]},
+            )
+        if path in self.routes:
+            return make_response(url, body=self.routes[path])
         return make_response(url, 404, body={"errorMessages": ["unknown path"]})
 
 

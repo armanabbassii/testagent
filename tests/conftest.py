@@ -10,6 +10,18 @@ from src.debug.levels import DebugLevel
 from src.debug.base_handler import BaseHandler, LogRecord
 
 
+# ── توکنِ Podium: هیچ تستی .env یا endpointِ واقعی را نمی‌بیند ────────────────
+
+
+@pytest.fixture(autouse=True)
+def _no_real_podium_token_settings(monkeypatch):
+    """TokenSettings.from_config در تست تنظیماتِ خالی می‌دهد → خطای پیکربندی، بدونِ شبکه.
+    تست‌هایی که provider می‌سازند تنظیماتِ ساختگیِ خودشان را می‌دهند."""
+    from src.auth.token_provider import TokenSettings
+
+    monkeypatch.setattr(TokenSettings, "from_config", classmethod(lambda cls: cls("")))
+
+
 # ── Handlers ──────────────────────────────────────────────────────────────────
 
 class MemoryHandler(BaseHandler):

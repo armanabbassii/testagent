@@ -27,6 +27,9 @@ INPUT_TASK_DESCRIPTION + INPUT_JIRA_ISSUE  (ui/workflow.py)
 - **جریانِ پنج‌قدمی Jira را نمی‌شناسد.** Jira فقط کادرِ «Task Description» را پر
   می‌کند؛ اجرای قدمِ اول، Run All و انتخابِ منابعِ Swagger همان مسیرِ ورودیِ
   دستی‌اند.
+- **Batch Testing** همین دریافت را برای هر issueِ یک batch به کار می‌برد؛ کشفِ
+  issueهای بُرد هم فقط می‌خواند. هیچ مسیری در Jira نمی‌نویسد
+  ([batch-testing.md](batch-testing.md)).
 - **TaskInput مستقل از منبع است** (عنوان، توضیح، کامنت‌ها، پیوست‌ها، منبع،
   شناسه، نشانی، metadata). سامانه‌ی دیگری (GitLab issue، …) فقط باید همین را
   بسازد.
@@ -44,6 +47,7 @@ INPUT_TASK_DESCRIPTION + INPUT_JIRA_ISSUE  (ui/workflow.py)
 | `src/task_sources/jira/client.py` | REST v2، نشست، ورودِ دوباره، خطاها |
 | `src/task_sources/jira/markup.py` | wiki markup (بلوک‌های `{code}` دست‌نخورده) |
 | `src/task_sources/jira/importer.py` | issue → `TaskInput` با گزارشِ هر مرحله |
+| `src/task_sources/jira/agile.py` | بُردها، ستون‌ها، اسپرینت‌های فعال و `search` برای کشفِ Batch Testing (فقط GET) — [batch-testing.md](batch-testing.md) |
 | `ui/pipeline.py` | `load_jira_task`، `jira_input_problem` |
 | `ui/step1_task_analysis.py` | انتخابِ منبع، دکمه‌ی دریافت، وضعیت |
 

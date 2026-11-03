@@ -80,6 +80,7 @@ def _comment(raw: dict[str, Any]) -> TaskComment:
         author=_person(raw.get("author")),
         created=created,
         body=normalize_wiki(str(raw.get("body") or "")),
+        id=str(raw.get("id") or ""),
     )
 
 

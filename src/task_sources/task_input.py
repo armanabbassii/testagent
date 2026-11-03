@@ -50,6 +50,9 @@ class TaskComment:
     author: str
     created: str
     body: str
+    # شناسه‌ی کامنت در منبع (Jira) — فقط برای ردیابیِ منشأِ شاهد؛ در متنِ
+    # to_task_description نمی‌آید، پس ورودیِ مدل عوض نمی‌شود.
+    id: str = ""
 
 
 @dataclass(frozen=True)

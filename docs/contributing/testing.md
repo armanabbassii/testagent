@@ -14,6 +14,8 @@ tests/
 │   ├── task_sources/
 │   │   ├── fake_jira.py         # Jira + ADFSِ ساختگی برای تست‌ها
 │   │   └── test_jira_settings.py # کلید و نشانیِ issue، تنظیماتِ Jira
+│   ├── batch_testing/           # Batch Testing (SQLite موقت، runner و executorِ ساختگی)
+│   ├── test_execution/          # موتورِ Newman؛ اجرای واقعی فقط روی سرورِ HTTPِ محلی، بدونِ Node/Newman skip
 │   └── vector_store/
 │       └── test_base.py         # Document، SearchResult
 └── integration/             # تست‌های integration — با mock

@@ -26,7 +26,6 @@ def _result() -> dict:
         "collection": {
             "info": {"name": "Voucher management API Tests"},
             "variable": [
-                {"key": "baseUrl", "value": "https://admin.example.com"},
                 {"key": "token", "value": ""},
             ],
             "item": [],
@@ -103,6 +102,7 @@ class TestStep4RequestRows:
             "Request": "TC-001 — Create a valid voucher",
             "Method": "POST",
             "Path": "/admin/voucher",
+            "Host": "—",
             "Scenario": "Voucher lifecycle",
         }
         assert len(rows) == 2

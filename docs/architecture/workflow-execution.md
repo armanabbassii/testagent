@@ -10,8 +10,10 @@
 > [project-architecture.md](project-architecture.md) آمده و اینجا تکرار نمی‌شود.
 >
 > برچسب‌ها: **[پیاده‌شده]** = در کد هست و تست دارد؛
-> **[پیشنهادی]** = طراحیِ آینده (اجرای دسته‌ای، آپلود به Jira)، هنوز پیاده نشده.
+> **[پیشنهادی]** = طراحیِ آینده (آپلود به Jira)، هنوز پیاده نشده.
 > ورودیِ تسک از Jira پیاده شده است: [jira-integration.md](jira-integration.md).
+> اجرای دسته‌ای (همین `run_all` برای issueهای یک بُرد + Newman) پیاده شده است:
+> [batch-testing.md](batch-testing.md).
 
 ---
 
@@ -22,7 +24,8 @@
 ویزاردِ Streamlit در `ui/app.py` از توصیفِ یک تسکِ توسعه و snapshotِ
 Swaggerِ سرویس‌ها یک **Postman Collection v2.1** می‌سازد. LLM فقط در قدم‌های
 ۱ تا ۳ معنا را تفسیر می‌کند؛ قدم‌های ۴ و ۵ کاملاً قطعی‌اند. هیچ API ای اجرا
-نمی‌شود و هیچ کالکشنی run نمی‌شود.
+نمی‌شود و ویزارد هیچ کالکشنی را run نمی‌کند (اجرای Newman فقط در Batch Testing
+است: [batch-testing.md](batch-testing.md)).
 
 ### اجزای اصلی
 
@@ -316,7 +319,7 @@ operation»). اگر مدل فقط عملیاتِ voucherِ Admin را لازم 
 
 ---
 
-## E. Run All — `run_all(state, *, start=1, on_progress=None) -> RunOutcome` [پیاده‌شده]
+## E. Run All — `run_all(state, *, start=1, on_progress=None, before_step=None) -> RunOutcome` [پیاده‌شده]
 
 ```text
 run_in_progress؟ → RunOutcome(rejected) — هیچ قدمی اجرا نمی‌شود
@@ -326,6 +329,7 @@ auto_advance(1..start-1)
 start <= 2 → swagger_selection = auto   (انتخاب در execute_step(2) یک بار ساخته می‌شود)
 invalidate_from(start)            ← همه‌ی نتیجه‌های قدیمیِ start..5 «کهنه» می‌شوند
 for step in start..5:
+    before_step(step, state) == False → RunOutcome(stopped, stopped_step=step) ; توقف
     go_to(step); running_step = step; on_progress(step, "running")
     outcome = execute_step(step, state)
     running_step = 0; on_progress(step, outcome.status)
@@ -337,8 +341,11 @@ finally: run_in_progress = False؛ اگر استثنا قطعش کرد → RunOu
          notice = "" ؛ last_run = outcome
 ```
 
-`RunOutcome`: `status` (`succeeded`/`failed`/`blocked`/`interrupted`/`rejected`)،
-`start`، `completed_steps`، `last_completed_step`، `failed_step`، `error`.
+`RunOutcome`: `status` (`succeeded`/`failed`/`blocked`/`interrupted`/`rejected`/`stopped`)،
+`start`، `completed_steps`، `last_completed_step`، `failed_step`، `stopped_step`، `error`.
+
+`before_step` (اختیاری) فقط برای Batch است: لغو پیش از هر قدم و دروازه‌ی اجراپذیری
+پیش از قدمِ ۳. بدونِ آن (ویزارد) رفتار دقیقاً همان قبلی است و `stopped` رخ نمی‌دهد.
 
 - **ترتیبی:** هیچ قدمِ وابسته‌ای هم‌زمان اجرا نمی‌شود؛ هیچ retryِ تازه‌ای
   اضافه نشده (فقط همان retryهای داخلِ Generatorها).
@@ -529,7 +536,6 @@ Generatorهای **واقعی** ساخته‌اند. هیچ LLM یا شبکه‌�
   تبدیل می‌شود و بعد همان `execute_step`/`run_all`. پر کردنِ Developed Services
   از Jira هنوز پیشنهادی است.
 - **آپلودِ کالکشن به Jira:** فقط برای `RunOutcome.succeeded` (نه `blocked`).
-- **اجرای دسته‌ای / زمان‌بندی‌شده:** `run_all` بدونِ Streamlit است و روی هر
-  `WorkflowState` تازه اجرا می‌شود، پس می‌تواند پایه‌ی آن باشد. صف/worker
-  پیاده نشده است.
+- **اجرای دسته‌ای:** پیاده شده است — [batch-testing.md](batch-testing.md). اجرای
+  زمان‌بندی‌شده (بدونِ کلیکِ کاربر) هنوز پیشنهادی است.
 - **ازسرگیری از UI:** `run_all(start=N)` هست، ولی دکمه‌اش نه.

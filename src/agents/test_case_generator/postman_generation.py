@@ -22,7 +22,7 @@ postman_generation.py — ساختِ قطعیِ Postman Collection از نتیج
 نکته‌ی معماری: ساختارِ Postman اینجا دوباره پیاده نشده است. این ماژول یک
 `TestCaseSuite` می‌سازد — همان قراردادی که `PostmanBuilder` از قبل می‌شناسد —
 و ساختِ خودِ کالکشن را به آن می‌سپارد. بنابراین رفتارهای موجود (متغیرهای
-baseUrl/token، تبدیلِ {id} به :id، assertionهای وضعیت، و استخراجِ متغیر از
+میزبانِ {{base_url}}/{{base_url_vdi}} و token، تبدیلِ {id} به :id، assertionهای وضعیت، و استخراجِ متغیر از
 پاسخ) همه دست‌نخورده باقی می‌مانند.
 
 احراز هویت: هدرِ «Authorization: {{token}}» را PostmanBuilder روی هر درخواست
@@ -40,12 +40,22 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from typing_extensions import TypedDict
+from typing_extensions import NotRequired, TypedDict
 
 from src.agents.test_case_generator.api_discovery import operation_key
 from src.agents.test_case_generator.auth_intent import (
     AuthIntentError,
     normalize_auth_intent,
+)
+from src.agents.test_case_generator.host_selection import (
+    HOST_RESOLVED,
+    HOST_VARIABLES,
+    HostResolutionError,
+    base_path_of,
+    host_reference,
+    host_resolution_of,
+    selections_by_case,
+    unresolved_host_reason,
 )
 from src.agents.test_case_generator.postman_builder import (
     AUTHORIZATION_HEADER,
@@ -56,7 +66,6 @@ from src.agents.test_case_generator.postman_builder import (
     variable_setter,
 )
 from src.agents.test_case_generator.testcase_generator import (
-    DEFAULT_BASE_URL_VAR,
     Assertion,
     ControllerTestCases,
     RequiredVariable,
@@ -92,9 +101,6 @@ _VALID_METHODS = frozenset(
 # {{variable}} داخل url/header/body
 _TEMPLATE_VAR_RE = re.compile(r"\{\{\s*([^{}\s]+)\s*\}\}")
 
-# کاراکترهای غیرِمجاز در نامِ متغیرِ base URL
-_UNSAFE_NAME_RE = re.compile(r"[^a-z0-9]+")
-
 
 class PostmanGenerationError(RuntimeError):
     """ورودیِ قدم چهارم ناقص/ناسازگار است یا کالکشنِ ساخته‌شده معتبر نیست."""
@@ -111,6 +117,10 @@ class Step4Request(TypedDict):
     method: str
     path: str
     scenario: str
+    # میزبانِ ذخیره‌شده‌ی قدم ۲ و مسیرِ پایه‌ی سرورِ Swagger که در URL آمده است.
+    host_variable: NotRequired[str]
+    host_basis: NotRequired[str]
+    base_path: NotRequired[str]
 
 
 class Step4Scenario(TypedDict):
@@ -127,6 +137,9 @@ class Step4Unresolved(TypedDict):
     test_case_id: str
     title: str
     reason: str
+    # فقط برای تست‌کیسی که به‌خاطرِ میزبان ساخته نشد (CONFLICT / NEEDS_REVIEW).
+    host_status: NotRequired[str]
+    review_causes: NotRequired[list[dict]]
 
 
 class Step4Result(TypedDict):
@@ -153,11 +166,6 @@ def _as_int(value: object) -> int | None:
     if isinstance(value, bool) or not isinstance(value, int):
         return None
     return value
-
-
-def _slug(text: str) -> str:
-    """نامِ سرویس را به یک اسلاگِ امنِ متغیر تبدیل می‌کند."""
-    return _UNSAFE_NAME_RE.sub("_", (text or "").strip().lower()).strip("_") or "service"
 
 
 def _unique_name(name: str, used: set[str]) -> str:
@@ -525,8 +533,6 @@ class _Outcome:
     """نتیجه‌ی میانیِ ساخت — پیش از تبدیل به Step4Result."""
 
     suite: TestCaseSuite
-    base_url: str
-    extra_variables: list[dict]
     requests: list[dict] = field(default_factory=list)
     scenario_rows: list[dict] = field(default_factory=list)
     unresolved: list[dict] = field(default_factory=list)
@@ -684,8 +690,14 @@ def _plan(
     clarifications: list[dict],
     services: list[dict],
     mappings: list[dict],
+    selections: dict[str, dict],
 ) -> _Outcome:
-    """تست‌کیس‌ها را به درخواست و پوشه تبدیل می‌کند — بدونِ ساختِ کالکشن."""
+    """تست‌کیس‌ها را به درخواست و پوشه تبدیل می‌کند — بدونِ ساختِ کالکشن.
+
+    ``selections`` انتخابِ میزبانِ ذخیره‌شده‌ی قدم ۲ است؛ فقط تست‌کیسِ RESOLVED
+    درخواست می‌گیرد و بقیه با دلیل در unresolved می‌آیند — بی‌آنکه جلوی
+    تست‌کیس‌های دیگر را بگیرند.
+    """
     index = operation_index(services)
     # جایگاهِ هر تست‌کیس در فهرستِ قدم اول. نامِ `case_position` عمداً با
     # `position` فرق دارد: `sort_key` به این دیکشنری بسته است و حلقه‌های بعدیِ
@@ -708,14 +720,26 @@ def _plan(
     def sort_key(case_id: str) -> tuple[int, int]:
         return (order_of.get(case_id, fallback), case_position.get(case_id, fallback))
 
-    outcome = _Outcome(suite=TestCaseSuite(controllers=[]), base_url="", extra_variables=[])
+    outcome = _Outcome(suite=TestCaseSuite(controllers=[]))
 
     built: dict[str, tuple[TestCase, dict]] = {}
-    used_services: list[dict] = []
 
     for case in test_cases:
         case_id = _clean(case.get("id"))
         title = _clean(case.get("title"))
+
+        selection = selections.get(case_id)
+        if selection is None or selection.get("host_status") != HOST_RESOLVED:
+            row = {
+                "test_case_id": case_id,
+                "title": title,
+                "reason": unresolved_host_reason(selection),
+            }
+            if selection is not None:
+                row["host_status"] = selection.get("host_status")
+                row["review_causes"] = selection.get("review_causes") or []
+            outcome.unresolved.append(row)
+            continue
 
         mapping = mapping_for(mappings, case_id)
         api = mapping.get("api") if isinstance(mapping, dict) else None
@@ -772,15 +796,12 @@ def _plan(
             )
             continue
 
-        built[case_id] = (
-            _build_request_case(
-                case, case_id, operation, dependencies, clarifications,
-                outcome.warnings,
-            ),
-            service,
+        request_case = _build_request_case(
+            case, case_id, operation, dependencies, clarifications, outcome.warnings,
         )
-        if not any(service is used for used in used_services):
-            used_services.append(service)
+        request_case["base_url_var"] = selection["variable"]
+        request_case["base_path"] = base_path_of(base_url)
+        built[case_id] = (request_case, service)
 
     if not built:
         if outcome.unresolved:
@@ -794,41 +815,6 @@ def _plan(
         else:
             message = "No test case has a resolved API mapping in Step 2."
         raise PostmanGenerationError(message)
-
-    # ── متغیرهای base URL ───────────────────────────────────────────────────
-    # یک منبع: همه‌ی درخواست‌ها {{baseUrl}} می‌گیرند — مثلِ رفتارِ قبلیِ پروژه.
-    # چند منبع: سرویسِ اول {{baseUrl}} و بقیه {{baseUrl_<service>}}؛ بنابراین هر
-    # درخواست میزبانِ درستِ خودش را می‌گیرد و هیچ متغیری بی‌استفاده نمی‌ماند.
-    var_of: dict[int, str] = {}
-    used_var_names = {DEFAULT_BASE_URL_VAR}
-
-    for position, service in enumerate(used_services):
-        if position == 0:
-            var_of[id(service)] = DEFAULT_BASE_URL_VAR
-            continue
-        base = f"{DEFAULT_BASE_URL_VAR}_{_slug(_clean(service.get('name')))}"
-        unique = base
-        index = 2
-        while unique in used_var_names:
-            unique = f"{base}_{index}"
-            index += 1
-        if unique != base:
-            outcome.warnings.append(
-                f"Two services would share the base URL variable {base!r}; the "
-                f"second one was renamed to {unique!r}."
-            )
-        used_var_names.add(unique)
-        var_of[id(service)] = unique
-
-    outcome.base_url = _clean(used_services[0].get("base_url"))
-    if len(used_services) > 1:
-        outcome.extra_variables = [
-            {"key": var_of[id(service)], "value": _clean(service.get("base_url"))}
-            for service in used_services[1:]
-        ]
-
-    for request_case, service in built.values():
-        request_case["base_url_var"] = var_of[id(service)]
 
     # ── پوشه‌ها: هر سناریو یک پوشه، به ترتیبِ خودِ قدم سوم ────────────────────
     assignment: dict[str, str] = {}
@@ -906,6 +892,9 @@ def _plan(
                 "method": request_case["method"],
                 "path": request_case["path"],
                 "scenario": folder_of.get(case_id, ""),
+                "host_variable": request_case["base_url_var"],
+                "host_basis": selections[case_id].get("basis", ""),
+                "base_path": request_case["base_path"],
             }
         )
 
@@ -1128,8 +1117,11 @@ def validate_collection(collection: Any) -> list[str]:
             if key in keys:
                 problems.append(f"duplicate collection variable {key!r}.")
             keys.append(key)
-        if DEFAULT_BASE_URL_VAR not in keys:
-            problems.append(f"the collection does not define {DEFAULT_BASE_URL_VAR!r}.")
+            if key in HOST_VARIABLES:
+                problems.append(
+                    f"the collection defines the host variable {key!r}; host values must "
+                    "come only from the Postman environment."
+                )
 
     items = collection.get("item")
     if not isinstance(items, list) or not items:
@@ -1180,6 +1172,8 @@ def validate_collection(collection: Any) -> list[str]:
                     problems.append(f"request {name!r} has an empty URL.")
                 if not url.get("host"):
                     problems.append(f"request {name!r} has no URL host.")
+                else:
+                    problems.extend(_host_problems(name, url))
 
     try:
         json.dumps(collection, ensure_ascii=False)
@@ -1187,6 +1181,21 @@ def validate_collection(collection: Any) -> list[str]:
         problems.append(f"the collection cannot be serialized to JSON: {exc}")
 
     return problems
+
+
+def _host_problems(name: str, url: dict) -> list[str]:
+    """میزبانِ URL فقط یکی از متغیرهای مجاز است — هرگز یک نشانیِ واقعی."""
+    allowed = [host_reference(variable) for variable in HOST_VARIABLES]
+    host = url.get("host")
+    raw = _clean(url.get("raw"))
+    if not isinstance(host, list) or len(host) != 1 or host[0] not in allowed:
+        return [
+            f"request {name!r} must use {' or '.join(allowed)} as its URL host, "
+            f"got {host!r}."
+        ]
+    if not raw.startswith(host[0]) or "://" in raw:
+        return [f"request {name!r} has a URL that does not start with {host[0]}: {raw!r}."]
+    return []
 
 
 def template_variables(value: Any) -> set[str]:
@@ -1213,7 +1222,8 @@ def check_variables_are_available(
         for variable in collection.get("variable") or []
         if isinstance(variable, dict)
     }
-    available = declared | set(dependency_variables)
+    # متغیرهای میزبان را Postman Environment می‌دهد، نه کالکشن.
+    available = declared | set(dependency_variables) | set(HOST_VARIABLES)
 
     problems: list[str] = []
     for item in iter_collection_requests(collection):
@@ -1499,10 +1509,14 @@ class Step4PostmanGenerator:
             requested = requested_variables(step1_result)
         except VariableInstructionError as exc:
             raise PostmanGenerationError(str(exc)) from exc
+        try:
+            selections = selections_by_case(host_resolution_of(step1_result, step2_result))
+        except HostResolutionError as exc:
+            raise PostmanGenerationError(str(exc)) from exc
 
         outcome = _plan(
             test_cases, scenarios, execution_order, dependencies, clarifications,
-            services, mappings,
+            services, mappings, selections,
         )
         outcome.warnings.extend(missing_requested_variables(requested, dependencies))
 
@@ -1517,9 +1531,7 @@ class Step4PostmanGenerator:
         try:
             collection = self._builder.build(
                 suite=outcome.suite,
-                base_url=outcome.base_url,
                 collection_name=collection_name,
-                extra_variables=outcome.extra_variables,
                 description=_collection_description(
                     outcome.unresolved, clarifications, outcome.warnings
                 ),
@@ -1588,7 +1600,10 @@ def _collection_description(
     """توضیحاتِ سطحِ کالکشن — ابهام‌ها و درخواست‌های ساخته‌نشده را پنهان نمی‌کند."""
     lines = [
         "Generated deterministically from the Step 1 (task analysis), Step 2 (API "
-        "discovery and mapping) and Step 3 (scenario and dependency analysis) results."
+        "discovery and mapping) and Step 3 (scenario and dependency analysis) results.",
+        "",
+        "Request hosts are {{base_url}} or {{base_url_vdi}}; their values come from the "
+        "Postman environment (run with --environment), not from this collection.",
     ]
 
     if clarifications:

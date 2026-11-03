@@ -52,6 +52,10 @@ class JiraResponseError(JiraError):
     """پاسخِ Jira با قراردادِ REST جور نیست."""
 
 
+class JiraWriteBlockedError(JiraError):
+    """درخواستی غیر از GET به Jira — دسترسی فعلاً فقط‌خواندنی است و چیزی فرستاده نمی‌شود."""
+
+
 __all__ = [
     "JiraAuthenticationError",
     "JiraConfigError",
@@ -64,4 +68,5 @@ __all__ = [
     "JiraReferenceError",
     "JiraResponseError",
     "JiraServerError",
+    "JiraWriteBlockedError",
 ]

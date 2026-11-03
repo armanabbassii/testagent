@@ -776,7 +776,14 @@ class TestTaskAnalysisGenerator:
             "test_cases",
             "clarifications",
             "variables",
+            "environment_decisions",
+            "rejected_environment_decisions",
+            "environment_sources",
+            "environment_warnings",
         }
+        # تسکی که محیطی نگفته هیچ تصمیمی ندارد → همه base_url می‌گیرند
+        assert result["environment_decisions"] == []
+        assert result["rejected_environment_decisions"] == []
         # تسکی که متغیری نخواسته، فهرستِ خالی می‌گیرد — نه اسکریپت یا {{...}}
         assert result["variables"] == []
         text = json.dumps(result)

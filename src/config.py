@@ -110,6 +110,27 @@ JIRA_READ_TIMEOUT_SECONDS: float = float(os.getenv("JIRA_READ_TIMEOUT_SECONDS", 
 JIRA_MAX_ATTACHMENT_BYTES: int = int(os.getenv("JIRA_MAX_ATTACHMENT_BYTES", str(10 * 1024 * 1024)))
 JIRA_MAX_ATTACHMENT_CHARS: int = int(os.getenv("JIRA_MAX_ATTACHMENT_CHARS", "100000"))
 
+# ── Podium access token (اختیاری — فقط برای اجرای Newman در Batch) ─────────────
+# توکنِ دسترسی با POST {"refreshToken": ...} به PODIUM_TOKEN_REFRESH_URL گرفته
+# می‌شود؛ فقط در حافظه می‌ماند و در زمانِ اجرا به Newman داده می‌شود. اعتبارسنجی
+# در src/auth/token_provider.py است (لحظه‌ی استفاده، نه لحظه‌ی import).
+#   PODIUM_TOKEN_REFRESH_URL  فقط https:// — تأییدِ گواهی هرگز خاموش نمی‌شود
+#   PODIUM_REFRESH_TOKEN      ثابت؛ result.refreshToken ِ پاسخ هرگز جایش نمی‌نشیند
+#   PODIUM_TOKEN_CA_BUNDLE    فایلِ PEM برای تأییدِ گواهی؛ خالی = پیش‌فرضِ certifi
+#   PODIUM_TOKEN_ALLOW_INSECURE_HTTP  فقط "true" یک آدرسِ http:// را می‌پذیرد — فقط برای
+#                             Devِ ایزوله‌ی تأییدشده (HTTP رمزگذاری ندارد)؛ خامِ اینجا،
+#                             اعتبارسنجیِ سخت‌گیرانه در token_provider (مقدارِ نامعتبر = خطا)
+PODIUM_TOKEN_REFRESH_URL: str = os.getenv("PODIUM_TOKEN_REFRESH_URL", "")
+PODIUM_REFRESH_TOKEN: str = os.getenv("PODIUM_REFRESH_TOKEN", "")
+PODIUM_TOKEN_CA_BUNDLE: str = os.getenv("PODIUM_TOKEN_CA_BUNDLE", "")
+PODIUM_TOKEN_ALLOW_INSECURE_HTTP: str = os.getenv("PODIUM_TOKEN_ALLOW_INSECURE_HTTP", "")
+PODIUM_TOKEN_CONNECT_TIMEOUT_SECONDS: float = float(
+    os.getenv("PODIUM_TOKEN_CONNECT_TIMEOUT_SECONDS", "10")
+)
+PODIUM_TOKEN_READ_TIMEOUT_SECONDS: float = float(
+    os.getenv("PODIUM_TOKEN_READ_TIMEOUT_SECONDS", "30")
+)
+
 # ── Embedding ─────────────────────────────────────────────────────────────────
 EMBEDDING_BASE_URL: str = _require("EMBEDDING_BASE_URL")
 EMBEDDING_MODEL: str = _require("EMBEDDING_MODEL")

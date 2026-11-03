@@ -14,7 +14,8 @@
 | [how-to/new-agent.md](how-to/new-agent.md) | ایجاد ایجنت جدید |
 | [how-to/new-log-driver.md](how-to/new-log-driver.md) | ایجاد درایور لاگ جدید |
 | [architecture/project-architecture.md](architecture/project-architecture.md) | معماری پروژه و جریانِ پنج‌قدمیِ Test Case Generator (از Swagger تا Postman) |
-| [architecture/workflow-execution.md](architecture/workflow-execution.md) | مسیرِ اجرای ویزارد، `execute_step` و `Run All`، رجیستری و انتخابِ خودکارِ منابعِ Swagger برای قدم ۲ (افزودنِ منبعِ تازه)، مدیریتِ وضعیت و صادرات (اجرای دسته‌ای: فقط پیشنهادی) |
+| [architecture/workflow-execution.md](architecture/workflow-execution.md) | مسیرِ اجرای ویزارد، `execute_step` و `Run All`، رجیستری و انتخابِ خودکارِ منابعِ Swagger برای قدم ۲ (افزودنِ منبعِ تازه)، مدیریتِ وضعیت و صادرات |
+| [architecture/batch-testing.md](architecture/batch-testing.md) | Batch Testing: کشفِ issueهای بُرد (سه شرط)، اجرای ترتیبی با همان پنج قدم و Newman، وضعیت‌ها، Pause/Resume/Cancel/Retry، بازیابی، artifactهای پاک‌شده و محدودیت‌ها |
 | [architecture/jira-integration.md](architecture/jira-integration.md) | ورودیِ تسک از یک issueِ Jira: تنظیمات، ورودِ ADFS SAML و PAT، `JIRA_CA_BUNDLE`، پیوست‌ها، `TaskInput` و محدودیت‌ها |
 | [architecture/core-clients.md](architecture/core-clients.md) | LLMClient و EmbeddingClient |
 | [architecture/checkpointer.md](architecture/checkpointer.md) | Redis Checkpointer — نحوه کار و تنظیم |
@@ -37,6 +38,10 @@ src/
 ├── vector_store/                # Abstract + Qdrant + Chroma
 ├── memory/                      # Abstract + QdrantMemory
 ├── debug/                       # سیستم لاگ سطح‌بندی‌شده
+│
+├── task_sources/                # ورودیِ تسک از Jira (TaskInput، بُردها)
+├── batch_testing/               # Batch Testing — کشف، SQLite، runner، artifactها
+├── test_execution/newman/       # موتورِ اجرای Newman
 │
 └── agents/
     ├── state.py / base_agent.py / graph.py / hitl.py / memory_nodes.py
