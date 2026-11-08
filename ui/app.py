@@ -36,6 +36,7 @@ import streamlit as st  # noqa: E402
 from src.agents.test_case_generator.source_selection import SourceSelection  # noqa: E402
 from ui import (  # noqa: E402
     batch_app,
+    box_app,
     step1_task_analysis,
     step2_api_mapping,
     step3_scenario_analysis,
@@ -438,7 +439,8 @@ def main() -> None:
         page_icon=":material/route:",
         layout="wide",
     )
-    # دو جریانِ جدا: ویزاردِ تک‌issue (پیش‌فرض) و Batch Testing (ui/batch_app.py)
+    # سه بخشِ جدا: ویزاردِ تک‌issue (پیش‌فرض)، Batch Testing (ui/batch_app.py) و
+    # کتابخانه‌ی TestCase Box (ui/box_app.py) — هیچ‌کدام وضعیتِ دیگری را نمی‌خواند
     page = st.navigation(
         [
             st.Page(
@@ -453,6 +455,12 @@ def main() -> None:
                 title="Batch testing",
                 icon=":material/playlist_play:",
                 url_path="batch-testing",
+            ),
+            st.Page(
+                box_app.render,
+                title="TestCase Box",
+                icon=":material/inventory_2:",
+                url_path="testcase-box",
             ),
         ]
     )

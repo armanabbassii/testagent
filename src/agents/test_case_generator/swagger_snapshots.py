@@ -14,7 +14,11 @@ swagger_snapshots.py — منابعِ محلیِ Swagger برای قدم دوم
 فقط وقتی کاربر دکمه‌ی Update همان منبع را بزند. سند پیش از هر نوشتنی کامل
 دریافت، بررسی و با همان ``discover_from_spec`` اعتبارسنجی می‌شود و بعد به‌صورتِ
 اتمی (فایلِ موقت در همان پوشه + ``os.replace``) جای فایلِ قبلی را می‌گیرد؛ هر
-خطایی فایلِ قبلی را دست‌نخورده نگه می‌دارد. هیچ cacheی در کار نیست: قدم دوم در
+خطایی فایلِ قبلی را دست‌نخورده نگه می‌دارد.
+
+همگام‌سازیِ روزانه (src/swagger_sync) همین مسیر را به کار می‌برد: fetch_and_validate،
+decide_update (محافظِ کاهشِ operationها و تشخیصِ «بدونِ تغییر») و write_snapshot زیرِ قفلِ
+نوشتنِ مشترک (swagger_locks) — دکمه‌ی Update و job هرگز هم‌زمان فایل نمی‌نویسند. هیچ cacheی در کار نیست: قدم دوم در
 هر اجرا فایل را دوباره می‌خواند، پس اجرای بعدیِ نگاشت سندِ تازه را می‌بیند.
 """
 
@@ -38,7 +42,18 @@ from src.agents.test_case_generator.api_discovery import (
     discover_from_spec,
     swagger_group_name,
 )
-from src.config import SWAGGER_CONNECT_TIMEOUT_SECONDS, SWAGGER_READ_TIMEOUT_SECONDS
+from src.agents.test_case_generator.swagger_locks import (
+    SwaggerLockBusy,
+    SwaggerLockUnavailable,
+    write_lock,
+)
+from src.swagger_settings import (
+    SWAGGER_API_DOCS_BASE_URL,
+    SWAGGER_CONNECT_TIMEOUT_SECONDS,
+    SWAGGER_READ_TIMEOUT_SECONDS,
+    SwaggerSettingsError,
+    max_shrink_ratio,
+)
 
 # پوشه‌ی snapshotها در ریشه‌ی پروژه. برای تست قابلِ جایگزینی است.
 SNAPSHOT_DIR = Path(__file__).resolve().parents[3] / "data" / "swagger"
@@ -67,6 +82,23 @@ class SwaggerSnapshotError(RuntimeError):
     """snapshot درخواستی وجود ندارد، خوانده نشد یا سندِ معتبری نیست."""
 
 
+KIND_CONNECT_TIMEOUT = "connect_timeout"
+KIND_READ_TIMEOUT = "read_timeout"
+KIND_CONNECTION = "connection"
+KIND_REQUEST = "request"
+KIND_HTTP_STATUS = "http_status"
+KIND_EMPTY = "empty"
+KIND_INVALID_JSON = "invalid_json"
+KIND_NOT_OPENAPI = "not_openapi"
+KIND_UNUSABLE = "unusable"
+KIND_NO_OPERATIONS = "no_operations"
+KIND_SHRINK = "shrink"
+KIND_PERMISSION = "permission"
+KIND_WRITE = "write"
+KIND_LOCKED = "locked"
+KIND_CONFIGURATION = "configuration"
+
+
 class SwaggerRefreshError(RuntimeError):
     """تازه‌سازیِ یک snapshot شکست خورد — فایلِ قبلی دست‌نخورده مانده است.
 
@@ -74,10 +106,23 @@ class SwaggerRefreshError(RuntimeError):
     ``hint`` جمله‌ی راهنمای بعدی را نگه می‌دارد.
     """
 
-    def __init__(self, label: str, reason: str, hint: str = _RETRY_HINT) -> None:
+    def __init__(
+        self,
+        label: str,
+        reason: str,
+        hint: str = _RETRY_HINT,
+        *,
+        kind: str = "error",
+        status: int | None = None,
+        retry_after: float | None = None,
+    ) -> None:
         self.label = label
         self.reason = reason
         self.hint = hint
+        # kind — نوعِ شکست برای تصمیمِ retry در همگام‌سازی (KIND_*)؛ status — کدِ HTTP
+        self.kind = kind
+        self.status = status
+        self.retry_after = retry_after
         super().__init__(f"Failed to refresh {label} Swagger: {reason}")
 
 
@@ -123,7 +168,9 @@ class SwaggerSource:
 
 @dataclass(frozen=True)
 class RefreshResult:
-    """نتیجه‌ی یک تازه‌سازیِ موفق — برای پیامِ تأیید در UI."""
+    """نتیجه‌ی یک تازه‌سازیِ موفق — برای پیامِ تأیید در UI.
+
+    changed=False یعنی سندِ دریافتی با فایلِ موجود یکی بود و چیزی نوشته نشد."""
 
     key: str
     label: str
@@ -131,12 +178,29 @@ class RefreshResult:
     url: str
     operations: int
     size_bytes: int
+    changed: bool = True
+    previous_operations: int | None = None
+
+
+@dataclass(frozen=True)
+class UpdateDecision:
+    """تصمیمِ نوشتن برای یک سندِ معتبر: UPDATE یا UNCHANGED (رد شدن = SwaggerRefreshError)."""
+
+    action: str  # DECISION_UPDATE | DECISION_UNCHANGED
+    operations: int
+    previous_operations: int | None
+    shrink_ratio: float
+
+
+DECISION_UPDATE = "UPDATE"
+DECISION_UNCHANGED = "UNCHANGED"
 
 
 # همه‌ی گروه‌ها روی همان backendِ podium منتشر می‌شوند؛ نشانیِ خامِ هر گروه
 # «<این پایه>/<primaryName>» است (همان قاعده‌ی springdoc که Admin و Customer
 # دارند).
-_API_DOCS_BASE = "http://podium-back.devpod.ir/api/v3/api-docs"
+# پایه از SWAGGER_API_DOCS_BASE_URL (src/swagger_settings.py)؛ پیش‌فرض همان نشانیِ قبلی است.
+_API_DOCS_BASE = SWAGGER_API_DOCS_BASE_URL
 
 
 def _registered(
@@ -167,8 +231,8 @@ SWAGGER_SOURCES: tuple[SwaggerSource, ...] = (
 )
 
 
-
 # ── پرسش‌های پایه ────────────────────────────────────────────────────────────
+
 
 def source_for(key: str) -> SwaggerSource:
     """منبعِ یک کلید را برمی‌گرداند.
@@ -182,9 +246,7 @@ def source_for(key: str) -> SwaggerSource:
     source = next((source for source in SWAGGER_SOURCES if source.key == wanted), None)
     if source is None:
         valid = ", ".join(repr(source.key) for source in SWAGGER_SOURCES)
-        raise SwaggerSnapshotError(
-            f"Unknown Swagger source {key!r}. Valid sources are: {valid}."
-        )
+        raise SwaggerSnapshotError(f"Unknown Swagger source {key!r}. Valid sources are: {valid}.")
     return source
 
 
@@ -363,9 +425,8 @@ def snapshot_available(key: str, *, directory: Path | str | None = None) -> bool
 
 # ── خواندن ───────────────────────────────────────────────────────────────────
 
-def load_snapshot(
-    key: str, *, directory: Path | str | None = None
-) -> DiscoveredService:
+
+def load_snapshot(key: str, *, directory: Path | str | None = None) -> DiscoveredService:
     """یک snapshot محلی را می‌خواند و به DiscoveredService تبدیل می‌کند.
 
     ``source_url`` عمداً نشانیِ اصلیِ سند است (نه مسیرِ فایل) تا منشأِ
@@ -386,9 +447,7 @@ def load_snapshot(
     try:
         spec = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as exc:
-        raise SwaggerSnapshotError(
-            f"Swagger snapshot {path} could not be read: {exc}"
-        ) from exc
+        raise SwaggerSnapshotError(f"Swagger snapshot {path} could not be read: {exc}") from exc
 
     try:
         return discover_from_spec(spec, source_url=source.remote_url, name=source.label)
@@ -417,9 +476,7 @@ def load_snapshots(
     return services, errors
 
 
-def snapshot_fingerprint(
-    keys: list[str], *, directory: Path | str | None = None
-) -> str:
+def snapshot_fingerprint(keys: list[str], *, directory: Path | str | None = None) -> str:
     """اثرانگشتِ محتوای snapshotها — مثلاً «admin=1a2b3c4d5e6f».
 
     قدم دوم این را به‌عنوانِ ورودیِ خودش ثبت می‌کند تا اگر فایلی بعد از اجرای
@@ -438,55 +495,80 @@ def snapshot_fingerprint(
 
 # ── تازه‌سازی ────────────────────────────────────────────────────────────────
 
-def _fetch(source: SwaggerSource, session: Any, timeout: tuple[float, float]) -> bytes:
-    """بدنه‌ی کاملِ پاسخ را می‌گیرد؛ هر شکستِ شبکه/HTTP یک SwaggerRefreshError است."""
+
+def _fetch(source: SwaggerSource, session: Any, timeout: tuple[float, float]) -> tuple[bytes, int]:
+    """(بدنه‌ی کامل، کدِ HTTP) ِ پاسخ؛ هر شکستِ شبکه/HTTP یک SwaggerRefreshError است."""
     url = source.remote_url
     try:
-        response = session.get(
-            url, timeout=timeout, headers={"Accept": "application/json"}
-        )
+        response = session.get(url, timeout=timeout, headers={"Accept": "application/json"})
     # ترتیب مهم است: ConnectTimeout هم زیرکلاسِ Timeout است و هم ConnectionError.
     except requests.exceptions.ConnectTimeout as exc:
         raise SwaggerRefreshError(
             source.label,
             f"Connection timed out after {timeout[0]:g}s while connecting to {url}.",
             _NETWORK_HINT,
+            kind=KIND_CONNECT_TIMEOUT,
         ) from exc
     except requests.exceptions.Timeout as exc:
         raise SwaggerRefreshError(
             source.label,
             f"Request timed out — {url} did not respond within {timeout[1]:g}s.",
             _NETWORK_HINT,
+            kind=KIND_READ_TIMEOUT,
         ) from exc
     except requests.exceptions.ConnectionError as exc:
         raise SwaggerRefreshError(
             source.label,
             f"Could not connect to {url} (connection refused or network failure).",
             _NETWORK_HINT,
+            kind=KIND_CONNECTION,
         ) from exc
     except requests.exceptions.RequestException as exc:
         raise SwaggerRefreshError(
-            source.label, f"Request to {url} failed: {exc}", _NETWORK_HINT
+            source.label,
+            f"Request to {url} failed: {exc}",
+            _NETWORK_HINT,
+            kind=KIND_REQUEST,
         ) from exc
 
     status = response.status_code
     if not 200 <= status < 300:
         reason = f" {response.reason}" if getattr(response, "reason", "") else ""
         raise SwaggerRefreshError(
-            source.label, f"The server returned HTTP {status}{reason} for {url}."
+            source.label,
+            f"The server returned HTTP {status}{reason} for {url}.",
+            kind=KIND_HTTP_STATUS,
+            status=status,
+            retry_after=_retry_after(response),
         )
-    return response.content or b""
+    return response.content or b"", status
+
+
+def _retry_after(response: Any) -> float | None:
+    """Retry-After ِ عددی (ثانیه) — هر شکلِ دیگر نادیده گرفته می‌شود."""
+    headers = getattr(response, "headers", None) or {}
+    try:
+        value = headers.get("Retry-After")
+    except AttributeError:
+        return None
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return None
+    return seconds if seconds >= 0 else None
 
 
 def _validate(source: SwaggerSource, content: bytes) -> DiscoveredService:
     """محتوا باید JSON و یک سندِ OpenAPI/Swagger با دست‌کم یک عملیات باشد."""
     if not content.strip():
-        raise SwaggerRefreshError(source.label, "The server returned an empty response.")
+        raise SwaggerRefreshError(
+            source.label, "The server returned an empty response.", kind=KIND_EMPTY
+        )
     try:
         spec = json.loads(content)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise SwaggerRefreshError(
-            source.label, f"The response is not valid JSON ({exc})."
+            source.label, f"The response is not valid JSON ({exc}).", kind=KIND_INVALID_JSON
         ) from exc
 
     if not isinstance(spec, dict) or not (spec.get("openapi") or spec.get("swagger")):
@@ -494,14 +576,17 @@ def _validate(source: SwaggerSource, content: bytes) -> DiscoveredService:
             source.label,
             "The response is not a Swagger/OpenAPI document (no 'openapi' or "
             "'swagger' version field).",
+            kind=KIND_NOT_OPENAPI,
         )
     try:
         service = discover_from_spec(spec, source_url=source.remote_url, name=source.label)
     except SwaggerLoadError as exc:
-        raise SwaggerRefreshError(source.label, f"The document is not usable: {exc}") from exc
+        raise SwaggerRefreshError(
+            source.label, f"The document is not usable: {exc}", kind=KIND_UNUSABLE
+        ) from exc
     if not service.apis:
         raise SwaggerRefreshError(
-            source.label, "The document contains no API operation."
+            source.label, "The document contains no API operation.", kind=KIND_NO_OPERATIONS
         )
     return service
 
@@ -516,9 +601,7 @@ def _replace_atomically(source: SwaggerSource, path: Path, content: bytes) -> No
     temp_name = ""
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        fd, temp_name = tempfile.mkstemp(
-            prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
-        )
+        fd, temp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
         with os.fdopen(fd, "wb") as handle:
             handle.write(content)
             handle.flush()
@@ -528,10 +611,194 @@ def _replace_atomically(source: SwaggerSource, path: Path, content: bytes) -> No
         if temp_name:
             Path(temp_name).unlink(missing_ok=True)
         if isinstance(exc, PermissionError):
-            reason = f"Permission denied while writing {path}."
+            reason, kind = f"Permission denied while writing {path}.", KIND_PERMISSION
         else:
-            reason = f"Could not write {path}: {exc.strerror or exc}."
-        raise SwaggerRefreshError(source.label, reason) from exc
+            reason, kind = f"Could not write {path}: {exc.strerror or exc}.", KIND_WRITE
+        raise SwaggerRefreshError(source.label, reason, kind=kind) from exc
+
+
+@dataclass(frozen=True)
+class FetchedDocument:
+    """سندِ دریافت‌شده و معتبر، با کدِ HTTP ِ پاسخ."""
+
+    content: bytes
+    service: DiscoveredService
+    status: int
+
+
+def fetch_validated(
+    key: str,
+    *,
+    session: Any = None,
+    timeout: tuple[float, float] | None = None,
+    url: str | None = None,
+) -> FetchedDocument:
+    """سندِ یک منبع را می‌گیرد و اعتبارسنجی می‌کند — هیچ فایلی نوشته نمی‌شود.
+
+    url فقط برای بررسیِ HTTPS (همان منبع با نشانیِ دیگر) است؛ پیش‌فرض remote_url ِ ثبت‌شده.
+    خطای اعتبارسنجی (پاسخِ 2xx با بدنه‌ی نامعتبر) هم کدِ HTTP را در ``status`` دارد.
+
+    پرتاب می‌کند:
+        SwaggerSnapshotError : کلید ناشناخته باشد
+        SwaggerRefreshError  : شبکه، HTTP، JSON یا اعتبارسنجی شکست بخورد (با kind)
+    """
+    source = source_for(key)
+    if url is not None and url != source.remote_url:
+        source = SwaggerSource(**{**source.__dict__, "remote_url": url})
+    timeout = timeout or (SWAGGER_CONNECT_TIMEOUT_SECONDS, SWAGGER_READ_TIMEOUT_SECONDS)
+    content, status = _fetch(source, session or requests.Session(), timeout)
+    try:
+        service = _validate(source, content)
+    except SwaggerRefreshError as exc:
+        exc.status = status
+        raise
+    return FetchedDocument(content, service, status)
+
+
+def fetch_and_validate(
+    key: str,
+    *,
+    session: Any = None,
+    timeout: tuple[float, float] | None = None,
+    url: str | None = None,
+) -> tuple[bytes, DiscoveredService]:
+    """همان fetch_validated، بدونِ کدِ HTTP: (بایت‌ها، سرویس)."""
+    document = fetch_validated(key, session=session, timeout=timeout, url=url)
+    return document.content, document.service
+
+
+def remove_stale_temp_files(directory: Path | str | None = None) -> list[str]:
+    """فایل‌های موقتِ جامانده از جایگزینیِ اتمیِ قطع‌شده (پروسه‌ای که وسطِ نوشتن کشته شد) را
+    زیرِ قفلِ نوشتن حذف می‌کند — فقط «.<key>.json.*.tmp» ِ منابعِ ثبت‌شده، نه هیچ فایلِ دیگری.
+    هر شکست (قفل، دسترسی) بی‌صدا رد می‌شود: این پاک‌سازی هرگز اجرا را متوقف نمی‌کند."""
+    base = Path(directory) if directory is not None else SNAPSHOT_DIR
+    removed: list[str] = []
+    try:
+        with write_lock(base, wait_s=5):
+            for source in SWAGGER_SOURCES:
+                for path in base.glob(f".{source.filename}.*.tmp"):
+                    try:
+                        if path.is_file():
+                            path.unlink()
+                            removed.append(path.name)
+                    except OSError:
+                        continue
+    except (SwaggerLockBusy, SwaggerLockUnavailable, OSError):
+        return removed
+    return removed
+
+
+def _existing_operations(source: SwaggerSource, path: Path) -> tuple[bytes | None, int | None]:
+    """(بایت‌ها، تعدادِ operationها) ِ فایلِ موجود؛ فایلِ ناموجود/نامعتبر → (بایت یا None، None)."""
+    try:
+        existing = path.read_bytes()
+    except OSError:
+        return None, None
+    try:
+        spec = json.loads(existing)
+        service = discover_from_spec(spec, source_url=source.remote_url, name=source.label)
+    except (UnicodeDecodeError, json.JSONDecodeError, SwaggerLoadError, TypeError, ValueError):
+        return existing, None
+    return existing, len(service.apis)
+
+
+def _same_document(old: bytes | None, new: bytes) -> bool:
+    if old is None:
+        return False
+    if old == new:
+        return True
+    try:
+        return json.loads(old) == json.loads(new)
+    except (UnicodeDecodeError, json.JSONDecodeError):
+        return False
+
+
+def decide_update(
+    key: str,
+    content: bytes,
+    service: DiscoveredService,
+    *,
+    directory: Path | str | None = None,
+    shrink_ratio: float | None = None,
+) -> UpdateDecision:
+    """سندِ معتبر جای فایلِ موجود بنشیند یا نه — هیچ فایلی نوشته نمی‌شود.
+
+    * محتوای یکسان (بایت‌به‌بایت یا JSON ِ برابر) → UNCHANGED؛
+    * محافظِ کاهش: اگر فایلِ موجود معتبر است و operationهای سندِ تازه کمتر از
+      shrink_ratio × operationهای فعلی‌اند → SwaggerRefreshError(kind=shrink)؛
+      shrink_ratio ِ None یعنی SWAGGER_SYNC_MAX_SHRINK_RATIO[_<KEY>]؛ 0 یعنی غیرفعال.
+    """
+    source = source_for(key)
+    path = snapshot_path(key, directory=directory)
+    if shrink_ratio is None:
+        try:
+            shrink_ratio = max_shrink_ratio(source.key)
+        except SwaggerSettingsError as exc:
+            raise SwaggerRefreshError(
+                source.label, f"{exc} The existing file was kept.", kind=KIND_CONFIGURATION
+            ) from None
+    existing, previous = _existing_operations(source, path)
+    operations = len(service.apis)
+    if _same_document(existing, content):
+        return UpdateDecision(DECISION_UNCHANGED, operations, previous, shrink_ratio)
+    if previous and shrink_ratio > 0 and operations < shrink_ratio * previous:
+        raise SwaggerRefreshError(
+            source.label,
+            f"The new document has {operations} operations, fewer than "
+            f"{shrink_ratio:g} × the {previous} operations of the current file; it looks "
+            "incomplete. The existing file was kept (shrink guard).",
+            kind=KIND_SHRINK,
+        )
+    return UpdateDecision(DECISION_UPDATE, operations, previous, shrink_ratio)
+
+
+def write_snapshot(
+    key: str,
+    content: bytes,
+    service: DiscoveredService,
+    *,
+    directory: Path | str | None = None,
+    shrink_ratio: float | None = None,
+    lock_wait_s: float | None = None,
+) -> RefreshResult:
+    """زیرِ قفلِ نوشتنِ مشترک: decide_update و اگر لازم بود جایگزینیِ اتمیِ همان فایل.
+
+    تصمیم داخلِ قفل گرفته می‌شود تا با فایلی مقایسه شود که واقعاً جایگزین می‌شود. هر
+    شکستی (قفل، محافظ، نوشتن) فایلِ قبلی را دست‌نخورده نگه می‌دارد."""
+    source = source_for(key)
+    path = snapshot_path(key, directory=directory)
+    base = directory if directory is not None else SNAPSHOT_DIR
+    wait = {} if lock_wait_s is None else {"wait_s": lock_wait_s}
+    try:
+        with write_lock(base, **wait):
+            decision = decide_update(
+                key, content, service, directory=directory, shrink_ratio=shrink_ratio
+            )
+            if decision.action == DECISION_UPDATE:
+                _replace_atomically(source, path, content)
+    except SwaggerLockBusy:
+        raise SwaggerRefreshError(
+            source.label,
+            "Another Swagger update is writing the snapshots right now (the daily sync or "
+            "another Update click).",
+            kind=KIND_LOCKED,
+        ) from None
+    except SwaggerLockUnavailable:
+        raise SwaggerRefreshError(
+            source.label,
+            "The Swagger snapshot lock could not be confirmed; nothing was written.",
+            kind=KIND_LOCKED,
+        ) from None
+    return RefreshResult(
+        key=source.key,
+        label=source.label,
+        path=path,
+        url=source.remote_url,
+        operations=decision.operations,
+        size_bytes=len(content),
+        changed=decision.action == DECISION_UPDATE,
+        previous_operations=decision.previous_operations,
+    )
 
 
 def refresh_snapshot(
@@ -540,37 +807,26 @@ def refresh_snapshot(
     session: Any = None,
     timeout: tuple[float, float] | None = None,
     directory: Path | str | None = None,
+    shrink_ratio: float | None = None,
 ) -> RefreshResult:
     """سندِ تازه‌ی یک منبع را می‌گیرد و فقط snapshotِ همان منبع را جایگزین می‌کند.
 
     هر فراخوانی یک درخواستِ تازه است (هیچ cacheی نیست). ترتیب: دریافتِ کامل →
-    بررسیِ کدِ HTTP → parse JSON → اعتبارسنجیِ OpenAPI → نوشتنِ اتمی. اگر هر
-    قدم شکست بخورد، فایلِ قبلی دست‌نخورده می‌ماند. تلاشِ دوباره خودکار نیست —
-    کاربر دکمه را دوباره می‌زند.
+    بررسیِ کدِ HTTP → parse JSON → اعتبارسنجیِ OpenAPI → (زیرِ قفلِ نوشتن) محافظِ کاهش و
+    تشخیصِ «بدونِ تغییر» → نوشتنِ اتمی. اگر هر قدم شکست بخورد، فایلِ قبلی دست‌نخورده
+    می‌ماند. تلاشِ دوباره خودکار نیست — کاربر دکمه را دوباره می‌زند.
 
     پرتاب می‌کند:
         SwaggerSnapshotError : کلید ناشناخته باشد
-        SwaggerRefreshError  : شبکه، HTTP، JSON، اعتبارسنجی یا نوشتن شکست بخورد
+        SwaggerRefreshError  : شبکه، HTTP، JSON، اعتبارسنجی، محافظ، قفل یا نوشتن شکست بخورد
     """
-    source = source_for(key)
-    path = snapshot_path(key, directory=directory)
-    timeout = timeout or (SWAGGER_CONNECT_TIMEOUT_SECONDS, SWAGGER_READ_TIMEOUT_SECONDS)
-
-    content = _fetch(source, session or requests.Session(), timeout)
-    service = _validate(source, content)
-    _replace_atomically(source, path, content)
-
-    return RefreshResult(
-        key=source.key,
-        label=source.label,
-        path=path,
-        url=source.remote_url,
-        operations=len(service.apis),
-        size_bytes=len(content),
-    )
+    content, service = fetch_and_validate(key, session=session, timeout=timeout)
+    return write_snapshot(key, content, service, directory=directory, shrink_ratio=shrink_ratio)
 
 
 __all__ = [
+    "DECISION_UNCHANGED",
+    "DECISION_UPDATE",
     "DEFAULT_SELECTION",
     "SELECTION_ADMIN",
     "SELECTION_AUTO",
@@ -586,6 +842,13 @@ __all__ = [
     "SwaggerRefreshError",
     "SwaggerSnapshotError",
     "SwaggerSource",
+    "UpdateDecision",
+    "decide_update",
+    "FetchedDocument",
+    "fetch_and_validate",
+    "fetch_validated",
+    "remove_stale_temp_files",
+    "write_snapshot",
     "enabled_sources",
     "expand_selection",
     "extract_urls",

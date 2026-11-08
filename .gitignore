@@ -98,3 +98,9 @@ node_modules
 # Batch testing — local SQLite database and execution artifacts (never committed)
 data/batch_testing/
 artifacts/batch_testing/
+
+# TestCase Box — local SQLite database (never committed)
+data/testcase_box/
+
+# Execution Gate — local lock file and coordination database (never committed)
+data/execution_gate/

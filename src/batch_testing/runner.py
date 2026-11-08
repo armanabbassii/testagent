@@ -31,6 +31,15 @@ src/batch_testing/runner.py — اجرای ترتیبیِ issueهای یک batch
     اجراهای QUEUED → CANCELLED و batch → CANCELLED. نتیجه‌ی واقعیِ issueی که
     پیش از اثرِ لغو تمام شده بود هرگز با CANCELLED جایگزین نمی‌شود.
   * اگر ذخیره‌کردن خودش شکست بخورد، runner می‌ایستد و گزارش می‌دهد.
+  * Execution Gate ِ مشترک (src/execution_gate): هر نشست (start، resume، retry) در _owned،
+    پس از بررسی‌های فقط‌خواندنیِ _refusal و پیش از leaseِ batch، Gate را با kind="BATCH"
+    می‌گیرد و فقط پس از پایانِ کاملِ نشست و آزادسازیِ leaseِ batch آزاد می‌کند — Jira، LLM و
+    Newman همه زیرِ آن‌اند (TestCase Box هرگز هم‌زمان اجرا نمی‌شود). Gate ِ مشغول یا
+    نامطمئن → RESULT_REFUSED با refusal ِ gate_busy / gate_unavailable و هیچ کاری انجام
+    نمی‌شود. پایش heartbeatِ Gate هم می‌زند؛ شکستش (gate_lost / gate_unavailable) بی‌مهلت
+    نشست را متوقف و batch را INTERRUPTED (قابلِ resume) می‌کند. درست پیش از هر پروسه‌ی
+    Newman حصارِ _before_newman مالکیت را assert می‌کند؛ رد → Newman شروع نمی‌شود. هیچ
+    بازپس‌گیریِ مبتنی بر heartbeat نیست: مرگِ پروسه قفلِ سیستم‌عامل را آزاد می‌کند.
 """
 
 from __future__ import annotations
@@ -88,6 +97,14 @@ from src.batch_testing.storage import (
     OwnershipError,
     StorageError,
 )
+from src.execution_gate import (
+    ExecutionGate,
+    GateBusy,
+    GateError,
+    GateLease,
+    GateLeaseLost,
+    ReleaseOutcome,
+)
 from src.test_execution.newman import NewmanOptions
 
 HEARTBEAT_INTERVAL_S = 10.0
@@ -112,8 +129,23 @@ RESULT_STORAGE_FAILED = "storage_failed"
 RESULT_FAILED = "failed"  # استثنای پیش‌بینی‌نشده در خودِ runner
 RESULT_CONFIGURATION_CHANGED = "configuration_changed"
 RESULT_AUTHENTICATION_FAILED = "authentication_failed"
+# Execution Gate ِ مشترک (Batch و TestCase Box هرگز هم‌زمان اجرا نمی‌شوند)
+RESULT_GATE_LOST = "gate_lost"  # رکوردِ Gate دیگر مالِ این نشست نیست — نشست متوقف شد
+RESULT_GATE_UNAVAILABLE = "gate_unavailable"  # مالکیتِ Gate قابلِ تأیید نبود — نشست متوقف شد
+# دلیلِ ردِ پیش از هر کار (RunnerResult.refusal؛ وضعیت همان RESULT_REFUSED است)
+REFUSAL_GATE_BUSY = "gate_busy"  # نشستِ دیگری Gate را دارد
+REFUSAL_GATE_UNAVAILABLE = "gate_unavailable"  # Gate را نمی‌توان با اطمینان گرفت
 
 LEASE_LOST_MESSAGE = "The runner lost its batch lease."
+GATE_LOST_MESSAGE = (
+    "The runner lost the shared execution gate; the session was stopped and can be resumed."
+)
+GATE_UNAVAILABLE_MESSAGE = (
+    "The shared execution gate could not be confirmed; the session was stopped and can be resumed."
+)
+GATE_STOPPED_EXECUTION_MESSAGE = (
+    "The runner stopped this execution because the shared execution gate could not be confirmed."
+)
 
 _STORAGE_ERRORS = (StorageError, sqlite3.Error)
 
@@ -138,6 +170,11 @@ def _default_token_provider() -> TokenSource:
     return TokenProvider()
 
 
+def _default_gate() -> ExecutionGate:
+    """Gate ِ مشترکِ data/execution_gate/ — تست‌ها این را به پوشه‌ی موقت می‌برند."""
+    return ExecutionGate()
+
+
 @dataclass
 class RunnerResult:
     batch_id: str
@@ -147,6 +184,10 @@ class RunnerResult:
     executions: list[str] = field(default_factory=list)
     # پیامِ ثابت؛ هرگز دادهٔ issue
     error: str = ""
+    # دلیلِ ماشینیِ ردِ پیش از هر کار (REFUSAL_*)؛ خالی برای ردهای قبلی
+    refusal: str = ""
+    # خطاهای پاک‌سازی (آزادسازیِ lease و Gate) — جدا از error تا خطای اصلی پنهان نشود
+    cleanup_errors: list[str] = field(default_factory=list)
 
 
 class _Stop(Exception):  # noqa: N818 — کنترلِ جریانِ داخلی، نه خطای عمومی
@@ -157,7 +198,11 @@ class _Stop(Exception):  # noqa: N818 — کنترلِ جریانِ داخلی،
 
 class _Monitor(threading.Thread):
     """heartbeat + پایشِ CANCEL روی اتصالِ جدای خودش؛ هر خطا ثبت می‌شود و runner را
-    متوقف می‌کند — هیچ استثنایی بی‌صدا گم نمی‌شود."""
+    متوقف می‌کند — هیچ استثنایی بی‌صدا گم نمی‌شود.
+
+    با gate_lease، هر heartbeatِ موفقِ batch یک heartbeatِ Gate هم می‌زند. شکستِ heartbeatِ
+    Gate خطای ایمنی است و بی‌مهلت: runner متوقف و issueِ جاری لغو می‌شود. قفلِ سیستم‌عامل
+    همچنان دستِ همین نشست می‌ماند تا runner آن را در پاک‌سازی آزاد کند."""
 
     def __init__(
         self,
@@ -169,6 +214,7 @@ class _Monitor(threading.Thread):
         poll_interval: float,
         failure_after: float,
         clock: Callable[[], float] = time.monotonic,
+        gate_lease: GateLease | None = None,
     ) -> None:
         super().__init__(name=f"batch-runner-monitor-{batch_id[:8]}", daemon=True)
         self._open_store = open_store
@@ -183,6 +229,8 @@ class _Monitor(threading.Thread):
         self.cancel_requested = threading.Event()
         self.failure: tuple[str, str] | None = None  # (status, error)
         self.beats = 0
+        self._gate_lease = gate_lease
+        self.gate_beats = 0
 
     def set_active(self, event: threading.Event | None) -> None:
         with self._lock:
@@ -238,6 +286,9 @@ class _Monitor(threading.Thread):
                             )
                             return
                         next_beat = moment + self._poll_interval
+                    else:
+                        if not self._beat_gate():
+                            return
                 try:
                     if store.get_batch(self._batch_id).requested_action == ACTION_CANCEL:
                         self.cancel_requested.set()
@@ -248,6 +299,21 @@ class _Monitor(threading.Thread):
                     return
         finally:
             store.close()
+
+    def _beat_gate(self) -> bool:
+        """False یعنی Gate دیگر قابلِ تأیید نیست و runner متوقف شد."""
+        if self._gate_lease is None:
+            return True
+        try:
+            self._gate_lease.heartbeat()
+        except GateLeaseLost:
+            self._fail(RESULT_GATE_LOST, GATE_LOST_MESSAGE)
+            return False
+        except Exception:  # noqa: BLE001 — GateUnavailable یا هر خطای دیگر: fail-closed
+            self._fail(RESULT_GATE_UNAVAILABLE, GATE_UNAVAILABLE_MESSAGE)
+            return False
+        self.gate_beats += 1
+        return True
 
 
 def file_sha256(path: Path | str) -> str | None:
@@ -287,9 +353,14 @@ class BatchRunner:
         heartbeat_interval: float = HEARTBEAT_INTERVAL_S,
         poll_interval: float = POLL_INTERVAL_S,
         stale_after: float = STALE_AFTER_S,
+        gate_factory: Callable[[], ExecutionGate] | None = None,
     ) -> None:
         self.db_path = Path(db_path)
         self.token = uuid.uuid4().hex
+        # None = _default_gate در لحظه‌ی هر نشست (تست‌ها آن را به پوشه‌ی موقت می‌برند)
+        self._gate_factory = gate_factory
+        self._gate_lease: GateLease | None = None
+        self._gate_failure: tuple[str, str] | None = None
         self._executor_factory = executor_factory
         self._store_factory = store_factory
         self._token_provider = token_provider or _default_token_provider()
@@ -351,6 +422,50 @@ class BatchRunner:
         refusal = self._refusal(store, batch, mode, issue_key)
         if refusal:
             return RunnerResult(batch_id, RESULT_REFUSED, batch.status, error=refusal)
+        # Gate ِ مشترک پیش از هر کارِ نشست (lease، توکن، Jira، LLM، Newman) و تا پایانِ آن
+        gate = self._gate_factory or _default_gate
+        try:
+            lease = gate().acquire("BATCH", batch_id)
+        except GateBusy as exc:
+            return RunnerResult(
+                batch_id, RESULT_REFUSED, batch.status, error=str(exc), refusal=REFUSAL_GATE_BUSY
+            )
+        except GateError as exc:
+            return RunnerResult(
+                batch_id,
+                RESULT_REFUSED,
+                batch.status,
+                error=str(exc),
+                refusal=REFUSAL_GATE_UNAVAILABLE,
+            )
+        self._gate_lease, self._gate_failure = lease, None
+        result: RunnerResult | None = None
+        try:
+            result = self._leased(store, batch, mode, issue_key)
+            return result
+        finally:
+            # فقط پس از پایانِ واقعیِ نشست و آزادسازیِ leaseِ batch (درونِ _leased)
+            self._gate_lease = None
+            problem = self._release_gate(lease)
+            if problem and result is not None:
+                result.cleanup_errors.append(problem)
+
+    @staticmethod
+    def _release_gate(lease: GateLease) -> str:
+        """آزادسازی توسطِ همان مالک؛ هرگز استثنایی بیرون نمی‌دهد که خطای اصلی را بپوشاند."""
+        try:
+            outcome = lease.release()
+        except Exception as exc:  # noqa: BLE001 — قفلِ سیستم‌عامل در release آزاد شده است
+            return f"The shared execution gate release failed ({type(exc).__name__})."
+        if outcome is ReleaseOutcome.RECORD_NOT_CLEARED:
+            return (
+                "The shared execution gate was released, but its owner record could not be "
+                "cleared; the next session reconciles it."
+            )
+        return ""
+
+    def _leased(self, store: BatchStore, batch: Batch, mode: str, issue_key: str) -> RunnerResult:
+        batch_id = batch.id
         try:
             store.acquire_lease(batch_id, self.token, pid=os.getpid(), host=socket.gethostname())
         except LeaseError:
@@ -368,6 +483,7 @@ class BatchRunner:
             heartbeat_interval=self._heartbeat_interval,
             poll_interval=self._poll_interval,
             failure_after=self._failure_after,
+            gate_lease=self._gate_lease,
         )
         self._monitor = monitor
         monitor.start()
@@ -425,9 +541,9 @@ class BatchRunner:
             result.status = result.status or RESULT_LEASE_LOST
         except _STORAGE_ERRORS as exc:
             # lease پس از آستانه‌ی کهنگی با بازیابی پس گرفته می‌شود
-            result.error = (
-                result.error or f"The lease could not be released ({type(exc).__name__})."
-            )
+            problem = f"The lease could not be released ({type(exc).__name__})."
+            result.error = result.error or problem
+            result.cleanup_errors.append(problem)  # خطای اصلی (اگر بود) در error می‌ماند
 
     def _interrupt_batch(self, store: BatchStore, batch_id: str) -> None:
         """توقفِ فنی: batch قابلِ resume می‌ماند — بهترین تلاش، فقط با leaseِ خودمان."""
@@ -445,8 +561,34 @@ class BatchRunner:
         monitor = self._monitor
         if monitor is not None and monitor.failure:
             raise _Stop(*monitor.failure)
+        if self._gate_failure:
+            raise _Stop(*self._gate_failure)
         if self._phase_failure:
             raise _Stop(*self._phase_failure)
+
+    def _before_newman(self) -> None:
+        """حصارِ درست پیش از شروعِ پروسه‌ی Newman (از درونِ IssueExecutor): پایش سالم است و
+        Gate هنوز مالِ همین نشست است. در غیرِ این صورت issueِ جاری متوقف می‌شود (cancel_event
+        ست می‌شود → INTERRUPTED و قابلِ resume)، نشست پس از آن می‌ایستد و استثنا Newman را
+        پیش از شروع باز می‌دارد."""
+        monitor, lease = self._monitor, self._gate_lease
+        failure = monitor.failure if monitor is not None else None
+        if failure is None and lease is None:
+            failure = (RESULT_GATE_UNAVAILABLE, GATE_UNAVAILABLE_MESSAGE)
+        if failure is None:
+            try:
+                lease.assert_held()
+            except GateLeaseLost:
+                failure = (RESULT_GATE_LOST, GATE_LOST_MESSAGE)
+            except Exception:  # noqa: BLE001 — GateUnavailable یا هر خطای دیگر: fail-closed
+                failure = (RESULT_GATE_UNAVAILABLE, GATE_UNAVAILABLE_MESSAGE)
+        if failure is None:
+            return
+        if monitor is None or monitor.failure is None:
+            self._gate_failure = self._gate_failure or failure
+        if monitor is not None:
+            monitor.stop_active()
+        raise RuntimeError("The shared execution gate does not permit starting Newman.")
 
     def _read_batch(self, store: BatchStore) -> Batch:
         """batch برای تصمیم‌گیری (PAUSE/CANCEL). مالکیتِ دیده‌شده این‌جا فقط خروجِ زودهنگام
@@ -679,6 +821,7 @@ class BatchRunner:
             newman_options=self._newman_options,
             cancel_event=cancel_event,
             access_token=self._access_token,
+            before_newman=self._before_newman,
         )
         outcome: ExecutionOutcome | None = None
         failure = ""
@@ -745,10 +888,17 @@ class BatchRunner:
         if runner_stopped and status == EXEC_CANCELLED:
             # resume باید این issue را دوباره اجرا کند
             status = EXEC_INTERRUPTED
+            gate_stopped = bool(self._gate_failure) or (
+                self._monitor is not None
+                and self._monitor.failure is not None
+                and self._monitor.failure[0] in (RESULT_GATE_LOST, RESULT_GATE_UNAVAILABLE)
+            )
             fields.update(
                 error_stage=outcome.phase,
                 error_kind=ERROR_RUNNER_STOPPED,
-                error_message="The runner stopped this execution.",
+                error_message=GATE_STOPPED_EXECUTION_MESSAGE
+                if gate_stopped
+                else "The runner stopped this execution.",
             )
         try:
             finish(status, **fields)
@@ -783,7 +933,14 @@ __all__ = [
     "RESULT_COMPLETED",
     "RESULT_AUTHENTICATION_FAILED",
     "RESULT_CONFIGURATION_CHANGED",
+    "GATE_LOST_MESSAGE",
+    "GATE_STOPPED_EXECUTION_MESSAGE",
+    "GATE_UNAVAILABLE_MESSAGE",
+    "REFUSAL_GATE_BUSY",
+    "REFUSAL_GATE_UNAVAILABLE",
     "RESULT_FAILED",
+    "RESULT_GATE_LOST",
+    "RESULT_GATE_UNAVAILABLE",
     "RESULT_HEARTBEAT_FAILED",
     "RESULT_LEASE_LOST",
     "RESULT_PAUSED",

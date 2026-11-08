@@ -80,6 +80,12 @@ def start_refresh(state: MutableMapping[str, Any], key: str) -> bool:
 
 def success_message(result: RefreshResult) -> str:
     """پیامِ تأیید — کدام فایل، از کجا و با چند عملیات."""
+    if not result.changed:
+        return (
+            f"{result.label} Swagger at {result.url} is identical to "
+            f"data/swagger/{result.path.name} ({result.operations} operations); "
+            f"the file was left unchanged."
+        )
     return (
         f"{result.label} Swagger refreshed from {result.url}. "
         f"data/swagger/{result.path.name} was updated "

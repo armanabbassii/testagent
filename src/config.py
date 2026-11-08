@@ -1,15 +1,12 @@
 """
 config.py — بارگذاری تنظیمات از فایل .env
 """
-from pathlib import Path
-
-from dotenv import load_dotenv
 import os
 
-env_file = Path(os.getenv("ENV_FILE", ".env"))
+# همان قاعده‌ی قبلی (ENV_FILE، پیش‌فرض «.env» نسبت به پوشه‌ی جاری)؛ با هر import/reload دوباره.
+from src.env_loader import load_env
 
-if env_file.exists():
-    load_dotenv(env_file)
+env_file = load_env()
 
 
 def _require(key: str, default: str | None = None) -> str:
@@ -77,15 +74,11 @@ LLM_SSL_VERIFY: bool = _env_bool("LLM_SSL_VERIFY", default=True)
 LLM_MAX_OUTPUT_TOKENS: int = int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "8192"))
 
 # ── Swagger snapshot refresh ──────────────────────────────────────────────────
-# timeoutِ دکمه‌های Update قدم دوم (دریافتِ تازه‌ی سندِ Swagger و جایگزینیِ
-# data/swagger/*.json). اتصال کوتاه است تا میزبانِ ازدسترس‌خارج زود گزارش شود؛
-# خواندن بلندتر است: سرور سند را در اولین درخواستِ بعد از راه‌اندازی می‌سازد و
-# در آزمونِ واقعی بیش از ۶۰ ثانیه طول کشید؛ بعد از آن زیرِ یک ثانیه است.
-SWAGGER_CONNECT_TIMEOUT_SECONDS: float = float(
-    os.getenv("SWAGGER_CONNECT_TIMEOUT_SECONDS", "10")
-)
-SWAGGER_READ_TIMEOUT_SECONDS: float = float(
-    os.getenv("SWAGGER_READ_TIMEOUT_SECONDS", "120")
+# تعریف و پیش‌فرض‌ها در src/swagger_settings.py است (مستقل از LLM، برای همگام‌سازیِ روزانه)؛
+# همان نام‌ها این‌جا هم برای سازگاری در دسترس‌اند.
+from src.swagger_settings import (  # noqa: E402, F401 — re-export
+    SWAGGER_CONNECT_TIMEOUT_SECONDS,
+    SWAGGER_READ_TIMEOUT_SECONDS,
 )
 
 # ── Jira (اختیاری — ورودیِ تسک از یک issue در قدمِ اول) ──────────────────────

@@ -36,7 +36,12 @@ file. `refresh_snapshot` does the work:
 2. Require an HTTP 2xx status, valid JSON, an `openapi`/`swagger` version field
    and at least one operation (validated with the same `discover_from_spec` Step 2
    uses).
-3. Write the exact response bytes to a temporary file in this directory and
+3. Under the shared Swagger write lock (also used by the daily sync), compare with the
+   current file: an identical document (same bytes or equal JSON) is left unchanged, and
+   a document with fewer than `SWAGGER_SYNC_MAX_SHRINK_RATIO` (default 0.5; per source
+   `SWAGGER_SYNC_MAX_SHRINK_RATIO_<KEY>`, 0 disables) × the current number of operations
+   is refused as incomplete (shrink guard).
+4. Write the exact response bytes to a temporary file in this directory and
    atomically `os.replace` it over the target.
 
 If any step fails, the previous file is kept untouched, the error is shown under
@@ -44,6 +49,17 @@ the button and the button can be clicked again. Nothing is retried automatically
 and Step 2 mapping is not started by a refresh — the next Step 2 run reads the new
 file (there is no in-memory cache). If Step 2 already has a result, the wizard
 reports that the snapshot contents changed after it ran.
+
+The source URLs are `SWAGGER_API_DOCS_BASE_URL` (default
+`http://podium-back.devpod.ir/api/v3/api-docs`) + `/<group>`.
+
+## Daily synchronisation
+
+`python -m src.swagger_sync run` refreshes every enabled source with the same rules and
+retries each failing source (with capped backoff) until all of them succeed, independently of
+Streamlit; Windows Task Scheduler runs it daily and catches up at logon. See
+`docs/architecture/swagger-sync.md`. It only ever writes the `<key>.json` files of the
+registered sources — never this README or any other file.
 
 You can still replace a file by hand; the same rule applies — save the raw
 OpenAPI JSON under the matching filename.

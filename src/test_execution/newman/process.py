@@ -30,6 +30,8 @@ import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 
+from src.test_execution.newman.supervision import CREATION_FLAGS, ProcessJob, SupervisionError
+
 # متغیرهای محیطی‌ای که Node/Newman برای اجرا و شبکه لازم دارند.
 _INHERITED = (
     "PATH",
@@ -122,27 +124,68 @@ def run_process(
     cancel_event: threading.Event | None = None,
     extra_env: Mapping[str, str] | None = None,
 ) -> ProcessOutcome:
-    """argv بدونِ shell اجرا می‌شود؛ هیچ استثنایی بیرون نمی‌آید."""
+    """argv بدونِ shell اجرا می‌شود؛ هیچ استثنایی بیرون نمی‌آید.
+
+    روی Windows پروسه معلق ساخته می‌شود، به یک Job Object با KILL_ON_JOB_CLOSE سپرده و فقط پس از
+    تأییدِ عضویت resume می‌شود (supervision.py) — پس پیش از مهارشدن هیچ کدی اجرا نمی‌کند. job در
+    finally بسته می‌شود — و اگر پروسه‌ی Python بمیرد سیستم‌عامل آن را می‌بندد — پس هیچ عضوِ زنده‌ای
+    (حتی Node ِ هنگ‌کرده) پس از این تابع یا پس از مرگِ والد باقی نمی‌ماند."""
     kwargs: dict = {}
     if sys.platform == "win32":
-        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP
+        kwargs["creationflags"] = subprocess.CREATE_NEW_PROCESS_GROUP | CREATION_FLAGS
     else:
         kwargs["start_new_session"] = True
     try:
-        process = subprocess.Popen(
-            argv,
-            cwd=cwd,
-            env=child_environment(extra_env),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            **kwargs,
-        )
-    except OSError as exc:
-        return ProcessOutcome(
-            started=False, error=f"{type(exc).__name__}: the process could not be started."
-        )
+        job = ProcessJob()
+    except SupervisionError as exc:
+        # پیش از ساختِ هر پروسه — هرگز بی‌نظارت اجرا نمی‌شود
+        return ProcessOutcome(started=False, error=f"{exc} The process was not started.")
+    process: subprocess.Popen | None = None
+    running = False
+    try:
+        try:
+            process = subprocess.Popen(
+                argv,
+                cwd=cwd,
+                env=child_environment(extra_env),
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                **kwargs,
+            )
+        except OSError as exc:
+            return ProcessOutcome(
+                started=False, error=f"{type(exc).__name__}: the process could not be started."
+            )
+        try:
+            job.assign(process)  # پروسه هنوز معلق است و هیچ کدی اجرا نکرده
+            job.start(process)  # فقط پس از تأییدِ عضویت
+        except SupervisionError as exc:
+            stdout, stderr = _terminate(process)  # بی‌نظارت هرگز اجرا نمی‌شود
+            return ProcessOutcome(
+                started=True,
+                exit_code=process.returncode,
+                stdout=(stdout or b"").decode("utf-8", errors="replace"),
+                stderr=(stderr or b"").decode("utf-8", errors="replace"),
+                pid=process.pid,
+                error=f"{exc} The process was terminated.",
+            )
+        running = True
+        return _supervise(process, timeout_s, cancel_event)
+    finally:
+        if process is not None and not running and process.poll() is None:
+            # استثنای پیش‌بینی‌نشده پیش از resume: پروسه‌ی معلق (شاید بیرونِ job) رها نمی‌شود
+            process.kill()
+            try:
+                process.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                pass
+        job.close()  # KILL_ON_JOB_CLOSE: هر عضوِ هنوز زنده کشته می‌شود
 
+
+def _supervise(
+    process: subprocess.Popen, timeout_s: float, cancel_event: threading.Event | None
+) -> ProcessOutcome:
     timed_out = cancelled = False
     if cancel_event is None:
         try:

@@ -232,6 +232,25 @@ Single Issue هیچ کالکشنی را اجرا نمی‌کند. خروجیِ L
   نمی‌شود (`ERROR`، `CONFIGURATION_CHANGED`) و runner می‌ایستد؛ پس از بازگرداندنِ
   فایل، Resume همان issue را دوباره اجرا می‌کند. هرگز با پیکربندیِ دیگری اجرا نمی‌شود.
 
+### Execution Gate ِ مشترک (`src/execution_gate/`)
+
+Batch و TestCase Box هرگز هم‌زمان اجرا نمی‌شوند. هر نشستِ runner (Start، Resume، Retry)
+در `BatchRunner._owned` — پس از بررسی‌های فقط‌خواندنیِ وضعیتِ batch و **پیش از** lease،
+توکن، Jira، LLM و Newman — Gate را با `kind="BATCH"` می‌گیرد و فقط پس از پایانِ کاملِ
+نشست و آزادسازیِ leaseِ batch آزاد می‌کند.
+
+| وضعیت | رفتار |
+|---|---|
+| Gate مشغول (مثلاً اجرای Box) | `RESULT_REFUSED` با `refusal="gate_busy"` و پیامی که دارنده را نام می‌برد؛ هیچ کاری انجام و هیچ رکوردی ساخته نمی‌شود |
+| Gate نامطمئن (پایگاهِ خراب، فایلِ قفلِ ناخوانا، …) | `RESULT_REFUSED` با `refusal="gate_unavailable"` — fail-closed |
+| heartbeat | پایش با هر heartbeatِ batch یک heartbeatِ Gate هم می‌زند؛ هر شکستش بی‌مهلت نشست را متوقف می‌کند (`gate_lost` / `gate_unavailable`)، issueِ جاری لغو و `INTERRUPTED` می‌شود و batch `INTERRUPTED` و قابلِ Resume است |
+| پیش از هر Newman | `IssueExecutor` درست پیش از `engine.run` حصارِ `ExecutionRequest.before_newman` را صدا می‌زند؛ اگر مالکیتِ Gate تأیید نشود Newman شروع نمی‌شود |
+| پاک‌سازی | خطای آزادسازیِ lease یا Gate در `RunnerResult.cleanup_errors` می‌آید و خطای اصلی را نمی‌پوشاند |
+| مرگِ پروسه | سیستم‌عامل قفل را آزاد می‌کند؛ هیچ بازپس‌گیریِ مبتنی بر heartbeat نیست. پروسه‌ی زنده ولی هنگ‌کرده تا بسته شدن همه را مسدود نگه می‌دارد |
+
+فقط دیسکِ محلی و یک میزبان. بازیابی (`recover_stale`) و لغوِ batchِ غیرفعال اجرا نمی‌کنند
+و Gate نمی‌گیرند.
+
 ### فرضِ میزبانی — یک پروسه‌ی سرورِ Streamlit برای هر پایگاه
 
 | موضوع | رفتار |

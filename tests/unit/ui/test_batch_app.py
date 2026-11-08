@@ -28,6 +28,7 @@ from src.batch_testing.service import (  # noqa: E402
     reset_services,
 )
 from src.batch_testing.storage import BatchStore  # noqa: E402
+from src.execution_gate import ExecutionGate  # noqa: E402
 from src.task_sources.jira.agile import Board  # noqa: E402
 from tests.unit.batch_testing.test_runner import WAIT_S, Script, _batch  # noqa: E402
 from tests.unit.batch_testing.test_service import DISCOVERY, _Factory  # noqa: E402
@@ -45,6 +46,9 @@ def _isolated(monkeypatch, tmp_path):
     monkeypatch.setattr(runner_module, "_default_executor", forbidden)
     monkeypatch.setattr(batch_app, "jira_session", forbidden)
     monkeypatch.setattr(batch_app, "DB_PATH", tmp_path / "batch.sqlite3")
+    # Execution Gate ِ مشترک در پوشه‌ی موقت — هرگز data/execution_gate/ ِ واقعی
+    gate_dir = tmp_path / "execution_gate"
+    monkeypatch.setattr(runner_module, "_default_gate", lambda: ExecutionGate(gate_dir))
     reset_services()
     yield
     reset_services()

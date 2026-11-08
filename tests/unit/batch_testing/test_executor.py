@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import threading
 from dataclasses import dataclass, field
@@ -586,6 +587,67 @@ class TestNewman:
         outcome = executor.execute(_request(tmp_path / "b", cancel=late))
         assert (outcome.status, outcome.phase) == ("CANCELLED", "step3")
         assert engine.calls == [] and WORLD.scenario_calls == 0
+
+
+# ── حصارِ Execution Gate پیش از Newman (M7.2) ───────────────────────────────
+
+
+def _guarded(request: ExecutionRequest, guard) -> ExecutionRequest:
+    return dataclasses.replace(request, before_newman=guard)
+
+
+class TestGateBoundary:
+    def test_the_guard_runs_once_immediately_before_newman(self, tmp_path):
+        order: list[str] = []
+
+        class OrderedEngine(FakeEngine):
+            def run(self, request, cancel_event=None):
+                order.append("newman")
+                return super().run(request, cancel_event)
+
+        executor = IssueExecutor(
+            engine=OrderedEngine(), on_phase=lambda phase: order.append(f"phase:{phase}")
+        )
+        outcome = executor.execute(_guarded(_request(tmp_path), lambda: order.append("gate")))
+        assert outcome.status == "PASS"
+        assert order[-3:] == ["phase:newman", "gate", "newman"]
+        assert order.count("gate") == 1
+
+    def test_the_newman_request_and_result_are_unchanged_by_the_guard(self, tmp_path):
+        guarded_engine, plain_engine = FakeEngine(), FakeEngine()
+        (tmp_path / "a").mkdir()
+        (tmp_path / "b").mkdir()
+        guarded = IssueExecutor(engine=guarded_engine).execute(
+            _guarded(_request(tmp_path / "a"), lambda: None)
+        )
+        plain = IssueExecutor(engine=plain_engine).execute(_request(tmp_path / "b"))
+        sent, baseline = guarded_engine.calls[0]["request"], plain_engine.calls[0]["request"]
+        assert (sent.options, sent.access_token) == (baseline.options, baseline.access_token)
+        assert sent.collection_path.read_text(encoding="utf-8") == (
+            baseline.collection_path.read_text(encoding="utf-8")
+        )
+        assert sent.environment_path.read_bytes() == baseline.environment_path.read_bytes()
+        assert sent.globals_path.read_bytes() == baseline.globals_path.read_bytes()
+        paths = {"artifact_dir", "collection_path", "newman_run_dir", "newman_result_path"}
+        same = {k: v for k, v in guarded.storage_fields().items() if k not in paths}
+        assert same == {k: v for k, v in plain.storage_fields().items() if k not in paths}
+
+    def test_a_refusing_guard_never_starts_newman(self, tmp_path):
+        engine = FakeEngine()
+
+        def refuse() -> None:
+            raise RuntimeError("gate lost")
+
+        outcome = IssueExecutor(engine=engine).execute(_guarded(_request(tmp_path), refuse))
+        assert engine.calls == []
+        assert (outcome.status, outcome.phase) == ("CANCELLED", "newman")
+        assert outcome.error_message == (
+            "Newman was not started: the shared execution gate could not be confirmed."
+        )
+
+    def test_without_a_guard_the_executor_behaves_as_before(self, tmp_path):
+        outcome, engine = _execute(tmp_path)
+        assert outcome.status == "PASS" and len(engine.calls) == 1
 
 
 # ── artifactها و امنیت ──────────────────────────────────────────────────────

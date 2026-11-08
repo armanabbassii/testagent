@@ -37,6 +37,10 @@ COLLECTION_INVALID فقط وقتی کالکشن غایب است یا اعتبا�
 توکنِ دسترسی: runner در آغازِ هر نشست یکی می‌گیرد (src/auth) و در ExecutionRequest
 می‌دهد؛ فقط در حافظه است، هرگز ذخیره نمی‌شود و خام و Bearerش جزوِ مقادیرِ محرمانه‌اند.
 بدونِ توکن هیچ کاری (Jira، قدم‌ها، Newman) انجام نمی‌شود: ERROR / AUTHENTICATION_FAILED.
+
+Execution Gate: runner در request.before_newman حصاری می‌دهد که درست پیش از engine.run
+صدا زده می‌شود (مالکیتِ Gate را تأیید می‌کند). اگر رد کند، Newman شروع نمی‌شود و نتیجه
+CANCELLED است؛ runner (که همان لحظه cancel_event را ست کرده) آن را INTERRUPTED ثبت می‌کند.
 """
 
 from __future__ import annotations
@@ -172,6 +176,9 @@ class ExecutionRequest:
     cancel_event: threading.Event | None = None
     # توکنِ نشستِ Batch — فقط در حافظه
     access_token: AccessToken | None = field(default=None, repr=False)
+    # حصارِ runner درست پیش از شروعِ پروسه‌ی Newman (Execution Gate): هر استثنا یعنی Newman
+    # شروع نمی‌شود. None = بدونِ حصار (رفتارِ قبلی).
+    before_newman: Callable[[], None] | None = field(default=None, repr=False, compare=False)
 
 
 @dataclass
@@ -1190,6 +1197,15 @@ class IssueExecutor:
             return
         outcome.phase = PHASE_NEWMAN
         self._phase(PHASE_NEWMAN)
+        if request.before_newman is not None:
+            try:
+                request.before_newman()  # آخرین لحظه پیش از شروعِ پروسه
+            except Exception:  # noqa: BLE001 — حصار رد کرد: Newman شروع نمی‌شود (fail-closed)
+                self._cancelled(outcome, PHASE_NEWMAN)
+                outcome.error_message = (
+                    "Newman was not started: the shared execution gate could not be confirmed."
+                )
+                return
         result = self._engine.run(
             NewmanRunRequest(
                 collection_path=collection_path,
