@@ -108,6 +108,21 @@ def variable_setter(scope: str) -> str:
     return _SCOPE_SETTERS.get(key, _SCOPE_SETTERS[_DEFAULT_SCOPE])
 
 
+# assertionهای طراحیِ تست که بدنه‌ی JSONِ پاسخ را لازم دارند (test_design.py)
+_DESIGN_JSON_TYPES = frozenset(
+    {"field_present", "field_absent", "field_equals", "field_type", "array_length"}
+)
+_STATUS_CLASS_BOUNDS = {"2xx": (200, 299), "4xx": (400, 499)}
+_TYPE_CHECKS = {
+    "string": 'pm.expect({value}).to.be.a("string");',
+    "number": 'pm.expect({value}).to.be.a("number");',
+    "integer": "pm.expect(Number.isInteger({value})).to.be.true;",
+    "boolean": 'pm.expect({value}).to.be.a("boolean");',
+    "object": 'pm.expect({value}).to.be.an("object");',
+    "array": 'pm.expect({value}).to.be.an("array");',
+    "null": "pm.expect({value}).to.be.null;",
+}
+
 class PostmanBuildError(RuntimeError):
     """ورودیِ ساخت کالکشن ناقص یا نامعتبر بوده است.
 
@@ -482,6 +497,8 @@ class PostmanBuilder:
             and a.get("type") != "status_code"
             and self._json_path_to_accessor(a.get("json_path", "")) is not None
             for a in assertions
+        ) or any(
+            isinstance(a, dict) and a.get("type") in _DESIGN_JSON_TYPES for a in assertions
         )
 
         if needs_json:
@@ -646,6 +663,11 @@ class PostmanBuilder:
 
         a_type = assertion.get("type")
 
+        if a_type == "status_class":
+            return self._status_class_lines(assertion)
+        if a_type in _DESIGN_JSON_TYPES:
+            return self._design_assertion_lines(assertion)
+
         if a_type == "status_code":
             expected = assertion.get("expected")
             if not isinstance(expected, int) or isinstance(expected, bool):
@@ -677,6 +699,164 @@ class PostmanBuilder:
         return [
             f"pm.test({title}, function () {{",
             f"    pm.expect({accessor}).to.not.be.undefined;",
+            "});",
+            "",
+        ]
+
+    # ── assertionهای طراحیِ تست (test_design) ───────────────────────────────
+    #
+    # همه فقط داخلِ eventِ «test» ِ موجود نوشته می‌شوند؛ هیچ اسکریپتِ
+    # pre-request ای اضافه نمی‌شود. مسیرها با دسترسیِ کروشه‌ای ساخته می‌شوند تا
+    # نامِ کلید هر چه باشد JSِ معتبر تولید شود؛ assertionِ نامعتبر نادیده گرفته
+    # می‌شود — همان سیاستِ assertionهای قبلی.
+
+    @staticmethod
+    def _status_class_lines(assertion: Assertion) -> list[str]:
+        bounds = _STATUS_CLASS_BOUNDS.get(str(assertion.get("expected", "")))
+        if bounds is None:
+            return []
+        low, high = bounds
+        label = str(assertion.get("expected"))
+        return [
+            f'pm.test("Status code is {label}", function () {{',
+            f"    pm.expect(pm.response.code).to.be.within({low}, {high});",
+            "});",
+            "",
+        ]
+
+    @classmethod
+    def _bracket_accessor(cls, base: str, path: str) -> str | None:
+        """«a.b» → base["a"]["b"]؛ مسیرِ خالی خودِ base است."""
+        if not path:
+            return base
+        accessor = base
+        for segment in path.split("."):
+            if not segment or "[" in segment or "]" in segment:
+                return None
+            accessor += f"[{cls._js_string(segment)}]"
+        return accessor
+
+    def _design_assertion_lines(self, assertion: Assertion) -> list[str]:
+        a_type = assertion.get("type")
+        path = str(assertion.get("json_path") or "").strip()
+        if not path:
+            return []
+        if assertion.get("scope") == "anywhere":
+            return self._anywhere_lines(a_type, path)
+
+        if a_type == "array_length":
+            if "[]" in path:
+                return []
+            accessor = self._bracket_accessor("jsonData", "" if path == "$" else path)
+            if accessor is None:
+                return []
+            checks: list[str] = []
+            if isinstance(assertion.get("expected"), int):
+                checks.append(f"    pm.expect(list).to.have.lengthOf({assertion['expected']});")
+            if isinstance(assertion.get("min"), int):
+                checks.append(f"    pm.expect(list.length).to.be.at.least({assertion['min']});")
+            if isinstance(assertion.get("max"), int):
+                checks.append(f"    pm.expect(list.length).to.be.at.most({assertion['max']});")
+            if not checks:
+                return []
+            title = self._js_string(f"{path} has the expected number of items")
+            return [
+                f"pm.test({title}, function () {{",
+                f"    const list = {accessor};",
+                '    pm.expect(list).to.be.an("array");',
+                *checks,
+                "});",
+                "",
+            ]
+
+        # مسیرِ «a[].b»: آرایه‌ی «a» و بررسیِ «b» روی هر عضو
+        if "[]" in path:
+            array_path, _, rest = path.partition("[]")
+            rest = rest[1:] if rest.startswith(".") else rest
+            array_accessor = self._bracket_accessor("jsonData", array_path)
+            check = self._value_check(a_type, assertion, "item", rest)
+            if array_accessor is None or check is None:
+                return []
+            subject = array_path or "the response"
+            title = self._js_string(
+                f"Every item of {subject}: {self._describe(a_type, assertion, rest)}"
+            )
+            return [
+                f"pm.test({title}, function () {{",
+                f"    const items = {array_accessor};",
+                '    pm.expect(items).to.be.an("array");',
+                "    items.forEach(function (item) {",
+                f"        {check}",
+                "    });",
+                "});",
+                "",
+            ]
+
+        check = self._value_check(a_type, assertion, "jsonData", path)
+        if check is None:
+            return []
+        title = self._js_string(f"Response {self._describe(a_type, assertion, path)}")
+        return [f"pm.test({title}, function () {{", f"    {check}", "});", ""]
+
+    @staticmethod
+    def _describe(a_type: object, assertion: Assertion, path: str) -> str:
+        if a_type == "field_present":
+            return f"has {path}"
+        if a_type == "field_absent":
+            return f"has no {path}"
+        if a_type == "field_equals":
+            return f"{path} equals {assertion.get('expected')}"
+        return f"{path} is of type {assertion.get('value_type')}"
+
+    def _value_check(
+        self, a_type: object, assertion: Assertion, base: str, path: str
+    ) -> str | None:
+        """یک خطِ pm.expect برای فیلدِ path روی base."""
+        if not path:
+            return None
+        if a_type == "field_absent":
+            parent_path, _, key = path.rpartition(".")
+            parent = self._bracket_accessor(base, parent_path)
+            if parent is None or not key:
+                return None
+            return f"pm.expect({parent}).to.not.have.property({self._js_string(key)});"
+        accessor = self._bracket_accessor(base, path)
+        if accessor is None:
+            return None
+        if a_type == "field_present":
+            return f"pm.expect({accessor}).to.not.be.undefined;"
+        if a_type == "field_equals":
+            if "expected" not in assertion:
+                return None
+            literal = json.dumps(assertion.get("expected"), ensure_ascii=False)
+            return f"pm.expect({accessor}).to.eql({literal});"
+        if a_type == "field_type":
+            check = _TYPE_CHECKS.get(str(assertion.get("value_type", "")))
+            return check.format(value=accessor) if check else None
+        return None
+
+    def _anywhere_lines(self, a_type: object, key: str) -> list[str]:
+        """وجود/نبودِ یک کلید در هر جای پاسخ — فقط وقتی نیازمندی همین را می‌خواهد."""
+        if a_type not in ("field_present", "field_absent") or "." in key or "[" in key:
+            return []
+        present = a_type == "field_present"
+        verb = "appears" if present else "does not appear"
+        title = self._js_string(f"Key {key} {verb} anywhere in the response")
+        return [
+            f"pm.test({title}, function () {{",
+            f"    const key = {self._js_string(key)};",
+            "    const stack = [jsonData];",
+            "    let found = false;",
+            "    while (stack.length && !found) {",
+            "        const node = stack.pop();",
+            '        if (node === null || typeof node !== "object") { continue; }',
+            "        if (!Array.isArray(node) && Object.prototype.hasOwnProperty.call(node, key)) {",
+            "            found = true;",
+            "            break;",
+            "        }",
+            "        Object.keys(node).forEach(function (name) { stack.push(node[name]); });",
+            "    }",
+            f"    pm.expect(found).to.be.{'true' if present else 'false'};",
             "});",
             "",
         ]

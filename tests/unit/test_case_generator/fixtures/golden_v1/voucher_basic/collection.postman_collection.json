@@ -1,0 +1,241 @@
+{
+  "info": {
+    "name": "Voucher management for the admin service API Tests",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+    "description": "Generated deterministically from the Step 1 (task analysis), Step 2 (API discovery and mapping) and Step 3 (scenario and dependency analysis) results.\n\nRequest hosts are {{base_url}} or {{base_url_vdi}}; their values come from the Postman environment (run with --environment), not from this collection."
+  },
+  "variable": [
+    {
+      "key": "token",
+      "value": ""
+    }
+  ],
+  "item": [
+    {
+      "name": "Voucher lifecycle",
+      "item": [
+        {
+          "name": "TC-001 — Create a valid voucher",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "{{token}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/admin/voucher",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "admin",
+                "voucher"
+              ]
+            },
+            "description": "**Positive test case**\n\nThe voucher is created and its id is returned.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"code\": \"SUMMER\",\n  \"discount\": 10\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status code is 201\", function () {",
+                  "    pm.response.to.have.status(201);",
+                  "});",
+                  "",
+                  "pm.collectionVariables.unset(\"voucherId\");",
+                  "pm.test(\"Response provides id and saves it as collection variable 'voucherId'\", function () {",
+                  "    pm.expect(pm.response.code, \"HTTP status of the response that provides voucherId\").to.be.within(200, 299);",
+                  "    const response = pm.response.json();",
+                  "    const value = response.id;",
+                  "    pm.expect(value, \"response.id\").to.not.be.oneOf([undefined, null, \"\"]);",
+                  "    pm.collectionVariables.set(\"voucherId\", value);",
+                  "});",
+                  ""
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "TC-003 — Retrieve the created voucher",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "{{token}}",
+                "type": "text"
+              },
+              {
+                "key": "X-Voucher-Id",
+                "value": "{{voucherId}}"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/admin/voucher/{{voucherId}}?dryRun={{voucherId}}",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "admin",
+                "voucher",
+                "{{voucherId}}"
+              ],
+              "query": [
+                {
+                  "key": "dryRun",
+                  "value": "{{voucherId}}"
+                }
+              ]
+            },
+            "description": "**Positive test case**\n\nThe voucher details are returned.\n\nAssumptions:\n\n- Swagger documents no request body for this operation; the body carries only the fields required by the Step 3 data dependencies.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"code\": \"{{voucherId}}\"\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          },
+          "event": [
+            {
+              "listen": "prerequest",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "{",
+                  "    const value = pm.collectionVariables.get(\"voucherId\");",
+                  "    const available = !(value === undefined || value === null || value === \"\");",
+                  "    pm.test(\"Required collection variable 'voucherId' is available\", function () {",
+                  "        pm.expect(available, \"collection variable 'voucherId' is not set — 'TC-001' must run successfully before this request.\").to.be.true;",
+                  "    });",
+                  "    if (!available) {",
+                  "        if (pm.execution && typeof pm.execution.skipRequest === \"function\") {",
+                  "            pm.execution.skipRequest();",
+                  "        } else {",
+                  "            throw new Error(\"collection variable 'voucherId' is not set — 'TC-001' must run successfully before this request.\");",
+                  "        }",
+                  "    }",
+                  "}"
+                ]
+              }
+            },
+            {
+              "listen": "test",
+              "script": {
+                "type": "text/javascript",
+                "exec": [
+                  "pm.test(\"Status code is 200\", function () {",
+                  "    pm.response.to.have.status(200);",
+                  "});",
+                  ""
+                ]
+              }
+            }
+          ]
+        },
+        {
+          "name": "TC-004 — Read a voucher without authentication",
+          "request": {
+            "method": "GET",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "{{token}}",
+                "type": "text"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/admin/voucher/:id",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "admin",
+                "voucher",
+                ":id"
+              ],
+              "variable": [
+                {
+                  "key": "id",
+                  "value": ""
+                }
+              ]
+            },
+            "description": "**Negative test case**\n\nThe request is rejected because no token is sent.\n\nAssumptions:\n\n- The expected status of a non-positive test case cannot be derived from the Step 1/2/3 results, so no status assertion was generated."
+          }
+        }
+      ]
+    },
+    {
+      "name": "Voucher validation",
+      "item": [
+        {
+          "name": "TC-002 — Create a voucher with an invalid discount",
+          "request": {
+            "method": "POST",
+            "header": [
+              {
+                "key": "Authorization",
+                "value": "{{token}}",
+                "type": "text"
+              },
+              {
+                "key": "Content-Type",
+                "value": "application/json"
+              }
+            ],
+            "url": {
+              "raw": "{{base_url}}/api/admin/voucher",
+              "host": [
+                "{{base_url}}"
+              ],
+              "path": [
+                "api",
+                "admin",
+                "voucher"
+              ]
+            },
+            "description": "**Negative test case**\n\nThe request is rejected with a validation error.\n\nAssumptions:\n\n- The expected status of a non-positive test case cannot be derived from the Step 1/2/3 results, so no status assertion was generated.",
+            "body": {
+              "mode": "raw",
+              "raw": "{\n  \"code\": \"SUMMER\",\n  \"discount\": 10\n}",
+              "options": {
+                "raw": {
+                  "language": "json"
+                }
+              }
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

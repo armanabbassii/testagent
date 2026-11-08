@@ -39,6 +39,7 @@ final_review.py — بازبینیِ قطعیِ نهایی و آماده‌سا�
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from typing import Any
@@ -46,6 +47,10 @@ from typing import Any
 from typing_extensions import TypedDict
 
 from src.agents.test_case_generator.api_discovery import operation_key
+from src.agents.test_case_generator.test_design import (
+    normalize_test_design,
+    runtime_variables,
+)
 from src.agents.test_case_generator.host_selection import (
     CAUSE_REJECTED,
     CAUSE_UNMATCHED,
@@ -90,6 +95,17 @@ STATUS_BLOCKED = "blocked"
 _CLARIFICATION = "clarification"
 _UNRESOLVED_TEST_CASE = "unresolved_test_case"
 _ENVIRONMENT_REVIEW = "environment_review"
+# موردهای بازبینیِ طراحیِ تست — فقط وقتی نتیجه‌ها فیلدهای جدید را دارند.
+PENDING_TEST_CASE = "pending_test_case"
+UNFILLED_RUNTIME_VARIABLE = "unfilled_runtime_variable"
+CHECKS_NOT_ASSERTED = "checks_not_asserted"
+TEST_DATA_CONSTRAINT_CONFLICT = "test_data_constraint_conflict"
+POSSIBLY_EQUIVALENT = "possibly_equivalent"
+NO_REQUIREMENT_REF = "no_requirement_ref"
+# چک‌های قدم اول که assertionِ پاسخ لازم دارند (نه فقط کدِ وضعیت)
+_RESPONSE_CHECK_KINDS = frozenset(
+    {"field_present", "field_absent", "field_value", "field_type", "list_empty", "list_count", "pagination"}
+)
 
 #: قراردادِ نام‌گذاریِ درخواستِ قدم چهارم: «<case_id> — <title>»
 _SEPARATOR = " — "
@@ -730,13 +746,165 @@ def _unresolved_items(metadata: dict | None) -> list[ReviewItem]:
             continue
         items.append(
             ReviewItem(
-                kind=_UNRESOLVED_TEST_CASE,
+                # تست‌کیسِ معلقِ طراحیِ تست نوعِ جدای خودش را دارد؛ بقیه همان قبلی.
+                kind=PENDING_TEST_CASE if row.get("pending") is True else _UNRESOLVED_TEST_CASE,
                 source_step=4,
                 test_case_id=_text(row.get("test_case_id")),
                 message=message,
             )
         )
     return items
+
+
+def _test_scripts(collection: dict) -> dict[str, str]:
+    """نامِ درخواست → متنِ اسکریپتِ eventِ test."""
+    scripts: dict[str, str] = {}
+    for item in iter_collection_requests(collection):
+        lines: list[str] = []
+        for event in item.get("event") or []:
+            if isinstance(event, dict) and event.get("listen") == "test":
+                script = event.get("script")
+                exec_lines = script.get("exec") if isinstance(script, dict) else None
+                if isinstance(exec_lines, list):
+                    lines.extend(str(line) for line in exec_lines)
+        scripts[_text(item.get("name"))] = "\n".join(lines)
+    return scripts
+
+
+def _has_response_assertion(script: str) -> bool:
+    """آیا اسکریپت دست‌کم یک pm.test غیر از بررسیِ کدِ وضعیت دارد؟"""
+    titles = re.findall(r"pm\.test\((.+?), function", script)
+    return any("Status code is" not in title for title in titles)
+
+
+def _request_signature(item: dict) -> str:
+    request = item.get("request") if isinstance(item.get("request"), dict) else {}
+    url = request.get("url") if isinstance(request.get("url"), dict) else {}
+    events = [e for e in item.get("event") or [] if isinstance(e, dict)]
+    return json.dumps(
+        {
+            "method": request.get("method"),
+            "raw": url.get("raw"),
+            "variable": url.get("variable"),
+            "header": request.get("header"),
+            "body": request.get("body"),
+            "event": events,
+        },
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+
+
+def _design_review(
+    step1_result: Any,
+    step3_result: Any,
+    test_cases: list[dict],
+    mappings: list[dict],
+    services: list[dict],
+    dependencies: list[dict],
+    collection: dict,
+    records: list[_GeneratedRequest],
+) -> tuple[list[str], list[ReviewItem]]:
+    """بازبینیِ ردیابی و طراحیِ تست — فقط روی نتیجه‌هایی که فیلدهای جدید دارند.
+
+    نتیجه‌ی قدیمیِ بدونِ requirements/test_design هیچ هشدار یا موردِ تازه‌ای
+    نمی‌گیرد. هیچ‌کدام از این‌ها issue (blocked) نیست؛ همه بازبینیِ انسانی
+    می‌خواهند.
+    """
+    warnings: list[str] = []
+    items: list[ReviewItem] = []
+    step1 = step1_result if isinstance(step1_result, dict) else {}
+    step3 = step3_result if isinstance(step3_result, dict) else {}
+
+    # ── ردیابیِ نیازمندی (قدم ۱) ────────────────────────────────────────────
+    if isinstance(step1.get("requirements"), list) and step1.get("requirements"):
+        for case in test_cases:
+            if not case.get("requirement_refs"):
+                warnings.append(
+                    f"{NO_REQUIREMENT_REF}: test case {_text(case.get('id'))!r} is not "
+                    f"traced to any requirement."
+                )
+
+    raw_design = step3.get("test_design")
+    if raw_design is None:
+        return warnings, items
+
+    # ── اعتبارِ دوباره‌ی طراحی (قدم ۳ در UI قابلِ ویرایش است) ────────────────
+    index = operation_index(services)
+    operations: dict[str, dict | None] = {}
+    for mapping in mappings:
+        api = mapping.get("api") if isinstance(mapping.get("api"), dict) else None
+        case_id = _text(mapping.get("test_case_id"))
+        found = (
+            index.get(operation_key(_text(api.get("method")), _text(api.get("path"))))
+            if api
+            else None
+        )
+        operations[case_id] = found[1] if found else None
+    designs, notes = normalize_test_design(
+        raw_design, test_cases=test_cases, operations=operations, dependencies=dependencies
+    )
+    for note in notes:
+        if note["type"] == "test_data" and "was not used" in note["message"]:
+            warnings.append(
+                f"{TEST_DATA_CONSTRAINT_CONFLICT}: {note['test_case_id'] or 'test design'}: "
+                f"{note['message']}"
+            )
+
+    # ── متغیرهای زمانِ اجرای خالی ───────────────────────────────────────────
+    declared = {
+        _text(variable.get("key")): variable.get("value")
+        for variable in (collection.get("variable") or [])
+        if isinstance(variable, dict)
+    }
+    for name in sorted(runtime_variables(designs)):
+        value = declared.get(name)
+        if not (isinstance(value, str) and value.strip()):
+            items.append(
+                ReviewItem(
+                    kind=UNFILLED_RUNTIME_VARIABLE,
+                    source_step=4,
+                    test_case_id="",
+                    message=(
+                        f"The collection variable {{{{{name}}}}} has no value. Provide an "
+                        f"existing value (collection variable or Postman environment) "
+                        f"before execution; no value was invented for it."
+                    ),
+                )
+            )
+
+    # ── چک‌های قدم ۱ که assertion نشده‌اند ───────────────────────────────────
+    scripts = _test_scripts(collection) if collection else {}
+    by_case = {record.case_id: record for record in records if record.case_id}
+    for case in test_cases:
+        case_id = _text(case.get("id"))
+        checks = [
+            check
+            for check in case.get("checks") or []
+            if isinstance(check, dict) and check.get("kind") in _RESPONSE_CHECK_KINDS
+        ]
+        record = by_case.get(case_id)
+        if not checks or record is None:
+            continue
+        if not _has_response_assertion(scripts.get(record.name, "")):
+            warnings.append(
+                f"{CHECKS_NOT_ASSERTED}: test case {case_id!r} has response checks in "
+                f"Step 1 but its request asserts only the status code (or nothing); "
+                f"see its clarifications for the missing path or contract."
+            )
+
+    # ── درخواست‌های احتمالاً هم‌ارز (فقط هشدار، هرگز حذف) ─────────────────────
+    signatures: dict[str, list[str]] = {}
+    for item in iter_collection_requests(collection) if collection else []:
+        signatures.setdefault(_request_signature(item), []).append(_text(item.get("name")))
+    for names in signatures.values():
+        if len(names) > 1:
+            warnings.append(
+                f"{POSSIBLY_EQUIVALENT}: requests {', '.join(repr(n) for n in names)} send "
+                f"the same request and assert the same things; check whether they test "
+                f"genuinely different behaviour. Nothing was removed."
+            )
+    return warnings, items
 
 
 def _step4_warnings(metadata: dict | None) -> list[str]:
@@ -918,6 +1086,19 @@ class FinalReviewGenerator:
                 issues.extend(_host_issues(records, selections_by_case(host_resolution)))
         if metadata is not None:
             issues.extend(_metadata_issues(metadata, records))
+        design_items: list[ReviewItem] = []
+        if step1_ok and step2_ok and step3_ok:
+            design_warnings, design_items = _design_review(
+                step1_result,
+                step3_result,
+                test_cases,
+                mappings,
+                services,
+                dependencies,
+                collection or {},
+                records,
+            )
+            warnings.extend(design_warnings)
 
         unresolved = (
             _clarification_items(step1_result, 1)
@@ -925,6 +1106,7 @@ class FinalReviewGenerator:
             + _clarification_items(step3_result, 3)
             + _unresolved_items(metadata)
             + _environment_items(host_resolution)
+            + design_items
         )
 
         issues = _dedupe(issues)

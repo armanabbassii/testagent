@@ -1,0 +1,224 @@
+{
+  "step1": {
+    "task_summary": "Voucher administration",
+    "test_cases": [
+      {
+        "id": "TC-001",
+        "title": "Read an existing voucher",
+        "type": "positive",
+        "priority": "high",
+        "preconditions": [],
+        "steps": [
+          "Read an existing voucher"
+        ],
+        "expected_result": "Read an existing voucher behaves as specified."
+      },
+      {
+        "id": "TC-002",
+        "title": "Read a voucher that does not exist",
+        "type": "negative",
+        "priority": "high",
+        "preconditions": [],
+        "steps": [
+          "Read a voucher that does not exist"
+        ],
+        "expected_result": "Read a voucher that does not exist behaves as specified."
+      },
+      {
+        "id": "TC-003",
+        "title": "Read a voucher with an invalid business identifier",
+        "type": "negative",
+        "priority": "high",
+        "preconditions": [],
+        "steps": [
+          "Read a voucher with an invalid business identifier"
+        ],
+        "expected_result": "Read a voucher with an invalid business identifier behaves as specified."
+      },
+      {
+        "id": "TC-004",
+        "title": "Define a voucher with a discount above 100",
+        "type": "negative",
+        "priority": "high",
+        "preconditions": [],
+        "steps": [
+          "Define a voucher with a discount above 100"
+        ],
+        "expected_result": "Define a voucher with a discount above 100 behaves as specified."
+      },
+      {
+        "id": "TC-005",
+        "title": "Read a voucher without authentication",
+        "type": "negative",
+        "priority": "high",
+        "preconditions": [],
+        "steps": [
+          "Read a voucher without authentication"
+        ],
+        "expected_result": "Read a voucher without authentication behaves as specified."
+      }
+    ]
+  },
+  "step2": {
+    "services": [
+      {
+        "name": "Admin",
+        "source_url": "http://swagger.local/admin",
+        "base_url": "https://admin.example.com/api",
+        "apis": [
+          {
+            "method": "GET",
+            "path": "/admin/voucher/{code}",
+            "operation_id": "getVoucherDetails",
+            "summary": "",
+            "parameters": [
+              {
+                "name": "code",
+                "in": "path",
+                "required": true,
+                "type": "string",
+                "description": ""
+              }
+            ],
+            "request_body": null,
+            "responses": {
+              "200": {
+                "fields": []
+              },
+              "404": {
+                "fields": []
+              }
+            },
+            "requires_auth": false
+          },
+          {
+            "method": "POST",
+            "path": "/admin/voucher",
+            "operation_id": "defineVoucher",
+            "summary": "",
+            "parameters": [],
+            "request_body": {
+              "code": "string",
+              "discount": 0
+            },
+            "responses": {
+              "201": {
+                "fields": []
+              },
+              "400": {
+                "fields": []
+              }
+            },
+            "requires_auth": false
+          }
+        ],
+        "authorization": null,
+        "unresolved": []
+      }
+    ],
+    "mappings": [
+      {
+        "test_case_id": "TC-001",
+        "api": {
+          "method": "GET",
+          "path": "/admin/voucher/{code}",
+          "operation_id": "getVoucherDetails"
+        },
+        "confidence": "high",
+        "reason": "Mapped by the test fixture.",
+        "clarification": ""
+      },
+      {
+        "test_case_id": "TC-002",
+        "api": {
+          "method": "GET",
+          "path": "/admin/voucher/{code}",
+          "operation_id": "getVoucherDetails"
+        },
+        "confidence": "high",
+        "reason": "Mapped by the test fixture.",
+        "clarification": ""
+      },
+      {
+        "test_case_id": "TC-003",
+        "api": {
+          "method": "GET",
+          "path": "/admin/voucher/{code}",
+          "operation_id": "getVoucherDetails"
+        },
+        "confidence": "high",
+        "reason": "Mapped by the test fixture.",
+        "clarification": ""
+      },
+      {
+        "test_case_id": "TC-004",
+        "api": {
+          "method": "POST",
+          "path": "/admin/voucher",
+          "operation_id": "defineVoucher"
+        },
+        "confidence": "high",
+        "reason": "Mapped by the test fixture.",
+        "clarification": ""
+      },
+      {
+        "test_case_id": "TC-005",
+        "api": {
+          "method": "GET",
+          "path": "/admin/voucher/{code}",
+          "operation_id": "getVoucherDetails"
+        },
+        "confidence": "high",
+        "reason": "Mapped by the test fixture.",
+        "clarification": ""
+      }
+    ],
+    "clarifications": []
+  },
+  "step3": {
+    "scenarios": [
+      {
+        "id": "SC-001",
+        "title": "Vouchers",
+        "test_case_ids": [
+          "TC-001",
+          "TC-002",
+          "TC-003",
+          "TC-004",
+          "TC-005"
+        ],
+        "reason": "One flow."
+      }
+    ],
+    "execution_order": [
+      {
+        "test_case_id": "TC-001",
+        "order": 1,
+        "depends_on": []
+      },
+      {
+        "test_case_id": "TC-002",
+        "order": 2,
+        "depends_on": []
+      },
+      {
+        "test_case_id": "TC-003",
+        "order": 3,
+        "depends_on": []
+      },
+      {
+        "test_case_id": "TC-004",
+        "order": 4,
+        "depends_on": []
+      },
+      {
+        "test_case_id": "TC-005",
+        "order": 5,
+        "depends_on": []
+      }
+    ],
+    "data_dependencies": [],
+    "clarifications": []
+  },
+  "generator": {}
+}

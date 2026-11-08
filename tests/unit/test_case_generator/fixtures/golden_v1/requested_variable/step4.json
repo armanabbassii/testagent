@@ -1,0 +1,378 @@
+{
+  "collection_name": "Voucher scenario for the admin APIs API Tests",
+  "collection": {
+    "info": {
+      "name": "Voucher scenario for the admin APIs API Tests",
+      "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+      "description": "Generated deterministically from the Step 1 (task analysis), Step 2 (API discovery and mapping) and Step 3 (scenario and dependency analysis) results.\n\nRequest hosts are {{base_url}} or {{base_url_vdi}}; their values come from the Postman environment (run with --environment), not from this collection.\n\nUnresolved clarifications — no assertion was guessed for these:\n- response_path (TC-001): Requested variable 'voucherId': the response schema of POST /admin/voucher/amount documents no fields, so '$.result.body.id' (specified in the task) cannot be verified against the API contract; it is used exactly as given and its existence is checked when the request runs."
+    },
+    "variable": [
+      {
+        "key": "token",
+        "value": ""
+      }
+    ],
+    "item": [
+      {
+        "name": "Voucher lifecycle",
+        "item": [
+          {
+            "name": "TC-001 — Create an amount voucher",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Authorization",
+                  "value": "{{token}}",
+                  "type": "text"
+                },
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/api/admin/voucher/amount",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "api",
+                  "admin",
+                  "voucher",
+                  "amount"
+                ]
+              },
+              "description": "**Positive test case**\n\nCreate an amount voucher behaves as specified.\n\nAssumptions:\n\n- Unresolved clarification (response_path): Requested variable 'voucherId': the response schema of POST /admin/voucher/amount documents no fields, so '$.result.body.id' (specified in the task) cannot be verified against the API contract; it is used exactly as given and its existence is checked when the request runs.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"name\": \"string\",\n  \"amount\": 0,\n  \"count\": 0\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "pm.test(\"Status code is 200\", function () {",
+                    "    pm.response.to.have.status(200);",
+                    "});",
+                    "",
+                    "pm.globals.unset(\"voucherId\");",
+                    "pm.test(\"Response provides result.body.id and saves it as global variable 'voucherId'\", function () {",
+                    "    pm.expect(pm.response.code, \"HTTP status of the response that provides voucherId\").to.be.within(200, 299);",
+                    "    const response = pm.response.json();",
+                    "    pm.expect(response.result, \"response.result\").to.exist;",
+                    "    pm.expect(response.result.body, \"response.result.body\").to.exist;",
+                    "    const value = response.result.body.id;",
+                    "    pm.expect(value, \"response.result.body.id\").to.not.be.oneOf([undefined, null, \"\"]);",
+                    "    pm.globals.set(\"voucherId\", value);",
+                    "});",
+                    ""
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "TC-003 — Retrieve the created voucher",
+            "request": {
+              "method": "GET",
+              "header": [
+                {
+                  "key": "Authorization",
+                  "value": "{{token}}",
+                  "type": "text"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/api/admin/voucher/{{voucherId}}",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "api",
+                  "admin",
+                  "voucher",
+                  "{{voucherId}}"
+                ]
+              },
+              "description": "**Positive test case**\n\nRetrieve the created voucher behaves as specified."
+            },
+            "event": [
+              {
+                "listen": "prerequest",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "{",
+                    "    const value = pm.globals.get(\"voucherId\");",
+                    "    const available = !(value === undefined || value === null || value === \"\");",
+                    "    pm.test(\"Required global variable 'voucherId' is available\", function () {",
+                    "        pm.expect(available, \"global variable 'voucherId' is not set — 'TC-001' must run successfully before this request.\").to.be.true;",
+                    "    });",
+                    "    if (!available) {",
+                    "        if (pm.execution && typeof pm.execution.skipRequest === \"function\") {",
+                    "            pm.execution.skipRequest();",
+                    "        } else {",
+                    "            throw new Error(\"global variable 'voucherId' is not set — 'TC-001' must run successfully before this request.\");",
+                    "        }",
+                    "    }",
+                    "}"
+                  ]
+                }
+              },
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "pm.test(\"Status code is 200\", function () {",
+                    "    pm.response.to.have.status(200);",
+                    "});",
+                    ""
+                  ]
+                }
+              }
+            ]
+          },
+          {
+            "name": "TC-005 — Update the created voucher",
+            "request": {
+              "method": "PUT",
+              "header": [
+                {
+                  "key": "Authorization",
+                  "value": "{{token}}",
+                  "type": "text"
+                },
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/api/admin/voucher/{{voucherId}}",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "api",
+                  "admin",
+                  "voucher",
+                  "{{voucherId}}"
+                ]
+              },
+              "description": "**Positive test case**\n\nUpdate the created voucher behaves as specified.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"name\": \"string\"\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            },
+            "event": [
+              {
+                "listen": "prerequest",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "{",
+                    "    const value = pm.globals.get(\"voucherId\");",
+                    "    const available = !(value === undefined || value === null || value === \"\");",
+                    "    pm.test(\"Required global variable 'voucherId' is available\", function () {",
+                    "        pm.expect(available, \"global variable 'voucherId' is not set — 'TC-001' must run successfully before this request.\").to.be.true;",
+                    "    });",
+                    "    if (!available) {",
+                    "        if (pm.execution && typeof pm.execution.skipRequest === \"function\") {",
+                    "            pm.execution.skipRequest();",
+                    "        } else {",
+                    "            throw new Error(\"global variable 'voucherId' is not set — 'TC-001' must run successfully before this request.\");",
+                    "        }",
+                    "    }",
+                    "}"
+                  ]
+                }
+              },
+              {
+                "listen": "test",
+                "script": {
+                  "type": "text/javascript",
+                  "exec": [
+                    "pm.test(\"Status code is 200\", function () {",
+                    "    pm.response.to.have.status(200);",
+                    "});",
+                    ""
+                  ]
+                }
+              }
+            ]
+          }
+        ]
+      },
+      {
+        "name": "Voucher validation",
+        "item": [
+          {
+            "name": "TC-002 — Create a voucher without a name is rejected",
+            "request": {
+              "method": "POST",
+              "header": [
+                {
+                  "key": "Authorization",
+                  "value": "{{token}}",
+                  "type": "text"
+                },
+                {
+                  "key": "Content-Type",
+                  "value": "application/json"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/api/admin/voucher/amount",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "api",
+                  "admin",
+                  "voucher",
+                  "amount"
+                ]
+              },
+              "description": "**Negative test case**\n\nCreate a voucher without a name is rejected behaves as specified.\n\nAssumptions:\n\n- The expected status of a non-positive test case cannot be derived from the Step 1/2/3 results, so no status assertion was generated.",
+              "body": {
+                "mode": "raw",
+                "raw": "{\n  \"name\": \"string\",\n  \"amount\": 0,\n  \"count\": 0\n}",
+                "options": {
+                  "raw": {
+                    "language": "json"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "name": "TC-004 — Retrieve a voucher that does not exist",
+            "request": {
+              "method": "GET",
+              "header": [
+                {
+                  "key": "Authorization",
+                  "value": "{{token}}",
+                  "type": "text"
+                }
+              ],
+              "url": {
+                "raw": "{{base_url}}/api/admin/voucher/:id",
+                "host": [
+                  "{{base_url}}"
+                ],
+                "path": [
+                  "api",
+                  "admin",
+                  "voucher",
+                  ":id"
+                ],
+                "variable": [
+                  {
+                    "key": "id",
+                    "value": ""
+                  }
+                ]
+              },
+              "description": "**Negative test case**\n\nRetrieve a voucher that does not exist behaves as specified.\n\nAssumptions:\n\n- The operation documents required parameter(s) path 'id' that the Step 1/2/3 results do not provide a value for; no value was invented for them.\n\n- The expected status of a non-positive test case cannot be derived from the Step 1/2/3 results, so no status assertion was generated."
+            }
+          }
+        ]
+      }
+    ]
+  },
+  "scenarios": [
+    {
+      "id": "SC-001",
+      "title": "Voucher lifecycle",
+      "request_count": 3
+    },
+    {
+      "id": "SC-002",
+      "title": "Voucher validation",
+      "request_count": 2
+    }
+  ],
+  "requests": [
+    {
+      "test_case_id": "TC-001",
+      "title": "Create an amount voucher",
+      "name": "TC-001 — Create an amount voucher",
+      "method": "POST",
+      "path": "/admin/voucher/amount",
+      "scenario": "Voucher lifecycle",
+      "host_variable": "base_url",
+      "host_basis": "default",
+      "base_path": "/api"
+    },
+    {
+      "test_case_id": "TC-002",
+      "title": "Create a voucher without a name is rejected",
+      "name": "TC-002 — Create a voucher without a name is rejected",
+      "method": "POST",
+      "path": "/admin/voucher/amount",
+      "scenario": "Voucher validation",
+      "host_variable": "base_url",
+      "host_basis": "default",
+      "base_path": "/api"
+    },
+    {
+      "test_case_id": "TC-003",
+      "title": "Retrieve the created voucher",
+      "name": "TC-003 — Retrieve the created voucher",
+      "method": "GET",
+      "path": "/admin/voucher/{id}",
+      "scenario": "Voucher lifecycle",
+      "host_variable": "base_url",
+      "host_basis": "default",
+      "base_path": "/api"
+    },
+    {
+      "test_case_id": "TC-004",
+      "title": "Retrieve a voucher that does not exist",
+      "name": "TC-004 — Retrieve a voucher that does not exist",
+      "method": "GET",
+      "path": "/admin/voucher/{id}",
+      "scenario": "Voucher validation",
+      "host_variable": "base_url",
+      "host_basis": "default",
+      "base_path": "/api"
+    },
+    {
+      "test_case_id": "TC-005",
+      "title": "Update the created voucher",
+      "name": "TC-005 — Update the created voucher",
+      "method": "PUT",
+      "path": "/admin/voucher/{id}",
+      "scenario": "Voucher lifecycle",
+      "host_variable": "base_url",
+      "host_basis": "default",
+      "base_path": "/api"
+    }
+  ],
+  "unresolved": [],
+  "clarifications": [
+    {
+      "type": "response_path",
+      "test_case_id": "TC-001",
+      "message": "Requested variable 'voucherId': the response schema of POST /admin/voucher/amount documents no fields, so '$.result.body.id' (specified in the task) cannot be verified against the API contract; it is used exactly as given and its existence is checked when the request runs."
+    }
+  ],
+  "warnings": []
+}

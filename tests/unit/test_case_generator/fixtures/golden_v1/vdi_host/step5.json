@@ -1,0 +1,218 @@
+{
+  "review": {
+    "status": "ready",
+    "summary": "Step 5 review completed.\n\n3 test cases analyzed.\n3 Postman requests generated.\n1 scenario identified.\n1 data dependency applied.\n0 unresolved clarifications remain.\n\nThe Postman collection is structurally valid and no unresolved review item remains.",
+    "issues": [],
+    "warnings": [],
+    "unresolved_clarifications": [],
+    "information": []
+  },
+  "metrics": {
+    "test_cases": 3,
+    "mapped_test_cases": 3,
+    "generated_requests": 3,
+    "scenarios": 1,
+    "data_dependencies": 1,
+    "clarifications": 0,
+    "issues": 0,
+    "warnings": 0
+  },
+  "artifacts": {
+    "postman_collection": {
+      "info": {
+        "name": "Service set request possibility API Tests",
+        "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+        "description": "Generated deterministically from the Step 1 (task analysis), Step 2 (API discovery and mapping) and Step 3 (scenario and dependency analysis) results.\n\nRequest hosts are {{base_url}} or {{base_url_vdi}}; their values come from the Postman environment (run with --environment), not from this collection."
+      },
+      "variable": [
+        {
+          "key": "token",
+          "value": ""
+        }
+      ],
+      "item": [
+        {
+          "name": "Flow",
+          "item": [
+            {
+              "name": "TC-001 — Request possibility",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "{{token}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url_vdi}}/api/admin/serviceSet/:id/requestPossibility",
+                  "host": [
+                    "{{base_url_vdi}}"
+                  ],
+                  "path": [
+                    "api",
+                    "admin",
+                    "serviceSet",
+                    ":id",
+                    "requestPossibility"
+                  ],
+                  "variable": [
+                    {
+                      "key": "id",
+                      "value": ""
+                    }
+                  ]
+                },
+                "description": "**Positive test case**\n\nSucceeds."
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"Status code is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      "",
+                      "pm.collectionVariables.unset(\"possibilityId\");",
+                      "pm.test(\"Response provides id and saves it as collection variable 'possibilityId'\", function () {",
+                      "    pm.expect(pm.response.code, \"HTTP status of the response that provides possibilityId\").to.be.within(200, 299);",
+                      "    const response = pm.response.json();",
+                      "    const value = response.id;",
+                      "    pm.expect(value, \"response.id\").to.not.be.oneOf([undefined, null, \"\"]);",
+                      "    pm.collectionVariables.set(\"possibilityId\", value);",
+                      "});",
+                      ""
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "TC-002 — Read the service set",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "{{token}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/admin/serviceSet/:id",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "admin",
+                    "serviceSet",
+                    ":id"
+                  ],
+                  "variable": [
+                    {
+                      "key": "id",
+                      "value": ""
+                    }
+                  ]
+                },
+                "description": "**Positive test case**\n\nSucceeds."
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"Status code is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      ""
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "TC-003 — Read the voucher report",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "{{token}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/report/voucher/:id?ref={{possibilityId}}",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "report",
+                    "voucher",
+                    ":id"
+                  ],
+                  "query": [
+                    {
+                      "key": "ref",
+                      "value": "{{possibilityId}}"
+                    }
+                  ],
+                  "variable": [
+                    {
+                      "key": "id",
+                      "value": ""
+                    }
+                  ]
+                },
+                "description": "**Positive test case**\n\nSucceeds."
+              },
+              "event": [
+                {
+                  "listen": "prerequest",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "{",
+                      "    const value = pm.collectionVariables.get(\"possibilityId\");",
+                      "    const available = !(value === undefined || value === null || value === \"\");",
+                      "    pm.test(\"Required collection variable 'possibilityId' is available\", function () {",
+                      "        pm.expect(available, \"collection variable 'possibilityId' is not set — 'TC-001' must run successfully before this request.\").to.be.true;",
+                      "    });",
+                      "    if (!available) {",
+                      "        if (pm.execution && typeof pm.execution.skipRequest === \"function\") {",
+                      "            pm.execution.skipRequest();",
+                      "        } else {",
+                      "            throw new Error(\"collection variable 'possibilityId' is not set — 'TC-001' must run successfully before this request.\");",
+                      "        }",
+                      "    }",
+                      "}"
+                    ]
+                  }
+                },
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"Status code is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      ""
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

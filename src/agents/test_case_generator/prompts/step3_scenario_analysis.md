@@ -53,7 +53,8 @@ You do NOT:
 - Execute APIs
 - Execute tests
 - Build a Postman collection or Postman scripts
-- Produce Postman syntax such as {{variable}}
+- Produce Postman syntax such as {{variable}} (the only exception is a
+  "runtime_variable" value in "test_design")
 - Extract runtime values
 - Generate authorization headers or credentials
 
@@ -244,6 +245,105 @@ an input appears to need data from another test case but the source cannot be
 identified.
 
 ==================================================
+TEST DESIGN (REQUEST VALUES AND RESPONSE ASSERTIONS)
+==================================================
+
+For each test case, turn the Step 1 "checks" and "input_intent" into a concrete
+test design, using only the operation definition in the STEP 2 RESULT. Return
+one entry per test case that needs a value, an assertion, or is pending, in the
+top-level "test_design" array. Every entry is validated deterministically
+against the operation; anything that cannot be proven is discarded and
+reported, so never guess.
+
+  "test_case_id": the test case.
+  "request_values": the inputs to send, each
+      {"location": "path" | "query" | "header" | "body",
+       "name": the documented parameter or body field,
+       "value": a scalar,
+       "value_source": one of
+          "schema_default"      — the parameter's documented "default";
+          "user_or_requirement" — stated by the task, a comment or the user
+                                  (give the sentence in "evidence");
+          "schema_constraint"   — a value on or beyond a documented limit
+                                  (minimum, maximum, minLength, maxLength,
+                                  enum), for boundary and validation cases;
+          "dependency"          — supplied by one of your data dependencies;
+          "nonexistent_id"      — a well-formed identifier that does not exist;
+          "runtime_variable"    — the value must exist at run time but no
+                                  documented source produces it: write it as
+                                  "{{name}}" and raise a clarification,
+       "evidence": the quoted sentence for "user_or_requirement"}.
+  "assertions": the response checks, each
+      {"kind": "status" | "status_class" | "field_present" | "field_absent"
+               | "field_equals" | "field_type" | "array_length",
+       "json_path": the exact response path, e.g. "result.items" or
+               "result.items[].slug" ("[]" means every item of that list;
+               at most one "[]"; "$" is the response root, for a list length only),
+       "path_source": "swagger" | "requirement" | "attachment" | "user",
+       "scope": "path" (default) or "anywhere",
+       "expected": the status (an integer), the status class ("2xx" or "4xx"),
+               the exact value for field_equals, or the exact item count,
+       "min" / "max": item count bounds for array_length,
+       "value_type": for field_type,
+       "requirement_ref": the requirement the assertion verifies,
+       "evidence": the quoted sentence when path_source is not "swagger" or
+               scope is "anywhere"}.
+  "pending": true when the expected behaviour cannot be established yet.
+  "pending_reason": the precise question that must be answered.
+  "unverified_expectations": [{"expectation": "...", "reason": "..."}] — an
+          expected outcome that the contract or the data cannot establish; it is
+          reported as a limitation, never asserted.
+
+Rules for request values:
+
+- Choose every value deliberately for the purpose of the test case. Do not use
+  empty, generic or random values.
+- A default comes from the documented "default" or from a quoted statement of
+  the task, a comment or the user — never from an "example".
+- To test default behaviour, send the default values explicitly.
+- A boundary value must really be on or beyond the documented limit.
+- A non-existent record uses a well-formed value of the documented type and
+  format that does not exist (for example the largest value of an int64
+  identifier). Use an empty or malformed identifier only when identifier
+  format validation is itself the requirement.
+- If a value depends on data in the system, use a data dependency. If no
+  documented source can produce it, use a "runtime_variable" and raise a
+  clarification. Never invent an identifier.
+- Do not set the Authorization header; authentication is handled separately.
+
+Rules for assertions:
+
+- Use an exact response path whenever Swagger, the requirement or a readable
+  attachment establishes it. A "swagger" path must appear in the documented
+  response fields ("fields" / "field_paths") of the operation.
+- Use "scope": "anywhere" only for field_present / field_absent when the
+  requirement is genuinely about a key appearing (or not appearing) anywhere in
+  the response. Otherwise, when the path is unknown, do not assert: raise a
+  clarification that names the missing path.
+- A rejection uses the documented error contract: an exact "status" only when
+  the operation documents that status for this condition. When the exact status
+  is unknown but a client rejection is clearly required, use
+  {"kind": "status_class", "expected": "4xx"}. Never invent an exact status and
+  never accept server errors as a rejection.
+- Assert absence for data the requirement removes or restricts; assert
+  presence only for data the requirement requires.
+- For pagination, assert the number of returned items and the returned page
+  size and offset values when their paths are known.
+- When the expected outcome depends on the total number of records (for
+  example "all records are returned"), assert only what the request can
+  guarantee (for example at most the page size) and put the rest in
+  "unverified_expectations" with the reason.
+
+Conflicts with the documented contract:
+
+- If the value needed for a test case violates a documented constraint (for
+  example a page size above the documented maximum) and no requirement defines
+  the expected behaviour for that violation, set "pending": true with the
+  precise question. Do not claim an outcome that the contract does not support.
+- A deliberate violation is allowed only for a negative or boundary test case
+  that asserts the rejection.
+
+==================================================
 OUTPUT FORMAT
 ==================================================
 
@@ -294,12 +394,36 @@ Use exactly this top-level structure:
       "reason": "<why this value flows from the source to the targets>"
     }
   ],
+  "test_design": [
+    {
+      "test_case_id": "<test case id from the input>",
+      "request_values": [
+        {
+          "location": "query",
+          "name": "<documented parameter>",
+          "value": 10,
+          "value_source": "schema_default"
+        }
+      ],
+      "assertions": [
+        {
+          "kind": "field_absent",
+          "json_path": "<documented path>[].<field>",
+          "path_source": "swagger",
+          "requirement_ref": "R1"
+        }
+      ],
+      "pending": false,
+      "pending_reason": "",
+      "unverified_expectations": []
+    }
+  ],
   "clarifications": []
 }
 
 Every test case from the STEP 1 RESULT that you place in a scenario must also
-appear in execution_order. data_dependencies and clarifications may be empty
-arrays, but the keys must always be present.
+appear in execution_order. data_dependencies, test_design and clarifications
+may be empty arrays, but the keys must always be present.
 
 ==================================================
 INPUT

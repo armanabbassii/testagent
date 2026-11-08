@@ -156,16 +156,21 @@ def operation_ids(services: list[DiscoveredService]) -> dict[str, list[Discovere
 # ── تبدیلِ EndpointSpec به مدلِ قدم دوم ──────────────────────────────────────
 
 def _serialize_parameters(endpoint: EndpointSpec) -> list[dict[str, Any]]:
-    return [
-        {
+    serialized: list[dict[str, Any]] = []
+    for param in endpoint.params:
+        item: dict[str, Any] = {
             "name": param.name,
             "in": param.location,
             "required": param.required,
             "type": param.schema_type,
             "description": param.description,
         }
-        for param in endpoint.params
-    ]
+        # کلیدِ اختیاری و افزایشی: فقط وقتی سند قیدی دارد منتشر می‌شود، تا نتیجه‌ی
+        # قدم دومِ عملیات‌های بدونِ قید دقیقاً همان شکلِ قبلی را داشته باشد.
+        if param.constraints:
+            item["constraints"] = dict(param.constraints)
+        serialized.append(item)
+    return serialized
 
 
 def _serialize_responses(endpoint: EndpointSpec) -> dict[str, Any]:
@@ -174,9 +179,12 @@ def _serialize_responses(endpoint: EndpointSpec) -> dict[str, Any]:
     فقط چیزی که analyzer واقعاً استخراج کرده منتشر می‌شود؛ توضیحِ پاسخ ساخته
     نمی‌شود.
     """
-    responses: dict[str, Any] = {
-        str(endpoint.success_status): {"fields": list(endpoint.response_fields)}
-    }
+    success: dict[str, Any] = {"fields": list(endpoint.response_fields)}
+    # مسیرهای تودرتو فقط وقتی چیزی بیش از فیلدهای سطحِ اول دارند منتشر می‌شوند
+    # (کلیدِ اختیاری و افزایشی؛ پاسخِ تخت همان شکلِ قبلی را نگه می‌دارد).
+    if any(path not in endpoint.response_fields for path in endpoint.response_field_paths):
+        success["field_paths"] = list(endpoint.response_field_paths)
+    responses: dict[str, Any] = {str(endpoint.success_status): success}
     for status in endpoint.error_statuses:
         responses.setdefault(str(status), {"fields": []})
     return responses

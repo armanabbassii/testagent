@@ -1,0 +1,319 @@
+{
+  "step1": {
+    "task_summary": "Service set request possibility.",
+    "identified_requirements": [],
+    "test_cases": [
+      {
+        "id": "TC-001",
+        "title": "Request possibility",
+        "type": "positive",
+        "priority": "high",
+        "preconditions": [],
+        "steps": [
+          "Send POST /admin/serviceSet/{id}/requestPossibility"
+        ],
+        "expected_result": "Succeeds.",
+        "related_service": {
+          "method": "POST",
+          "path": "/admin/serviceSet/{id}/requestPossibility",
+          "service": ""
+        },
+        "auth_intent": "inherit"
+      },
+      {
+        "id": "TC-002",
+        "title": "Read the service set",
+        "type": "positive",
+        "priority": "high",
+        "preconditions": [],
+        "steps": [
+          "Send GET /admin/serviceSet/{id}"
+        ],
+        "expected_result": "Succeeds.",
+        "related_service": {
+          "method": "GET",
+          "path": "/admin/serviceSet/{id}",
+          "service": ""
+        },
+        "auth_intent": "inherit"
+      },
+      {
+        "id": "TC-003",
+        "title": "Read the voucher report",
+        "type": "positive",
+        "priority": "high",
+        "preconditions": [],
+        "steps": [
+          "Send GET /report/voucher/{id}"
+        ],
+        "expected_result": "Succeeds.",
+        "related_service": {
+          "method": "GET",
+          "path": "/report/voucher/{id}",
+          "service": ""
+        },
+        "auth_intent": "inherit"
+      }
+    ],
+    "clarifications": [],
+    "variables": [],
+    "environment_decisions": [
+      {
+        "id": "ENV-1",
+        "status": "ACCEPTED",
+        "scope": "service",
+        "environment": "vdi",
+        "service": {
+          "method": "POST",
+          "path": "/admin/serviceSet/{id}/requestPossibility",
+          "name": "request possibility"
+        },
+        "test_case_ids": [],
+        "evidence": {
+          "original": "The request possibility service must be tested in VDI.",
+          "as_returned": "The request possibility service must be tested in VDI.",
+          "normalized": "The request possibility service must be tested in VDI.",
+          "span": [
+            0,
+            54
+          ],
+          "normalization": "v2"
+        },
+        "source": {
+          "type": "comment",
+          "reference": "90001",
+          "label": "Comment 1",
+          "sha256": "aced5bd89c09043c60a351d2851473fe38f877f84f2d4941ad3d99889cab0145"
+        },
+        "warnings": []
+      }
+    ],
+    "rejected_environment_decisions": [],
+    "environment_sources": [
+      {
+        "type": "description",
+        "reference": "",
+        "label": "Description",
+        "sha256": "33e4a059579c246132d15f02fc658eddd277ca3f1dac2f848c4edab3864538b2",
+        "chars": 90
+      },
+      {
+        "type": "comment",
+        "reference": "90001",
+        "label": "Comment 1",
+        "sha256": "aced5bd89c09043c60a351d2851473fe38f877f84f2d4941ad3d99889cab0145",
+        "chars": 54
+      }
+    ],
+    "environment_warnings": []
+  },
+  "step2": {
+    "services": [
+      {
+        "name": "Admin",
+        "source_url": "http://podium-back.devpod.ir/api/v3/api-docs/Admin",
+        "base_url": "http://podium-back.devpod.ir/api",
+        "apis": [
+          {
+            "method": "POST",
+            "path": "/admin/serviceSet/{id}/requestPossibility",
+            "operation_id": "requestPossibility",
+            "summary": "",
+            "parameters": [],
+            "request_body": null,
+            "responses": {
+              "200": {
+                "fields": [
+                  "id"
+                ]
+              }
+            },
+            "requires_auth": false
+          },
+          {
+            "method": "GET",
+            "path": "/admin/serviceSet/{id}",
+            "operation_id": "getServiceSet",
+            "summary": "",
+            "parameters": [],
+            "request_body": null,
+            "responses": {
+              "200": {
+                "fields": [
+                  "id"
+                ]
+              }
+            },
+            "requires_auth": false
+          }
+        ],
+        "authorization": null,
+        "unresolved": []
+      },
+      {
+        "name": "Report",
+        "source_url": "http://podium-back.devpod.ir/api/v3/api-docs/Report",
+        "base_url": "http://podium-back.devpod.ir/api",
+        "apis": [
+          {
+            "method": "GET",
+            "path": "/report/voucher/{id}",
+            "operation_id": "voucherReport",
+            "summary": "",
+            "parameters": [],
+            "request_body": null,
+            "responses": {
+              "200": {
+                "fields": [
+                  "id"
+                ]
+              }
+            },
+            "requires_auth": false
+          }
+        ],
+        "authorization": null,
+        "unresolved": []
+      }
+    ],
+    "mappings": [
+      {
+        "test_case_id": "TC-001",
+        "api": {
+          "method": "POST",
+          "path": "/admin/serviceSet/{id}/requestPossibility",
+          "operation_id": ""
+        },
+        "confidence": "high",
+        "reason": "matches",
+        "clarification": ""
+      },
+      {
+        "test_case_id": "TC-002",
+        "api": {
+          "method": "GET",
+          "path": "/admin/serviceSet/{id}",
+          "operation_id": ""
+        },
+        "confidence": "high",
+        "reason": "matches",
+        "clarification": ""
+      },
+      {
+        "test_case_id": "TC-003",
+        "api": {
+          "method": "GET",
+          "path": "/report/voucher/{id}",
+          "operation_id": ""
+        },
+        "confidence": "high",
+        "reason": "matches",
+        "clarification": ""
+      }
+    ],
+    "clarifications": [],
+    "host_resolution": {
+      "decisions": [
+        {
+          "id": "ENV-1",
+          "status": "MATCHED",
+          "scope": "service",
+          "environment": "vdi",
+          "matched_test_case_ids": [
+            "TC-001"
+          ],
+          "reason": ""
+        }
+      ],
+      "selections": [
+        {
+          "test_case_id": "TC-001",
+          "host_status": "RESOLVED",
+          "variable": "base_url_vdi",
+          "environment": "vdi",
+          "basis": "service",
+          "decision_ids": [
+            "ENV-1"
+          ],
+          "review_causes": []
+        },
+        {
+          "test_case_id": "TC-002",
+          "host_status": "RESOLVED",
+          "variable": "base_url",
+          "environment": "normal",
+          "basis": "default",
+          "decision_ids": [],
+          "review_causes": []
+        },
+        {
+          "test_case_id": "TC-003",
+          "host_status": "RESOLVED",
+          "variable": "base_url",
+          "environment": "normal",
+          "basis": "default",
+          "decision_ids": [],
+          "review_causes": []
+        }
+      ],
+      "issue_review": {
+        "status": "NONE",
+        "reasons": []
+      },
+      "clarifications": [],
+      "warnings": []
+    }
+  },
+  "step3": {
+    "scenarios": [
+      {
+        "id": "SC-001",
+        "title": "Flow",
+        "test_case_ids": [
+          "TC-001",
+          "TC-002",
+          "TC-003"
+        ],
+        "reason": "one flow"
+      }
+    ],
+    "execution_order": [
+      {
+        "test_case_id": "TC-001",
+        "order": 1,
+        "depends_on": []
+      },
+      {
+        "test_case_id": "TC-002",
+        "order": 2,
+        "depends_on": []
+      },
+      {
+        "test_case_id": "TC-003",
+        "order": 3,
+        "depends_on": [
+          "TC-001"
+        ]
+      }
+    ],
+    "data_dependencies": [
+      {
+        "variable_name": "possibilityId",
+        "source": {
+          "test_case_id": "TC-001",
+          "location": "response.body",
+          "path": "$.id"
+        },
+        "targets": [
+          {
+            "test_case_id": "TC-003",
+            "location": "query",
+            "parameter": "ref"
+          }
+        ]
+      }
+    ],
+    "clarifications": []
+  },
+  "generator": {}
+}

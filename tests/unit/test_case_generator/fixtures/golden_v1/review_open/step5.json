@@ -1,0 +1,237 @@
+{
+  "review": {
+    "status": "needs_review",
+    "summary": "Step 5 review completed.\n\n4 test cases analyzed.\n3 Postman requests generated.\n2 scenarios identified.\n1 data dependency applied.\n4 unresolved clarifications remain.\n\nThe Postman collection is structurally valid but requires human review before execution.",
+    "issues": [],
+    "warnings": [],
+    "unresolved_clarifications": [
+      {
+        "kind": "clarification",
+        "source_step": 1,
+        "test_case_id": "",
+        "message": "The exact response fields expected in the success payload are not defined."
+      },
+      {
+        "kind": "clarification",
+        "source_step": 2,
+        "test_case_id": "",
+        "message": "The expected HTTP status code and error message format for a non-existent voucher are not defined."
+      },
+      {
+        "kind": "missing_data",
+        "source_step": 3,
+        "test_case_id": "TC-004",
+        "message": "TC-004 requires a valid voucher ID, but no test case in the current scope creates or provisions a voucher."
+      },
+      {
+        "kind": "unresolved_test_case",
+        "source_step": 4,
+        "test_case_id": "TC-004",
+        "message": "Step 2 did not resolve an API for this test case, so no request was generated."
+      }
+    ],
+    "information": []
+  },
+  "metrics": {
+    "test_cases": 4,
+    "mapped_test_cases": 3,
+    "generated_requests": 3,
+    "scenarios": 2,
+    "data_dependencies": 1,
+    "clarifications": 4,
+    "issues": 0,
+    "warnings": 0
+  },
+  "artifacts": {
+    "postman_collection": {
+      "info": {
+        "name": "Voucher API Tests",
+        "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+        "description": "Generated deterministically from the Step 1 (task analysis), Step 2 (API discovery and mapping) and Step 3 (scenario and dependency analysis) results.\n\nRequest hosts are {{base_url}} or {{base_url_vdi}}; their values come from the Postman environment (run with --environment), not from this collection.\n\nUnresolved clarifications — no assertion was guessed for these:\n- missing_data (TC-004): TC-004 requires a valid voucher ID, but no test case in the current scope creates or provisions a voucher.\n\nTest cases without a generated request:\n- TC-004: Step 2 did not resolve an API for this test case, so no request was generated."
+      },
+      "variable": [
+        {
+          "key": "token",
+          "value": ""
+        }
+      ],
+      "item": [
+        {
+          "name": "Voucher lifecycle",
+          "item": [
+            {
+              "name": "TC-001 — Create a valid voucher",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "{{token}}",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/admin/voucher",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "admin",
+                    "voucher"
+                  ]
+                },
+                "description": "**Positive test case**\n\nThe voucher is created and its id is returned.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"code\": \"SUMMER\",\n  \"discount\": 10\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"Status code is 201\", function () {",
+                      "    pm.response.to.have.status(201);",
+                      "});",
+                      "",
+                      "pm.collectionVariables.unset(\"voucherId\");",
+                      "pm.test(\"Response provides id and saves it as collection variable 'voucherId'\", function () {",
+                      "    pm.expect(pm.response.code, \"HTTP status of the response that provides voucherId\").to.be.within(200, 299);",
+                      "    const response = pm.response.json();",
+                      "    const value = response.id;",
+                      "    pm.expect(value, \"response.id\").to.not.be.oneOf([undefined, null, \"\"]);",
+                      "    pm.collectionVariables.set(\"voucherId\", value);",
+                      "});",
+                      ""
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "TC-003 — Retrieve the created voucher",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "{{token}}",
+                    "type": "text"
+                  },
+                  {
+                    "key": "X-Voucher-Id",
+                    "value": "{{voucherId}}"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/admin/voucher/{{voucherId}}",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "admin",
+                    "voucher",
+                    "{{voucherId}}"
+                  ]
+                },
+                "description": "**Positive test case**\n\nThe voucher details are returned."
+              },
+              "event": [
+                {
+                  "listen": "prerequest",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "{",
+                      "    const value = pm.collectionVariables.get(\"voucherId\");",
+                      "    const available = !(value === undefined || value === null || value === \"\");",
+                      "    pm.test(\"Required collection variable 'voucherId' is available\", function () {",
+                      "        pm.expect(available, \"collection variable 'voucherId' is not set — 'TC-001' must run successfully before this request.\").to.be.true;",
+                      "    });",
+                      "    if (!available) {",
+                      "        if (pm.execution && typeof pm.execution.skipRequest === \"function\") {",
+                      "            pm.execution.skipRequest();",
+                      "        } else {",
+                      "            throw new Error(\"collection variable 'voucherId' is not set — 'TC-001' must run successfully before this request.\");",
+                      "        }",
+                      "    }",
+                      "}"
+                    ]
+                  }
+                },
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"Status code is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      ""
+                    ]
+                  }
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "name": "Voucher validation",
+          "item": [
+            {
+              "name": "TC-002 — Create a voucher with an invalid discount",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "{{token}}",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/admin/voucher",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "admin",
+                    "voucher"
+                  ]
+                },
+                "description": "**Negative test case**\n\nThe request is rejected with a validation error.\n\nAssumptions:\n\n- The expected status of a non-positive test case cannot be derived from the Step 1/2/3 results, so no status assertion was generated.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"code\": \"SUMMER\",\n  \"discount\": 10\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

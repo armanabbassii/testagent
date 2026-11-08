@@ -1,0 +1,222 @@
+{
+  "review": {
+    "status": "ready",
+    "summary": "Step 5 review completed.\n\n5 test cases analyzed.\n5 Postman requests generated.\n1 scenario identified.\n0 data dependencys applied.\n0 unresolved clarifications remain.\n\nThe Postman collection is structurally valid and no unresolved review item remains.",
+    "issues": [],
+    "warnings": [],
+    "unresolved_clarifications": [],
+    "information": []
+  },
+  "metrics": {
+    "test_cases": 5,
+    "mapped_test_cases": 5,
+    "generated_requests": 5,
+    "scenarios": 1,
+    "data_dependencies": 0,
+    "clarifications": 0,
+    "issues": 0,
+    "warnings": 0
+  },
+  "artifacts": {
+    "postman_collection": {
+      "info": {
+        "name": "Voucher administration API Tests",
+        "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json",
+        "description": "Generated deterministically from the Step 1 (task analysis), Step 2 (API discovery and mapping) and Step 3 (scenario and dependency analysis) results.\n\nRequest hosts are {{base_url}} or {{base_url_vdi}}; their values come from the Postman environment (run with --environment), not from this collection."
+      },
+      "variable": [
+        {
+          "key": "token",
+          "value": ""
+        }
+      ],
+      "item": [
+        {
+          "name": "Vouchers",
+          "item": [
+            {
+              "name": "TC-001 — Read an existing voucher",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "{{token}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/admin/voucher/:code",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "admin",
+                    "voucher",
+                    ":code"
+                  ],
+                  "variable": [
+                    {
+                      "key": "code",
+                      "value": ""
+                    }
+                  ]
+                },
+                "description": "**Positive test case**\n\nRead an existing voucher behaves as specified.\n\nAssumptions:\n\n- The operation documents required parameter(s) path 'code' that the Step 1/2/3 results do not provide a value for; no value was invented for them."
+              },
+              "event": [
+                {
+                  "listen": "test",
+                  "script": {
+                    "type": "text/javascript",
+                    "exec": [
+                      "pm.test(\"Status code is 200\", function () {",
+                      "    pm.response.to.have.status(200);",
+                      "});",
+                      ""
+                    ]
+                  }
+                }
+              ]
+            },
+            {
+              "name": "TC-002 — Read a voucher that does not exist",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "{{token}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/admin/voucher/:code",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "admin",
+                    "voucher",
+                    ":code"
+                  ],
+                  "variable": [
+                    {
+                      "key": "code",
+                      "value": ""
+                    }
+                  ]
+                },
+                "description": "**Negative test case**\n\nRead a voucher that does not exist behaves as specified.\n\nAssumptions:\n\n- The operation documents required parameter(s) path 'code' that the Step 1/2/3 results do not provide a value for; no value was invented for them.\n\n- The expected status of a non-positive test case cannot be derived from the Step 1/2/3 results, so no status assertion was generated."
+              }
+            },
+            {
+              "name": "TC-003 — Read a voucher with an invalid business identifier",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "{{token}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/admin/voucher/:code",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "admin",
+                    "voucher",
+                    ":code"
+                  ],
+                  "variable": [
+                    {
+                      "key": "code",
+                      "value": ""
+                    }
+                  ]
+                },
+                "description": "**Negative test case**\n\nRead a voucher with an invalid business identifier behaves as specified.\n\nAssumptions:\n\n- The operation documents required parameter(s) path 'code' that the Step 1/2/3 results do not provide a value for; no value was invented for them.\n\n- The expected status of a non-positive test case cannot be derived from the Step 1/2/3 results, so no status assertion was generated."
+              }
+            },
+            {
+              "name": "TC-004 — Define a voucher with a discount above 100",
+              "request": {
+                "method": "POST",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "{{token}}",
+                    "type": "text"
+                  },
+                  {
+                    "key": "Content-Type",
+                    "value": "application/json"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/admin/voucher",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "admin",
+                    "voucher"
+                  ]
+                },
+                "description": "**Negative test case**\n\nDefine a voucher with a discount above 100 behaves as specified.\n\nAssumptions:\n\n- The expected status of a non-positive test case cannot be derived from the Step 1/2/3 results, so no status assertion was generated.",
+                "body": {
+                  "mode": "raw",
+                  "raw": "{\n  \"code\": \"string\",\n  \"discount\": 0\n}",
+                  "options": {
+                    "raw": {
+                      "language": "json"
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "name": "TC-005 — Read a voucher without authentication",
+              "request": {
+                "method": "GET",
+                "header": [
+                  {
+                    "key": "Authorization",
+                    "value": "{{token}}",
+                    "type": "text"
+                  }
+                ],
+                "url": {
+                  "raw": "{{base_url}}/api/admin/voucher/:code",
+                  "host": [
+                    "{{base_url}}"
+                  ],
+                  "path": [
+                    "api",
+                    "admin",
+                    "voucher",
+                    ":code"
+                  ],
+                  "variable": [
+                    {
+                      "key": "code",
+                      "value": ""
+                    }
+                  ]
+                },
+                "description": "**Negative test case**\n\nRead a voucher without authentication behaves as specified.\n\nAssumptions:\n\n- The operation documents required parameter(s) path 'code' that the Step 1/2/3 results do not provide a value for; no value was invented for them.\n\n- The expected status of a non-positive test case cannot be derived from the Step 1/2/3 results, so no status assertion was generated."
+              }
+            }
+          ]
+        }
+      ]
+    }
+  }
+}

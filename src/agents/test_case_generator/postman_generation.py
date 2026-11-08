@@ -65,6 +65,13 @@ from src.agents.test_case_generator.postman_builder import (
     PostmanBuilder,
     variable_setter,
 )
+from src.agents.test_case_generator.test_design import (
+    SOURCE_DEPENDENCY,
+    designs_by_case,
+    normalize_test_design,
+    runtime_variables,
+    to_builder_assertion,
+)
 from src.agents.test_case_generator.testcase_generator import (
     Assertion,
     ControllerTestCases,
@@ -140,6 +147,9 @@ class Step4Unresolved(TypedDict):
     # فقط برای تست‌کیسی که به‌خاطرِ میزبان ساخته نشد (CONFLICT / NEEDS_REVIEW).
     host_status: NotRequired[str]
     review_causes: NotRequired[list[dict]]
+    # تست‌کیسی که طراحیِ تستش (test_design) معلق است — تا روشن‌شدنِ رفتارِ
+    # موردِ انتظار درخواستی ساخته نمی‌شود.
+    pending: NotRequired[bool]
 
 
 class Step4Result(TypedDict):
@@ -372,6 +382,58 @@ def operation_index(services: list[dict]) -> dict[tuple[str, str], tuple[dict, d
     return index
 
 
+def _step4_designs(
+    step3_result: Any,
+    test_cases: list[dict],
+    mappings: list[dict],
+    services: list[dict],
+    dependencies: list[dict],
+    clarifications: list[dict],
+) -> tuple[list[dict], dict]:
+    """طراحیِ تستِ قدم سوم را دوباره می‌سنجد (نتیجه‌ی قدم سوم قابلِ ویرایش است).
+
+    برمی‌گرداند: (طراحی‌های معتبر، {"by_case": یادداشت‌ها به تفکیکِ تست‌کیس،
+    "general": هشدارهای عمومی}). یادداشتی که همان پیامِ یک ابهامِ قدم سوم است
+    تکرار نمی‌شود. نتیجه‌ی بدونِ test_design هیچ اثری ندارد.
+    """
+    raw = step3_result.get("test_design") if isinstance(step3_result, dict) else None
+    if raw is None:
+        return [], {"by_case": {}, "general": []}
+    index = operation_index(services)
+    operations: dict[str, dict | None] = {}
+    for case in test_cases:
+        case_id = _clean(case.get("id"))
+        mapping = mapping_for(mappings, case_id)
+        api = mapping.get("api") if isinstance(mapping, dict) else None
+        operation = None
+        if isinstance(api, dict):
+            found = index.get(operation_key(_clean(api.get("method")), _clean(api.get("path"))))
+            operation = found[1] if found else None
+        operations[case_id] = operation
+
+    designs, notes = normalize_test_design(
+        raw, test_cases=test_cases, operations=operations, dependencies=dependencies
+    )
+    known = {
+        (_clean(item.get("test_case_id")), _clean(item.get("message")))
+        for item in clarifications
+    }
+    by_case: dict[str, list[str]] = {}
+    general: list[str] = []
+    for note in notes:
+        key = (note["test_case_id"], note["message"])
+        if key in known:
+            continue
+        if note["test_case_id"]:
+            by_case.setdefault(note["test_case_id"], []).append(
+                f"Test design ({note['type']}): {note['message']}"
+            )
+            general.append(f"{note['test_case_id']}: {note['message']}")
+        else:
+            general.append(note["message"])
+    return designs, {"by_case": by_case, "general": general}
+
+
 def mapping_for(mappings: list[dict], case_id: str) -> dict | None:
     """نگاشتِ یک تست‌کیس — اگر چند بار آمده باشد، اولی برنده است."""
     for mapping in mappings:
@@ -541,6 +603,74 @@ class _Outcome:
     positions: dict[str, tuple[int, int]] = field(default_factory=dict)
 
 
+def _apply_design_values(
+    design: dict,
+    references: dict[str, dict[str, str]],
+    path_params: dict,
+    query_params: dict,
+    headers: dict,
+    body: dict | None,
+    notes: list[str],
+) -> None:
+    """مقدارهای معتبرِ طراحیِ تست را روی درخواست می‌گذارد.
+
+    مقدارِ یک وابستگیِ داده همیشه برنده است؛ مقدارِ «dependency» فقط نشانه است و
+    چیزی را عوض نمی‌کند.
+    """
+    for value in design.get("request_values") or []:
+        if not isinstance(value, dict) or value.get("value_source") == SOURCE_DEPENDENCY:
+            continue
+        location = _clean(value.get("location"))
+        name = _clean(value.get("name"))
+        claimed = references.get(location, {})
+        if name in claimed or (
+            location == "header" and name.lower() in {key.lower() for key in claimed}
+        ):
+            notes.append(
+                f"The test design value for {location} '{name}' was not applied because "
+                f"a Step 3 data dependency supplies that parameter."
+            )
+            continue
+        if location == "path":
+            path_params[name] = value.get("value")
+        elif location == "query":
+            query_params[name] = value.get("value")
+        elif location == "header":
+            headers[name] = _clean(value.get("value"))
+        elif location == "body" and isinstance(body, dict):
+            _set_body_field(body, name, value.get("value"))
+
+
+def _design_assertions(
+    design: dict, auto: list[Assertion], status_notes: list[str]
+) -> tuple[list[Assertion], list[str]]:
+    """assertionهای طراحی را با assertionِ خودکارِ وضعیت ترکیب می‌کند.
+
+    وضعیتِ دقیقِ مستندِ طراحی بر assertionِ خودکار مقدم است؛ کلاسِ وضعیت فقط
+    وقتی می‌آید که هیچ وضعیتِ دقیقی وجود نداشته باشد.
+    """
+    converted = [
+        item
+        for item in (to_builder_assertion(a) for a in design.get("assertions") or [])
+        if item is not None
+    ]
+    exact = [a for a in converted if a["type"] == "status_code"]
+    classes = [a for a in converted if a["type"] == "status_class"]
+    others = [a for a in converted if a["type"] not in ("status_code", "status_class")]
+
+    if exact:
+        status = exact[:1]
+        status_notes = []
+    elif auto:
+        status = list(auto)
+    elif classes:
+        status = classes[:1]
+        status_notes = []
+    else:
+        status = []
+    return [*status, *others], status_notes
+
+
 def _build_request_case(
     case: dict,
     case_id: str,
@@ -548,6 +678,8 @@ def _build_request_case(
     dependencies: list[dict],
     clarifications: list[dict],
     warnings: list[str],
+    design: dict | None = None,
+    design_notes: list[str] | None = None,
 ) -> TestCase:
     """یک تست‌کیسِ قدم اول را به یک درخواستِ Postman تبدیل می‌کند."""
     method = _clean(operation.get("method")).upper()
@@ -610,6 +742,11 @@ def _build_request_case(
             notes.append(note)
             warnings.append(f"{case_id}: {note}")
 
+    if design:
+        _apply_design_values(
+            design, references, path_params, query_params, headers, body, notes
+        )
+
     unfilled = unfilled_required_parameters(operation, path_params, query_params, headers)
     if unfilled:
         notes.append(
@@ -621,6 +758,8 @@ def _build_request_case(
 
     # ── assertionها ─────────────────────────────────────────────────────────
     assertions, status_notes = status_assertions(case_type, operation)
+    if design:
+        assertions, status_notes = _design_assertions(design, assertions, status_notes)
     notes.extend(status_notes)
 
     # ── استخراجِ متغیر از پاسخ ──────────────────────────────────────────────
@@ -634,6 +773,11 @@ def _build_request_case(
         message = _clean(clarification.get("message"))
         if message:
             notes.append(f"Unresolved clarification ({kind}): {message}")
+    # ابهام‌هایی که اعتبارسنجیِ دوباره‌ی طراحیِ تست در همین قدم ساخت (مثلاً
+    # پس از ویرایشِ دستیِ نتیجه‌ی قدم سوم) و در نتیجه‌ی قدم سوم نبودند.
+    for note in design_notes or []:
+        if note not in notes:
+            notes.append(note)
 
     expected_status = 0
     if assertions:
@@ -691,6 +835,8 @@ def _plan(
     services: list[dict],
     mappings: list[dict],
     selections: dict[str, dict],
+    designs: dict[str, dict] | None = None,
+    design_notes: dict[str, list[str]] | None = None,
 ) -> _Outcome:
     """تست‌کیس‌ها را به درخواست و پوشه تبدیل می‌کند — بدونِ ساختِ کالکشن.
 
@@ -796,8 +942,26 @@ def _plan(
             )
             continue
 
+        design = (designs or {}).get(case_id)
+        if design and design.get("pending"):
+            outcome.unresolved.append(
+                {
+                    "test_case_id": case_id,
+                    "title": title,
+                    "reason": (
+                        "Pending clarification — no request is generated until the "
+                        "expected behaviour is confirmed: "
+                        + (_clean(design.get("pending_reason")) or "no reason given.")
+                    ),
+                    "pending": True,
+                }
+            )
+            continue
+
         request_case = _build_request_case(
             case, case_id, operation, dependencies, clarifications, outcome.warnings,
+            design=design,
+            design_notes=(design_notes or {}).get(case_id),
         )
         request_case["base_url_var"] = selection["variable"]
         request_case["base_path"] = base_path_of(base_url)
@@ -1514,10 +1678,16 @@ class Step4PostmanGenerator:
         except HostResolutionError as exc:
             raise PostmanGenerationError(str(exc)) from exc
 
+        designs, design_notes = _step4_designs(
+            step3_result, test_cases, mappings, services, dependencies, clarifications
+        )
         outcome = _plan(
             test_cases, scenarios, execution_order, dependencies, clarifications,
             services, mappings, selections,
+            designs=designs_by_case(designs),
+            design_notes=design_notes["by_case"],
         )
+        outcome.warnings.extend(design_notes["general"])
         outcome.warnings.extend(missing_requested_variables(requested, dependencies))
 
         collection_name = self._collection_name or self._collection_name_from(step1_result)
@@ -1535,6 +1705,12 @@ class Step4PostmanGenerator:
                 description=_collection_description(
                     outcome.unresolved, clarifications, outcome.warnings
                 ),
+                # متغیرهای زمانِ اجرای طراحیِ تست با مقدارِ خالی تعریف می‌شوند؛
+                # قدم پنجم پیش از اجرا خالی‌بودنشان را گزارش می‌کند. فهرستِ خالی
+                # یعنی همان خروجیِ قبلی.
+                extra_variables=[
+                    {"key": name, "value": ""} for name in sorted(runtime_variables(designs))
+                ] or None,
             )
         except PostmanBuildError as exc:
             raise PostmanGenerationError(str(exc)) from exc

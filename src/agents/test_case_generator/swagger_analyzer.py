@@ -47,6 +47,9 @@ class ParamSpec:
     schema_type: str = "string"
     example: object = None
     description: str = ""
+    # قیدهای مستندِ schema (minimum، maximum، enum، format، default، …) — فقط
+    # کلیدهایی که سند واقعاً دارد؛ برای اعتبارسنجیِ داده‌ی تست در قدم سوم.
+    constraints: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -67,6 +70,9 @@ class EndpointSpec:
     success_status: int = 200                    # اولین کد 2xx تعریف‌شده
     error_statuses: list[int] = field(default_factory=list)
     response_fields: list[str] = field(default_factory=list)
+    # مسیرهای تودرتوی فیلدهای پاسخِ موفق، مثلاً «result.items[].id» — «[]» یعنی
+    # هر عضوِ آرایه. فقط چیزی که schema واقعاً مستند کرده است.
+    response_field_paths: list[str] = field(default_factory=list)
     auth_contract: str = AUTH_CONTRACT_UNKNOWN
 
     @property
@@ -362,6 +368,7 @@ class SwaggerAnalyzer:
                 schema_type=schema.get("type") or p.get("type") or "string",
                 example=p.get("example", schema.get("example")),
                 description=p.get("description", ""),
+                constraints=_parameter_constraints(p, schema),
             )
             params.append(spec_param)
             if spec_param.location == "header" and spec_param.required:
@@ -396,6 +403,7 @@ class SwaggerAnalyzer:
             success_status=success_status,
             error_statuses=error_statuses,
             response_fields=response_fields,
+            response_field_paths=self._response_field_paths(operation, schemas),
             auth_contract=auth_contract,
         )
 
@@ -494,6 +502,48 @@ class SwaggerAnalyzer:
 
         return success_status, error_statuses, response_fields
 
+    def _response_field_paths(self, operation: dict, schemas: dict) -> list[str]:
+        """مسیرهای مستندِ فیلدهای پاسخِ موفق، تودرتو و با نشانه‌ی «[]» برای آرایه.
+
+        فقط از schemaِ پاسخِ موفق خوانده می‌شود؛ وقتی schema فیلدی مستند نکرده
+        (مثلاً فقط «type: object») خروجی خالی است و هیچ مسیری حدس زده نمی‌شود.
+        """
+        responses = operation.get("responses", {}) or {}
+        success_key = next(
+            (key for key in sorted(responses, key=str) if str(key).startswith("2")), None
+        )
+        if success_key is None:
+            return []
+        schema = self._response_schema(responses[success_key])
+        paths: list[str] = []
+        self._collect_field_paths(schema, schemas, "", paths, 0)
+        return paths
+
+    def _collect_field_paths(
+        self, schema: object, schemas: dict, prefix: str, paths: list[str], depth: int
+    ) -> None:
+        if not isinstance(schema, dict) or depth > _MAX_FIELD_PATH_DEPTH:
+            return
+        if len(paths) >= _MAX_FIELD_PATHS:
+            return
+        resolved = self._resolve_ref(schema, schemas)
+        for key in ("allOf", "oneOf", "anyOf"):
+            for sub in resolved.get(key) or []:
+                self._collect_field_paths(sub, schemas, prefix, paths, depth + 1)
+        items = resolved.get("items")
+        if resolved.get("type") == "array" or isinstance(items, dict):
+            self._collect_field_paths(items, schemas, prefix + "[]", paths, depth + 1)
+        properties = resolved.get("properties")
+        if not isinstance(properties, dict):
+            return
+        for name, sub in properties.items():
+            if len(paths) >= _MAX_FIELD_PATHS:
+                return
+            path = f"{prefix}.{name}" if prefix else str(name)
+            if path not in paths:
+                paths.append(path)
+            self._collect_field_paths(sub, schemas, path, paths, depth + 1)
+
     @staticmethod
     def _response_schema(response_obj: dict) -> dict:
         if not isinstance(response_obj, dict):
@@ -579,6 +629,34 @@ class SwaggerAnalyzer:
             schema = resolved
             seen += 1
         return schema if isinstance(schema, dict) else {}
+
+
+# کلیدهای قیدِ schema که برای اعتبارسنجیِ داده‌ی تست نگه داشته می‌شوند
+_CONSTRAINT_KEYS = (
+    "minimum",
+    "maximum",
+    "exclusiveMinimum",
+    "exclusiveMaximum",
+    "minLength",
+    "maxLength",
+    "pattern",
+    "enum",
+    "format",
+    "default",
+)
+# سقفِ عمق و تعدادِ مسیرهای فیلدِ پاسخ — جلوی بزرگ‌شدنِ بی‌رویه‌ی نتیجه را می‌گیرد
+_MAX_FIELD_PATH_DEPTH = 8
+_MAX_FIELD_PATHS = 300
+
+
+def _parameter_constraints(parameter: dict, schema: object) -> dict:
+    """قیدهای مستندِ یک پارامتر؛ OpenAPI 3 در schema و Swagger 2 روی خودِ پارامتر."""
+    constraints: dict = {}
+    for source in (parameter, schema if isinstance(schema, dict) else {}):
+        for key in _CONSTRAINT_KEYS:
+            if key in source and key not in constraints:
+                constraints[key] = source[key]
+    return constraints
 
 
 def parse_swagger_fragment(swagger_url: str) -> tuple[str | None, str | None]:

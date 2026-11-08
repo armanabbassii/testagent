@@ -40,6 +40,7 @@ from src.agents.test_case_generator.json_output import (
     JsonExtractionError,
     extract_json_object,
 )
+from src.agents.test_case_generator.test_design import TestDesign, normalize_test_design
 from src.agents.test_case_generator.variable_dependencies import (
     DEFAULT_DEPENDENCY_SCOPE,
     ORIGIN_INFERRED,
@@ -153,6 +154,9 @@ class Step3Result(TypedDict):
     execution_order: list[ExecutionStep]
     data_dependencies: list[DataDependency]
     clarifications: list[Clarification]
+    # طراحیِ تستِ هر تست‌کیس (test_design.py) — اختیاری و افزایشی: فقط وقتی
+    # دست‌کم یک طراحیِ معتبر وجود دارد در نتیجه می‌آید.
+    test_design: NotRequired[list[TestDesign]]
 
 
 # ── ساختِ prompt ─────────────────────────────────────────────────────────────
@@ -1297,14 +1301,59 @@ def build_result(
     execution_order: list[ExecutionStep],
     data_dependencies: list[DataDependency],
     clarifications: list[Clarification],
+    test_design: list[TestDesign] | None = None,
 ) -> Step3Result:
-    """نتیجه‌ی نهاییِ ساختاریافته‌ی قدم سوم را می‌سازد."""
-    return Step3Result(
+    """نتیجه‌ی نهاییِ ساختاریافته‌ی قدم سوم را می‌سازد.
+
+    ``test_design`` فقط وقتی خالی نباشد در نتیجه می‌آید، تا نتیجه‌ی بدونِ طراحی
+    دقیقاً همان شکلِ قبلی را داشته باشد.
+    """
+    result = Step3Result(
         scenarios=scenarios,
         execution_order=execution_order,
         data_dependencies=data_dependencies,
         clarifications=clarifications,
     )
+    if test_design:
+        result["test_design"] = test_design
+    return result
+
+
+def operations_by_case(step2_result: Any) -> dict[str, dict | None]:
+    """test_case_id → عملیاتِ کاملِ نگاشت‌شده در قدم دوم (یا None)."""
+    index = _operation_index(step2_result)
+    return {
+        case_id: _operation_for(api, index)
+        for case_id, api in _mapped_operations(step2_result).items()
+    }
+
+
+def validate_test_design(
+    data: object,
+    *,
+    test_cases: list[dict],
+    step2_result: Any,
+    dependencies: list[DataDependency],
+) -> tuple[list[TestDesign], list[Clarification]]:
+    """بخشِ اختیاریِ test_design ِ پاسخِ مدل را می‌سنجد.
+
+    هیچ‌وقت استثنا نمی‌دهد: پیشنهادِ غیرقابلِ اثبات کنار گذاشته و به ابهام تبدیل
+    می‌شود (test_design.normalize_test_design).
+    """
+    raw = data.get("test_design") if isinstance(data, dict) else None
+    designs, notes = normalize_test_design(
+        raw,
+        test_cases=test_cases,
+        operations=operations_by_case(step2_result),
+        dependencies=list(dependencies),
+    )
+    clarifications = [
+        Clarification(
+            type=note["type"], test_case_id=note["test_case_id"], message=note["message"]
+        )
+        for note in notes
+    ]
+    return designs, clarifications
 
 
 # ── عاملِ تحلیل ──────────────────────────────────────────────────────────────
@@ -1331,6 +1380,9 @@ class ScenarioAnalysisAgent:
         # None یعنی «مقدارِ مشترکِ پروژه»؛ عددِ صریح همیشه برنده است.
         # مقدارِ مشترک همان ۸۱۹۲ ای است که این قدم از قبل داشت.
         self._max_tokens = LLM_MAX_OUTPUT_TOKENS if max_tokens is None else max_tokens
+        # طراحیِ تستِ آخرین تحلیل؛ امضای analyze برای سازگاری با مصرف‌کننده‌های
+        # موجود همان چهارتایی می‌ماند.
+        self.last_test_design: list[TestDesign] = []
 
     def analyze(
         self,
@@ -1378,12 +1430,20 @@ class ScenarioAnalysisAgent:
         except JsonExtractionError as exc:
             raise ScenarioAnalysisError(str(exc)) from exc
 
-        return validate_scenario_payload(
+        scenarios, steps, dependencies, clarifications = validate_scenario_payload(
             data,
             test_cases=test_cases,
             step2_result=step2_result,
             requested=requested,
         )
+        self.last_test_design, design_notes = validate_test_design(
+            data,
+            test_cases=test_cases,
+            step2_result=step2_result,
+            dependencies=dependencies,
+        )
+        clarifications.extend(design_notes)
+        return scenarios, steps, dependencies, clarifications
 
 
 class Step3ScenarioAnalysisGenerator:
@@ -1452,7 +1512,11 @@ class Step3ScenarioAnalysisGenerator:
             )
 
         return build_result(
-            scenarios, execution_order, data_dependencies, clarifications
+            scenarios,
+            execution_order,
+            data_dependencies,
+            clarifications,
+            test_design=self._agent.last_test_design,
         )
 
     @staticmethod
@@ -1481,7 +1545,9 @@ __all__ = [
     "extract_api_mappings",
     "extract_test_cases",
     "find_cycle",
+    "operations_by_case",
     "render_prompt",
     "split_prompt",
     "validate_scenario_payload",
+    "validate_test_design",
 ]

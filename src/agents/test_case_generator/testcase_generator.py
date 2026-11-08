@@ -136,6 +136,13 @@ class Assertion(TypedDict):
     type: str
     expected: NotRequired[object]
     json_path: NotRequired[str]
+    # کلیدهای اختیاریِ assertionهای طراحیِ تست (test_design.py):
+    # scope «anywhere» یعنی جست‌وجوی کلید در کلِ پاسخ؛ min/max برای array_length؛
+    # value_type برای field_type.
+    scope: NotRequired[str]
+    min: NotRequired[int]
+    max: NotRequired[int]
+    value_type: NotRequired[str]
 
 
 class TestCase(TypedDict):

@@ -226,6 +226,11 @@ class TaskTestCase(TypedDict):
     # رفتارِ اعتبارنامه‌ی همین تست‌کیس — مستقل از قراردادِ احراز هویتِ API.
     # مقادیرِ مجاز در auth_intent.py تعریف شده‌اند.
     auth_intent: str
+    # ردیابیِ نیازمندی و طراحیِ سطحِ نیازمندی — همه اختیاری؛ نتیجه‌ی قدیمیِ
+    # بدونِ این فیلدها همان رفتارِ قبلی را دارد.
+    requirement_refs: NotRequired[list[str]]
+    checks: NotRequired[list[dict]]
+    input_intent: NotRequired[list[dict]]
 
 
 class TaskAnalysisResult(TypedDict):
@@ -243,6 +248,11 @@ class TaskAnalysisResult(TypedDict):
     rejected_environment_decisions: NotRequired[list[dict]]
     environment_sources: NotRequired[list[dict]]
     environment_warnings: NotRequired[list[str]]
+    # نیازمندی‌های ساختاریافته (رفتاری یا پیاده‌سازی)، تست‌کیس‌های کنارگذاشته
+    # با دلیل و پوشش‌دهنده، و هشدارهای ردیابی — همه اختیاری و افزایشی.
+    requirements: NotRequired[list[dict]]
+    dropped_test_cases: NotRequired[list[dict]]
+    traceability_warnings: NotRequired[list[str]]
 
 
 class PlannedTestCase(TypedDict):
@@ -260,6 +270,10 @@ class PlannedTestCase(TypedDict):
     related_service: RelatedService
     # در برنامه هم نگه داشته می‌شود تا تولیدِ مرحله‌ای آن را از دست ندهد.
     auth_intent: str
+    # ردیابی و طراحیِ سطحِ نیازمندی همین‌جا قطعی می‌شود (اختیاری).
+    requirement_refs: NotRequired[list[str]]
+    checks: NotRequired[list[dict]]
+    input_intent: NotRequired[list[dict]]
 
 
 class TaskAnalysisPlan(TypedDict):
@@ -273,6 +287,8 @@ class TaskAnalysisPlan(TypedDict):
     variables: list[RequestedVariable]
     # خروجیِ خامِ مدل برای تصمیم‌های محیط — بعد از ساختِ نتیجه سنجیده می‌شود.
     environment_decisions: NotRequired[Any]
+    requirements: NotRequired[list[dict]]
+    dropped_test_cases: NotRequired[list[dict]]
 
 
 class TestCaseDetails(TypedDict):
@@ -654,6 +670,268 @@ def _dedupe(cases: list[TaskTestCase]) -> list[TaskTestCase]:
     return kept
 
 
+# ── ردیابیِ نیازمندی، ضرورت و پوشش ───────────────────────────────────────────
+#
+# همه‌ی این فیلدها اختیاری‌اند: نبودِ آن‌ها یعنی همان قراردادِ قبلی. وقتی مدل
+# آن‌ها را می‌فرستد، قطعی سنجیده می‌شوند تا
+#   * هر تست‌کیس به یک نیازمندیِ رفتاری قابلِ ردیابی باشد؛
+#   * نیازمندیِ «پیاده‌سازی» (مثلاً ثبتِ یک endpoint در یک سیستمِ دسترسی) به
+#     تنهایی تست‌کیس نسازد؛
+#   * کنارگذاشتنِ یک تست‌کیس هیچ پوششِ نیازمندی‌ای را بی‌صدا از بین نبرد.
+
+REQUIREMENT_KINDS = ("behavior", "implementation")
+REQUIREMENT_SOURCES = ("description", "comment", "attachment", "user")
+CHECK_KINDS = (
+    "field_present",
+    "field_absent",
+    "field_value",
+    "field_type",
+    "list_empty",
+    "list_count",
+    "pagination",
+    "rejected",
+    "success",
+    "other",
+)
+
+
+def _validate_requirements(raw: object, errors: list[str]) -> list[dict] | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        errors.append("'requirements' must be an array.")
+        return None
+    requirements: list[dict] = []
+    seen: set[str] = set()
+    for index, item in enumerate(raw):
+        where = f"requirements[{index}]"
+        if not isinstance(item, dict):
+            errors.append(f"{where}: expected an object.")
+            continue
+        requirement_id = _clean(item.get("id"))
+        text = _clean(item.get("text"))
+        kind = _clean(item.get("kind")).lower()
+        source = _clean(item.get("source")).lower()
+        if not requirement_id:
+            errors.append(f"{where}: 'id' is missing or empty.")
+            continue
+        if requirement_id in seen:
+            errors.append(f"{where}: duplicate requirement id {requirement_id!r}.")
+            continue
+        seen.add(requirement_id)
+        if not text:
+            errors.append(f"{where} ('{requirement_id}'): 'text' is missing or empty.")
+        if kind not in REQUIREMENT_KINDS:
+            errors.append(
+                f"{where} ('{requirement_id}'): 'kind' must be one of {REQUIREMENT_KINDS}."
+            )
+        if source and source not in REQUIREMENT_SOURCES:
+            errors.append(
+                f"{where} ('{requirement_id}'): 'source' must be one of {REQUIREMENT_SOURCES}."
+            )
+        normalized = {"id": requirement_id, "text": text, "kind": kind}
+        if source:
+            normalized["source"] = source
+        for key in ("source_reference", "evidence"):
+            if _clean(item.get(key)):
+                normalized[key] = _clean(item.get(key))
+        requirements.append(normalized)
+    return requirements
+
+
+def _validate_refs(
+    raw: object, where: str, known: dict[str, str] | None, errors: list[str]
+) -> list[str]:
+    if raw is None:
+        return []
+    if not isinstance(raw, list) or not all(isinstance(item, str) for item in raw):
+        errors.append(f"{where}: must be an array of requirement ids.")
+        return []
+    refs = [item.strip() for item in raw if item.strip()]
+    if refs and known is None:
+        errors.append(f"{where}: requirement ids are given but 'requirements' is missing.")
+        return refs
+    for ref in refs:
+        if known is not None and ref not in known:
+            errors.append(f"{where}: unknown requirement id {ref!r}.")
+    return list(dict.fromkeys(refs))
+
+
+def _validate_checks(raw: object, where: str, errors: list[str]) -> list[dict]:
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        errors.append(f"{where}: must be an array.")
+        return []
+    checks: list[dict] = []
+    for index, item in enumerate(raw):
+        item_where = f"{where}[{index}]"
+        if not isinstance(item, dict):
+            errors.append(f"{item_where}: expected an object.")
+            continue
+        kind = _clean(item.get("kind")).lower()
+        description = _clean(item.get("description"))
+        if kind not in CHECK_KINDS:
+            errors.append(f"{item_where}: 'kind' must be one of {CHECK_KINDS}.")
+            continue
+        if not description:
+            errors.append(f"{item_where}: 'description' is missing or empty.")
+            continue
+        fields = item.get("fields")
+        if fields is not None and (
+            not isinstance(fields, list) or not all(isinstance(f, str) for f in fields)
+        ):
+            errors.append(f"{item_where}: 'fields' must be an array of strings.")
+            continue
+        check = {"kind": kind, "description": description}
+        names = [name.strip() for name in fields or [] if name.strip()]
+        if names:
+            check["fields"] = names
+        for key in ("requirement_ref", "evidence"):
+            if _clean(item.get(key)):
+                check[key] = _clean(item.get(key))
+        checks.append(check)
+    return checks
+
+
+def _validate_input_intent(raw: object, where: str, errors: list[str]) -> list[dict]:
+    if raw is None:
+        return []
+    if not isinstance(raw, list):
+        errors.append(f"{where}: must be an array.")
+        return []
+    intents: list[dict] = []
+    for index, item in enumerate(raw):
+        item_where = f"{where}[{index}]"
+        if not isinstance(item, dict):
+            errors.append(f"{item_where}: expected an object.")
+            continue
+        intent = _clean(item.get("intent"))
+        if not intent:
+            errors.append(f"{item_where}: 'intent' is missing or empty.")
+            continue
+        normalized = {"name": _clean(item.get("name")), "intent": intent}
+        value = item.get("value")
+        if value is not None and isinstance(value, (str, int, float, bool)):
+            normalized["value"] = value
+        if _clean(item.get("evidence")):
+            normalized["evidence"] = _clean(item.get("evidence"))
+        intents.append(normalized)
+    return intents
+
+
+def _case_traceability(
+    raw_case: dict, case_id: str, known: dict[str, str] | None, errors: list[str]
+) -> dict:
+    """فیلدهای اختیاریِ ردیابی و طراحیِ سطحِ نیازمندیِ یک تست‌کیس."""
+    where = f"test case {case_id!r}"
+    extras: dict = {}
+    refs = _validate_refs(
+        raw_case.get("requirement_refs"), f"{where}.requirement_refs", known, errors
+    )
+    if refs:
+        extras["requirement_refs"] = refs
+        if known is not None and all(known.get(ref) == "implementation" for ref in refs):
+            errors.append(
+                f"{where}: it is traced only to implementation requirement(s) "
+                f"{', '.join(refs)}. An implementation requirement is kept for "
+                f"traceability but does not by itself require a test case; trace the "
+                f"case to a behaviour requirement or drop it."
+            )
+    checks = _validate_checks(raw_case.get("checks"), f"{where}.checks", errors)
+    if checks:
+        extras["checks"] = checks
+    intents = _validate_input_intent(
+        raw_case.get("input_intent"), f"{where}.input_intent", errors
+    )
+    if intents:
+        extras["input_intent"] = intents
+    return extras
+
+
+def _validate_dropped(
+    raw: object,
+    kept: list[dict],
+    known: dict[str, str] | None,
+    errors: list[str],
+) -> list[dict] | None:
+    """تست‌کیس‌های کنارگذاشته — هر حذف دلیل و پوشش‌دهنده دارد و پوشش را نمی‌کاهد."""
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        errors.append("'dropped_test_cases' must be an array.")
+        return None
+    kept_ids = {case["id"] for case in kept}
+    covered: set[str] = set()
+    for case in kept:
+        covered.update(case.get("requirement_refs") or [])
+    dropped: list[dict] = []
+    for index, item in enumerate(raw):
+        where = f"dropped_test_cases[{index}]"
+        if not isinstance(item, dict):
+            errors.append(f"{where}: expected an object.")
+            continue
+        title = _clean(item.get("title"))
+        reason = _clean(item.get("reason"))
+        if not title or not reason:
+            errors.append(f"{where}: 'title' and 'reason' are required.")
+            continue
+        covered_by = item.get("covered_by")
+        if covered_by is None:
+            covered_by = []
+        if not isinstance(covered_by, list) or not all(isinstance(c, str) for c in covered_by):
+            errors.append(f"{where}: 'covered_by' must be an array of test case ids.")
+            continue
+        covered_by = [c.strip() for c in covered_by if c.strip()]
+        for case_id in covered_by:
+            if case_id not in kept_ids:
+                errors.append(f"{where}: 'covered_by' names unknown test case {case_id!r}.")
+        refs = _validate_refs(item.get("requirement_refs"), f"{where}.requirement_refs", known, errors)
+        lost = [ref for ref in refs if ref not in covered]
+        if lost:
+            errors.append(
+                f"{where} ('{title}'): dropping it would lose coverage of requirement(s) "
+                f"{', '.join(lost)} — no kept test case is traced to them. Keep the case "
+                f"or trace a kept case to those requirements."
+            )
+        entry = {"title": title, "reason": reason, "covered_by": covered_by}
+        if refs:
+            entry["requirement_refs"] = refs
+        dropped.append(entry)
+    return dropped
+
+
+def _apply_traceability(
+    data: dict, kept: list[TaskTestCase], errors: list[str]
+) -> tuple[list[dict] | None, list[dict] | None, list[str]]:
+    """فیلدهای ردیابی را می‌سنجد و روی تست‌کیس‌های نگه‌داشته‌شده می‌گذارد.
+
+    برمی‌گرداند: (نیازمندی‌ها، تست‌کیس‌های کنارگذاشته، هشدارها) — None یعنی
+    مدل آن بخش را نفرستاده است.
+    """
+    requirements = _validate_requirements(data.get("requirements"), errors)
+    known = (
+        {item["id"]: item["kind"] for item in requirements}
+        if requirements is not None
+        else None
+    )
+    raw_by_id: dict[str, dict] = {}
+    for raw_case in data.get("test_cases") or []:
+        if isinstance(raw_case, dict) and _clean(raw_case.get("id")):
+            raw_by_id.setdefault(_clean(raw_case.get("id")), raw_case)
+
+    warnings: list[str] = []
+    for case in kept:
+        extras = _case_traceability(raw_by_id.get(case["id"], {}), case["id"], known, errors)
+        case.update(extras)  # type: ignore[typeddict-item]
+        if requirements and not extras.get("requirement_refs"):
+            warnings.append(
+                f"Test case {case['id']!r} is not traced to any requirement."
+            )
+    dropped = _validate_dropped(data.get("dropped_test_cases"), kept, known, errors)
+    return requirements, dropped, warnings
+
+
 def validate_analysis(data: dict) -> TaskAnalysisResult:
     """خروجیِ JSON مدل را اعتبارسنجی و نرمال می‌کند.
 
@@ -697,6 +975,7 @@ def validate_analysis(data: dict) -> TaskAnalysisResult:
 
     kept = _dedupe(cases)
     variables = validate_requested_variables(data.get("variables"), kept, errors)
+    structured, dropped, trace_warnings = _apply_traceability(data, kept, errors)
 
     if errors:
         raise TaskAnalysisError(
@@ -704,13 +983,23 @@ def validate_analysis(data: dict) -> TaskAnalysisResult:
             + "\n  - ".join(errors)
         )
 
-    return TaskAnalysisResult(
+    if structured and not requirements:
+        requirements = [item["text"] for item in structured if item["text"]]
+    result = TaskAnalysisResult(
         task_summary=task_summary,
         identified_requirements=requirements,
         test_cases=kept,
         clarifications=clarifications,
         variables=variables,
     )
+    # کلیدهای اختیاری فقط وقتی مدل آن‌ها را فرستاده است.
+    if structured is not None:
+        result["requirements"] = structured
+    if dropped is not None:
+        result["dropped_test_cases"] = dropped
+    if trace_warnings:
+        result["traceability_warnings"] = trace_warnings
+    return result
 
 
 def parse_analysis(raw: str) -> TaskAnalysisResult:
@@ -786,7 +1075,7 @@ def _validate_planned_case(
     if not valid:
         return None
 
-    return PlannedTestCase(
+    planned = PlannedTestCase(
         id=case_id,
         title=title,
         type=case_type,
@@ -794,6 +1083,12 @@ def _validate_planned_case(
         related_service=related_service,
         auth_intent=auth_intent,
     )
+    # فیلدهای اختیاریِ ردیابی همان‌طور که آمده‌اند حمل می‌شوند؛ سنجشِ کاملشان
+    # در validate_plan و دوباره در validate_analysis انجام می‌شود.
+    for key in ("requirement_refs", "checks", "input_intent"):
+        if case.get(key) is not None:
+            planned[key] = case[key]  # type: ignore[literal-required]
+    return planned
 
 
 def validate_plan(data: dict) -> TaskAnalysisPlan:
@@ -838,6 +1133,8 @@ def validate_plan(data: dict) -> TaskAnalysisPlan:
         seen_ids.add(case["id"])
 
     variables = validate_requested_variables(data.get("variables"), cases, errors)
+    # همان سنجشِ ردیابی روی کپیِ تست‌کیس‌ها — تا خطا پیش از گسترش برگردد.
+    _apply_traceability(data, [dict(case) for case in cases], errors)  # type: ignore[misc]
 
     if errors:
         raise TaskAnalysisError(
@@ -845,13 +1142,17 @@ def validate_plan(data: dict) -> TaskAnalysisPlan:
             + "\n  - ".join(errors)
         )
 
-    return TaskAnalysisPlan(
+    plan = TaskAnalysisPlan(
         task_summary=task_summary,
         identified_requirements=requirements,
         test_cases=cases,
         clarifications=clarifications,
         variables=variables,
     )
+    for key in ("requirements", "dropped_test_cases"):
+        if data.get(key) is not None:
+            plan[key] = data[key]  # type: ignore[literal-required]
+    return plan
 
 
 def validate_details(
@@ -967,18 +1268,25 @@ def _assemble_result(
                 "expected_result": detail["expected_result"],
                 "related_service": planned["related_service"],
                 "auth_intent": planned["auth_intent"],
+                **{
+                    key: planned[key]  # type: ignore[literal-required]
+                    for key in ("requirement_refs", "checks", "input_intent")
+                    if key in planned
+                },
             }
         )
 
-    return validate_analysis(
-        {
-            "task_summary": plan["task_summary"],
-            "identified_requirements": plan["identified_requirements"],
-            "test_cases": test_cases,
-            "clarifications": plan["clarifications"],
-            "variables": plan.get("variables") or [],
-        }
-    )
+    assembled = {
+        "task_summary": plan["task_summary"],
+        "identified_requirements": plan["identified_requirements"],
+        "test_cases": test_cases,
+        "clarifications": plan["clarifications"],
+        "variables": plan.get("variables") or [],
+    }
+    for key in ("requirements", "dropped_test_cases"):
+        if key in plan:
+            assembled[key] = plan[key]  # type: ignore[literal-required]
+    return validate_analysis(assembled)
 
 
 def _batches(items: list, size: int) -> list[list]:

@@ -1,0 +1,338 @@
+{
+  "step1": {
+    "task_summary": "Voucher scenario for the admin APIs",
+    "identified_requirements": [
+      "Create a voucher and read it back by its id."
+    ],
+    "test_cases": [
+      {
+        "id": "TC-001",
+        "title": "Create an amount voucher",
+        "type": "positive",
+        "priority": "high",
+        "preconditions": [],
+        "steps": [
+          "Create an amount voucher"
+        ],
+        "expected_result": "Create an amount voucher behaves as specified.",
+        "related_service": {
+          "method": "POST",
+          "path": "/admin/voucher/amount",
+          "service": ""
+        },
+        "auth_intent": "inherit"
+      },
+      {
+        "id": "TC-002",
+        "title": "Create a voucher without a name is rejected",
+        "type": "negative",
+        "priority": "high",
+        "preconditions": [],
+        "steps": [
+          "Create a voucher without a name is rejected"
+        ],
+        "expected_result": "Create a voucher without a name is rejected behaves as specified.",
+        "related_service": {
+          "method": "POST",
+          "path": "/admin/voucher/amount",
+          "service": ""
+        },
+        "auth_intent": "inherit"
+      },
+      {
+        "id": "TC-003",
+        "title": "Retrieve the created voucher",
+        "type": "positive",
+        "priority": "high",
+        "preconditions": [],
+        "steps": [
+          "Retrieve the created voucher"
+        ],
+        "expected_result": "Retrieve the created voucher behaves as specified.",
+        "related_service": {
+          "method": "GET",
+          "path": "/admin/voucher/{id}",
+          "service": ""
+        },
+        "auth_intent": "inherit"
+      },
+      {
+        "id": "TC-004",
+        "title": "Retrieve a voucher that does not exist",
+        "type": "negative",
+        "priority": "high",
+        "preconditions": [],
+        "steps": [
+          "Retrieve a voucher that does not exist"
+        ],
+        "expected_result": "Retrieve a voucher that does not exist behaves as specified.",
+        "related_service": {
+          "method": "GET",
+          "path": "/admin/voucher/{id}",
+          "service": ""
+        },
+        "auth_intent": "inherit"
+      },
+      {
+        "id": "TC-005",
+        "title": "Update the created voucher",
+        "type": "positive",
+        "priority": "high",
+        "preconditions": [],
+        "steps": [
+          "Update the created voucher"
+        ],
+        "expected_result": "Update the created voucher behaves as specified.",
+        "related_service": {
+          "method": "PUT",
+          "path": "/admin/voucher/{id}",
+          "service": ""
+        },
+        "auth_intent": "inherit"
+      }
+    ],
+    "clarifications": [],
+    "variables": [
+      {
+        "name": "voucherId",
+        "scope": "global",
+        "source_test_case_id": "TC-001",
+        "response_path": "$.result.body.id",
+        "required": true,
+        "consumers": [
+          {
+            "test_case_id": "TC-003",
+            "location": "path",
+            "parameter": ""
+          },
+          {
+            "test_case_id": "TC-005",
+            "location": "",
+            "parameter": ""
+          }
+        ],
+        "instruction": "voucherId ایجاد شده باید به عنوان گلوبال وریبل در قسمت اسکریپت های پستمن وارد شود."
+      }
+    ]
+  },
+  "step2": {
+    "services": [
+      {
+        "name": "Admin",
+        "source_url": "http://swagger.local/Admin",
+        "base_url": "http://podium-back.devpod.ir/api",
+        "apis": [
+          {
+            "method": "POST",
+            "path": "/admin/voucher/amount",
+            "operation_id": "defineAmountVoucher",
+            "summary": "",
+            "parameters": [],
+            "request_body": {
+              "name": "string",
+              "amount": 0,
+              "count": 0
+            },
+            "responses": {
+              "200": {
+                "fields": []
+              }
+            },
+            "requires_auth": false
+          },
+          {
+            "method": "GET",
+            "path": "/admin/voucher/{id}",
+            "operation_id": "getVoucherDetails",
+            "summary": "",
+            "parameters": [
+              {
+                "name": "id",
+                "in": "path",
+                "required": true,
+                "type": "integer",
+                "description": ""
+              }
+            ],
+            "request_body": null,
+            "responses": {
+              "200": {
+                "fields": []
+              }
+            },
+            "requires_auth": false
+          },
+          {
+            "method": "PUT",
+            "path": "/admin/voucher/{id}",
+            "operation_id": "updateVoucher",
+            "summary": "",
+            "parameters": [
+              {
+                "name": "id",
+                "in": "path",
+                "required": true,
+                "type": "integer",
+                "description": ""
+              }
+            ],
+            "request_body": {
+              "name": "string"
+            },
+            "responses": {
+              "200": {
+                "fields": []
+              }
+            },
+            "requires_auth": false
+          }
+        ],
+        "authorization": null,
+        "unresolved": []
+      }
+    ],
+    "mappings": [
+      {
+        "test_case_id": "TC-001",
+        "api": {
+          "method": "POST",
+          "path": "/admin/voucher/amount",
+          "operation_id": "defineAmountVoucher"
+        },
+        "confidence": "high",
+        "reason": "Mapped by the test fixture.",
+        "clarification": ""
+      },
+      {
+        "test_case_id": "TC-002",
+        "api": {
+          "method": "POST",
+          "path": "/admin/voucher/amount",
+          "operation_id": "defineAmountVoucher"
+        },
+        "confidence": "high",
+        "reason": "Mapped by the test fixture.",
+        "clarification": ""
+      },
+      {
+        "test_case_id": "TC-003",
+        "api": {
+          "method": "GET",
+          "path": "/admin/voucher/{id}",
+          "operation_id": "getVoucherDetails"
+        },
+        "confidence": "high",
+        "reason": "Mapped by the test fixture.",
+        "clarification": ""
+      },
+      {
+        "test_case_id": "TC-004",
+        "api": {
+          "method": "GET",
+          "path": "/admin/voucher/{id}",
+          "operation_id": "getVoucherDetails"
+        },
+        "confidence": "high",
+        "reason": "Mapped by the test fixture.",
+        "clarification": ""
+      },
+      {
+        "test_case_id": "TC-005",
+        "api": {
+          "method": "PUT",
+          "path": "/admin/voucher/{id}",
+          "operation_id": "updateVoucher"
+        },
+        "confidence": "high",
+        "reason": "Mapped by the test fixture.",
+        "clarification": ""
+      }
+    ],
+    "clarifications": []
+  },
+  "step3": {
+    "scenarios": [
+      {
+        "id": "SC-001",
+        "title": "Voucher lifecycle",
+        "test_case_ids": [
+          "TC-001",
+          "TC-003",
+          "TC-005"
+        ],
+        "reason": "Create, read and update the same voucher."
+      },
+      {
+        "id": "SC-002",
+        "title": "Voucher validation",
+        "test_case_ids": [
+          "TC-002",
+          "TC-004"
+        ],
+        "reason": "Invalid input and missing resources."
+      }
+    ],
+    "execution_order": [
+      {
+        "test_case_id": "TC-001",
+        "order": 1,
+        "depends_on": []
+      },
+      {
+        "test_case_id": "TC-002",
+        "order": 2,
+        "depends_on": []
+      },
+      {
+        "test_case_id": "TC-003",
+        "order": 3,
+        "depends_on": []
+      },
+      {
+        "test_case_id": "TC-004",
+        "order": 4,
+        "depends_on": []
+      },
+      {
+        "test_case_id": "TC-005",
+        "order": 5,
+        "depends_on": []
+      }
+    ],
+    "data_dependencies": [
+      {
+        "variable_name": "voucherId",
+        "source": {
+          "test_case_id": "TC-001",
+          "location": "response.body",
+          "path": "$.result.body.id"
+        },
+        "targets": [
+          {
+            "test_case_id": "TC-003",
+            "location": "path",
+            "parameter": "id"
+          },
+          {
+            "test_case_id": "TC-005",
+            "location": "path",
+            "parameter": "id"
+          }
+        ],
+        "confidence": "high",
+        "reason": "Requested in the task: voucherId ایجاد شده باید به عنوان گلوبال وریبل در قسمت اسکریپت های پستمن وارد شود.",
+        "scope": "global",
+        "required": true,
+        "origin": "task"
+      }
+    ],
+    "clarifications": [
+      {
+        "type": "response_path",
+        "test_case_id": "TC-001",
+        "message": "Requested variable 'voucherId': the response schema of POST /admin/voucher/amount documents no fields, so '$.result.body.id' (specified in the task) cannot be verified against the API contract; it is used exactly as given and its existence is checked when the request runs."
+      }
+    ]
+  },
+  "generator": {}
+}

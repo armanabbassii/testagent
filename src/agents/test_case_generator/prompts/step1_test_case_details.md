@@ -30,8 +30,13 @@ STRICT CONTRACT
 
 - Return exactly ONE detail object for EVERY planned test case.
 - Copy each id exactly. Do not rename, renumber, merge, split, add, or drop test cases.
-- Do not change the title, type, priority, auth_intent, or related_service.
-  They are already fixed by the plan.
+- Do not change the title, type, priority, auth_intent, related_service,
+  requirement_refs, checks or input_intent. They are already fixed by the plan.
+- The expected_result must describe exactly what the planned checks verify —
+  field presence or absence, values, list size, pagination or rejection — and
+  must not contradict them or add checks the plan does not contain.
+- When the plan records an input_intent value (for example a default page
+  size), the steps must send that value explicitly.
 - Do not introduce a test case that is not in the provided plan.
 - Do not return an empty array.
 
