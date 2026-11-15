@@ -19,6 +19,8 @@ import importlib
 import json
 import os
 import re
+import tempfile
+import uuid
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -43,6 +45,7 @@ from src.agents.test_case_generator.api_mapping import (
 )
 from src.agents.test_case_generator.task_analysis import (
     DEFAULT_TEST_CASE_BATCH_SIZE,
+    DIRECT_MAX_OUTPUT_TOKENS,
     TaskAnalysisError,
     TaskAnalysisGenerator,
 )
@@ -264,7 +267,13 @@ class TestLLMClientMetadata:
 def _limit_with_env(value: str | None) -> int:
     """تنظیمات را با یک مقدارِ محیطیِ مشخص می‌خواند و بعد به حالتِ اول برمی‌گرداند."""
     original = os.environ.get("LLM_MAX_OUTPUT_TOKENS")
+    original_env_file = os.environ.get("ENV_FILE")
     try:
+        # بدونِ این، reload همان .envِ واقعیِ پروژه را دوباره می‌خواند و
+        # مقدارِ «unset» را با عددِ آن فایل پر می‌کند.
+        os.environ["ENV_FILE"] = os.path.join(
+            tempfile.gettempdir(), f"missing-{uuid.uuid4().hex}.env"
+        )
         if value is None:
             os.environ.pop("LLM_MAX_OUTPUT_TOKENS", None)
         else:
@@ -276,6 +285,10 @@ def _limit_with_env(value: str | None) -> int:
             os.environ.pop("LLM_MAX_OUTPUT_TOKENS", None)
         else:
             os.environ["LLM_MAX_OUTPUT_TOKENS"] = original
+        if original_env_file is None:
+            os.environ.pop("ENV_FILE", None)
+        else:
+            os.environ["ENV_FILE"] = original_env_file
         importlib.reload(config_module)
 
 
@@ -309,7 +322,7 @@ class TestOutputLimitConfiguration:
     def test_the_value_is_restored_after_reading(self):
         assert config_module.LLM_MAX_OUTPUT_TOKENS == LLM_MAX_OUTPUT_TOKENS
 
-    def test_step1_uses_the_shared_limit_by_default(self):
+    def test_step1_direct_uses_the_direct_cap_by_default(self):
         with patch(
             "src.agents.test_case_generator.task_analysis.LLMClient"
         ) as mock_cls:
@@ -317,18 +330,17 @@ class TestOutputLimitConfiguration:
 
             TaskAnalysisGenerator().generate("Add a voucher", "user-1")
 
-        assert (
-            mock_cls.return_value.chat.call_args.kwargs["max_tokens"]
-            == LLM_MAX_OUTPUT_TOKENS
-        )
+        # فقط Direct سقفِ ۸۱۹۲ دارد؛ برنامه و گسترش جداگانه‌اند.
+        kwargs = mock_cls.return_value.chat.call_args.kwargs
+        assert kwargs["max_tokens"] == DIRECT_MAX_OUTPUT_TOKENS == 8192
 
-    def test_step1_explicit_max_tokens_still_wins(self):
+    def test_step1_explicit_direct_cap_wins(self):
         with patch(
             "src.agents.test_case_generator.task_analysis.LLMClient"
         ) as mock_cls:
             mock_cls.return_value.chat.return_value = json.dumps(_step1_payload())
 
-            TaskAnalysisGenerator(max_tokens=2048).generate("Add a voucher", "user-1")
+            TaskAnalysisGenerator(direct_max_tokens=2048).generate("Add a voucher", "user-1")
 
         assert mock_cls.return_value.chat.call_args.kwargs["max_tokens"] == 2048
 
@@ -386,9 +398,11 @@ class TestTruncationIsReportedByTheSteps:
             with pytest.raises(TaskAnalysisError) as excinfo:
                 TaskAnalysisGenerator().generate("Add a voucher", "user-1")
 
+        # Direct و برنامه هر دو بریده‌اند: هیچ نتیجه‌ی ناقصی برنمی‌گردد.
         message = str(excinfo.value)
-        assert "truncated because it reached the output token limit" in message
+        assert "Direct Analysis output cap of 8192 tokens" in message
         assert "finish_reason='length'" in message
+        assert "compact test case plan also reached the output token limit" in message
 
     def test_step2_reports_a_truncated_response(self):
         with patch("src.agents.test_case_generator.api_mapping.LLMClient") as mock_cls:
@@ -972,7 +986,9 @@ class TestLargeStep1RequestsAreStaged:
             if "TEST CASE DETAILS" in call["system_prompt"]
         ]
         assert batch_sizes == [8, 8, 4]
-        assert all(call["max_tokens"] == LLM_MAX_OUTPUT_TOKENS for call in calls)
+        # Direct با سقفِ ۸۱۹۲؛ برنامه و همه‌ی دسته‌ها بدونِ سقف (None صریح).
+        assert calls[0]["max_tokens"] == DIRECT_MAX_OUTPUT_TOKENS
+        assert all("max_tokens" in call and call["max_tokens"] is None for call in calls[1:])
 
     def test_a_truncated_expansion_batch_fails_explicitly_with_its_range(self):
         calls = []

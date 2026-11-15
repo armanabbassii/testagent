@@ -49,7 +49,8 @@ LLM_API_KEY: str = _require("LLM_API_KEY")
 # یک راهِ عیب‌یابیِ موقت است. Embedding از این تنظیم اثر نمی‌گیرد.
 LLM_SSL_VERIFY: bool = _env_bool("LLM_SSL_VERIFY", default=True)
 
-# سقفِ توکنِ خروجی — یک مقدارِ مشترک برای همه‌ی قدم‌های جریانِ test_case_generator
+# سقفِ توکنِ خروجی — یک مقدارِ مشترک برای قدم‌های جریانِ test_case_generator
+# (به‌جز قدم اول، Task Analysis، که هیچ سقفی نمی‌فرستد؛ پایین‌تر را ببینید)
 # تا هر generator عددِ سرخودِ خودش را نداشته باشد.
 #
 # چرا ۸۱۹۲:
@@ -62,8 +63,12 @@ LLM_SSL_VERIFY: bool = _env_bool("LLM_SSL_VERIFY", default=True)
 #     ۸۱۹۲ با حاشیه‌ی محسوس کافی است.
 #   * همین عدد از قبل در قدم سوم استفاده می‌شد؛ یکسان‌کردنِ مقدارها رفتارِ قدم
 #     سوم را عوض نمی‌کند و فقط سقفِ قدم‌های اول و دوم را بالا می‌برد.
-#   * بزرگ‌تر گذاشتنش (مثلاً ۳۲K) هم بی‌فایده است (مدل به‌خودی‌خود بیشتر تولید
-#     نمی‌کند) و هم روی سرویس‌های OpenAI-compatible معمولاً پذیرفته نمی‌شود.
+#   * سقفِ واقعیِ خروجیِ مدل از این‌جا قابلِ تشخیص نیست: پروژه هیچ جدولِ
+#     ظرفیتِ مدل/ارائه‌دهنده ندارد و LLM_MODEL ممکن است نامِ مستعارِ یک
+#     gateway باشد. پذیرفته‌شدنِ یک عددِ بزرگ در درخواست هم ثابت نمی‌کند که
+#     مدل واقعاً آن‌قدر تولید می‌کند (gateway ممکن است بی‌صدا آن را کم کند).
+#     پس هیچ سقفِ بالایی این‌جا اعمال نمی‌شود و عددِ پیکربندی‌شده دست‌نخورده
+#     فرستاده می‌شود.
 #
 # این سقف با کاهشِ حجمِ پرامپت (فیلترِ قطعیِ ارتباط در قدم دوم) هم‌راستاست:
 # پرامپتِ کوچک‌تر یعنی مقدمه‌چینیِ کمتر و خروجیِ کوتاه‌تر.
@@ -71,7 +76,42 @@ LLM_SSL_VERIFY: bool = _env_bool("LLM_SSL_VERIFY", default=True)
 # قدم دوم تست‌کیس‌ها را در دسته‌های کوچک نگاشت می‌کند (api_mapping)، پس این
 # عدد سقفِ «هر فراخوانی» است، نه سقفِ کلِ جریان؛ افزایشِ تعدادِ تست‌کیس‌ها
 # دیگر یک پاسخِ واحد را از این سقف رد نمی‌کند.
-LLM_MAX_OUTPUT_TOKENS: int = int(os.getenv("LLM_MAX_OUTPUT_TOKENS", "8192"))
+DEFAULT_LLM_MAX_OUTPUT_TOKENS = 8192
+
+
+def _env_optional_positive_int(key: str) -> int | None:
+    """خواندنِ سخت‌گیرانه‌ی یک عددِ صحیحِ مثبتِ اختیاری از محیط.
+
+    مقدارِ نبوده/خالی ``None`` را برمی‌گرداند. هر مقدارِ دیگری که عددِ
+    صحیحِ بزرگ‌تر از صفر نباشد خطاست — مقدارِ غلط نباید بی‌صدا به یک سقفِ
+    دیگر (یا به «بدونِ سقف») تبدیل شود.
+    """
+    raw = os.getenv(key)
+    if raw is None or not raw.strip():
+        return None
+    value = raw.strip()
+    if not value.isascii() or not value.isdigit() or int(value) < 1:
+        raise ValueError(
+            f"Invalid value for '{key}': {raw!r} — use a positive whole number "
+            "of tokens (for example 8192)."
+        )
+    return int(value)
+
+
+def _env_positive_int(key: str, default: int) -> int:
+    """مثلِ ``_env_optional_positive_int``، ولی مقدارِ نبوده/خالی ``default`` است."""
+    value = _env_optional_positive_int(key)
+    return default if value is None else value
+
+
+LLM_MAX_OUTPUT_TOKENS: int = _env_positive_int(
+    "LLM_MAX_OUTPUT_TOKENS", DEFAULT_LLM_MAX_OUTPUT_TOKENS
+)
+
+# قدم اول (Task Analysis) از هیچ‌کدام از این تنظیم‌ها استفاده نمی‌کند: برنامه
+# برای آن هیچ سقفِ توکنِ خروجی‌ای نمی‌فرستد (کلیدِ max_tokens از درخواست حذف
+# می‌شود) و فقط سقف‌های خودِ ارائه‌دهنده/مدل/context/gateway برقرارند.
+# LLM_MAX_OUTPUT_TOKENS_TASK_ANALYSIS دیگر خوانده نمی‌شود.
 
 # ── Swagger snapshot refresh ──────────────────────────────────────────────────
 # تعریف و پیش‌فرض‌ها در src/swagger_settings.py است (مستقل از LLM، برای همگام‌سازیِ روزانه)؛
@@ -102,6 +142,10 @@ JIRA_READ_TIMEOUT_SECONDS: float = float(os.getenv("JIRA_READ_TIMEOUT_SECONDS", 
 # سقفِ حجمِ هر پیوست (بایت) و سقفِ متنِ استخراج‌شده از هر پیوست (کاراکتر).
 JIRA_MAX_ATTACHMENT_BYTES: int = int(os.getenv("JIRA_MAX_ATTACHMENT_BYTES", str(10 * 1024 * 1024)))
 JIRA_MAX_ATTACHMENT_CHARS: int = int(os.getenv("JIRA_MAX_ATTACHMENT_CHARS", "100000"))
+# بودجه‌ی کلِ متنِ پیوست‌های یک issue (کاراکتر، به ترتیبِ پیوست‌ها در Jira). بدونِ آن
+# چند پیوستِ بزرگ می‌توانستند یک تسکِ کوچک را به درخواستی چندصدهزار کاراکتری
+# تبدیل کنند. Description و Commentها هرگز در این بودجه حساب یا بریده نمی‌شوند.
+JIRA_MAX_TOTAL_ATTACHMENT_CHARS: int = int(os.getenv("JIRA_MAX_TOTAL_ATTACHMENT_CHARS", "200000"))
 
 # ── Podium access token (اختیاری — فقط برای اجرای Newman در Batch) ─────────────
 # توکنِ دسترسی با POST {"refreshToken": ...} به PODIUM_TOKEN_REFRESH_URL گرفته

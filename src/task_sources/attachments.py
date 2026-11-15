@@ -23,6 +23,7 @@ import json
 from collections.abc import Callable
 from pathlib import PurePosixPath
 
+from src.task_sources.postman import PostmanCollection, parse_postman_collection
 from src.task_sources.task_input import (
     ATTACHMENT_FAILED,
     ATTACHMENT_PROCESSED,
@@ -137,11 +138,16 @@ def process_attachment(
     download: Callable[[int], bytes],
     max_bytes: int,
     max_chars: int,
+    limit_reason: str = "",
 ) -> TaskAttachment:
     """یک پیوست را بررسی، دانلود و به متن تبدیل می‌کند — هرگز استثنا بیرون نمی‌دهد.
 
     ``download(max_bytes)`` بایت‌های فایل را برمی‌گرداند؛ اگر از سقف بیشتر شود
     AttachmentTooLarge و اگر شکست بخورد هر استثنای دیگری می‌دهد (پیامش در detail).
+
+    ``limit_reason`` وقتی max_chars از سقفِ هر پیوست کمتر است (بودجه‌ی کلِ پیوست‌های
+    issue) در یادداشتِ برش می‌آید تا مدل و کاربر بدانند چرا متن کوتاه شده است.
+    max_chars=0 یعنی هیچ متنی از این پیوست جا نشد.
     """
     base = {"filename": filename, "media_type": media_type, "size": size}
     if not is_supported(filename):
@@ -177,15 +183,82 @@ def process_attachment(
         return TaskAttachment(**base, status=ATTACHMENT_FAILED, detail=str(exc))
 
     text = normalize_text(text)
+    # پیش از برش: Collectionِ بزرگ‌تر از max_chars هم کامل تجزیه می‌شود، در حالی که
+    # content همان برشِ قبلی را می‌گیرد. detail عمداً دست نمی‌خورد تا متنِ تسک
+    # (to_task_description، که detail را نشان می‌دهد) دقیقاً همان بماند.
+    postman = _postman_collection(filename, text)
+    # JSONِ معتبر بدونِ تورفتگی: همان محتوا با کاراکترِ کمتر، پس پیش از برش بیشترش
+    # در سقف جا می‌شود. Collectionِ بالا از متنِ اصلی ساخته شده و دست نمی‌خورد.
+    if extension_of(filename) == ".json":
+        text = compact_json(text) or text
     truncated = len(text) > max_chars
     if truncated:
         notes = [note] if note else []
-        notes.append(f"text truncated to the first {max_chars} of {len(text)} characters")
+        if max_chars == 0:
+            cut = f"text not included ({len(text)} characters)"
+        else:
+            cut = f"text truncated to the first {max_chars} of {len(text)} characters"
+        notes.append(f"{cut}: {limit_reason}" if limit_reason else cut)
         note = "; ".join(notes)
         text = text[:max_chars]
     return TaskAttachment(
-        **base, status=ATTACHMENT_PROCESSED, content=text, detail=note, truncated=truncated
+        **base,
+        status=ATTACHMENT_PROCESSED,
+        content=text,
+        detail=note,
+        truncated=truncated,
+        postman=postman,
     )
+
+
+_JSON_WHITESPACE = frozenset(" \t\n\r")
+
+
+def compact_json(text: str) -> str | None:
+    """JSONِ معتبر بدونِ فاصله‌های بیرون از رشته‌ها — وگرنه None.
+
+    بدونِ تغییرِ محتوا: هیچ کلید، مقدار، ترتیب، عدد یا رشته‌ای عوض نمی‌شود؛ فقط
+    فاصله/تب/خطِ نوِ بینِ توکن‌ها (تورفتگیِ خروجیِ Postman و ویرایشگرها) حذف می‌شود.
+    متنِ داخلِ رشته‌ها، از جمله escapeها، بایت‌به‌بایت می‌ماند. JSONِ نامعتبر None
+    می‌گیرد تا همان متنِ اصلی بماند.
+    """
+    try:
+        json.loads(text)
+    except ValueError:
+        return None
+    out: list[str] = []
+    in_string = escaped = False
+    for char in text:
+        if in_string:
+            out.append(char)
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+            out.append(char)
+        elif char not in _JSON_WHITESPACE:
+            out.append(char)
+    return "".join(out)
+
+
+def _postman_collection(filename: str, text: str) -> PostmanCollection | None:
+    """Collectionِ شناخته‌شده‌ی یک پیوستِ JSON — وگرنه None.
+
+    فقط ``.json``. JSONِ معمولی، نامعتبر و قالبِ پشتیبانی‌نشده‌ی Postman None
+    می‌گیرند (همان رفتارِ قبلی). هر شکستِ پیش‌بینی‌نشده‌ی parser هم None است:
+    دریافتِ issue هرگز به‌خاطرِ تحلیلِ Postman شکست نمی‌خورد.
+    """
+    if extension_of(filename) != ".json":
+        return None
+    try:
+        result = parse_postman_collection(text)
+    except Exception:  # noqa: BLE001 - تحلیلِ اختیاری نباید import را بشکند
+        return None
+    return result.collection if result.recognised else None
 
 
 __all__ = [
@@ -194,6 +267,7 @@ __all__ = [
     "TEXT_EXTENSIONS",
     "AttachmentError",
     "AttachmentTooLarge",
+    "compact_json",
     "extension_of",
     "extract_text",
     "is_supported",

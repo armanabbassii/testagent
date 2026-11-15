@@ -280,7 +280,13 @@ URLِ هر درخواست `{{base_url}}` یا `{{base_url_vdi}}` + مسیرِ پ
   مصرف با `report_usage` به گیرنده‌ی فعال (`collect_usage` در
   `WorkflowState.track_usage`) گزارش می‌شود.
 - با `LANGFUSE_ENABLED`، فراخوانی از مسیرِ `_chat_observed` می‌گذرد.
-- سقفِ خروجی برای همه‌ی قدم‌ها `LLM_MAX_OUTPUT_TOKENS` (پیش‌فرض ۸۱۹۲) است.
+- سقفِ خروجی برای قدم‌های دوم و سوم و تحلیلِ منابع `LLM_MAX_OUTPUT_TOKENS`
+  (پیش‌فرض ۸۱۹۲) است. قدم اول (Task Analysis) هیچ سقفی اعمال نمی‌کند: همه‌ی
+  فراخوانی‌هایش (یک‌مرحله‌ای، برنامه، دسته‌های گسترش) `max_tokens=None` می‌دهند و
+  `LLMClient` کلید را از بدنه‌ی درخواست حذف می‌کند (نه `null`). هیچ متغیرِ
+  محیطی این را عوض نمی‌کند؛ `LLM_MAX_OUTPUT_TOKENS_TASK_ANALYSIS` دیگر خوانده
+  نمی‌شود. سقف‌های ارائه‌دهنده، مدل، context و gateway همچنان برقرارند و بریدگی
+  همچنان با `finish_reason="length"` تشخیص داده و fail-closed مدیریت می‌شود.
 - پرامپت‌ها فایل‌های `prompts/*.md` با یک بخشِ `INPUT` و جای‌نگهدارهای
   `{{...}}` هستند (`split_prompt`/`render_prompt` در هر ماژول). خروجی با
   `json_output.extract_json_object` استخراج و سپس اعتبارسنجی می‌شود.

@@ -191,7 +191,18 @@ snapshot ثابت می‌شود. هیچ کدِ دیگری عوض نمی‌شود
 snapshot تأیید می‌شود.
 
 1. **URLِ Swagger** (`resolve_service_urls`) → منبع. گروهِ ثبت‌نشده یا منبعِ
-   غیرفعال → خطا.
+   غیرفعال → خطا. فقط URLی با نشانه‌ی صریح (`swagger`، `openapi`، `api-docs`
+   در مسیر یا `?urls.primaryName=`) Swagger است. schemaِ قالب‌ها
+   (`schema.getpostman.com`، مثلاً `info.schema`ِ یک Postman Collection) و
+   فایل‌های `.json`/`.yaml`ِ بی‌نشانه (`admin.json`) «سند» (`documents`) هستند:
+   نه خطا، نه endpoint؛ فقط یک هشدارِ قدم ۲ آن‌ها را نام می‌برد.
+   URLها با منبعشان طبقه‌بندی می‌شوند (`resolve_urls_by_origin`، منابع از
+   `pipeline.task_sources`): Swaggerِ ناشناخته در Developed Services یا
+   Description خطاست (`EXPLICIT_URL_ORIGINS`)؛ اگر فقط در Comment یا
+   Attachmentِ Jira باشد فقط هشدار (`context_unresolved`). Swaggerِ ثبت‌شده،
+   سند و endpoint به منبع بستگی ندارند. منبعِ هر URL («from Description,
+   Attachment: a.json») در خطا، هشدار و شاهدِ «Swagger URL» آمده است. متنِ
+   ویرایش‌شده یا دستی منابعِ Jira را ندارد و کلش Description (سخت‌گیر) است.
 2. **مسیرِ endpoint** (`endpoint_references`): مسیر قطعه‌به‌قطعه با الگوی هر
    عملیاتِ هر snapshotِ فعال مقایسه می‌شود (`{id}` با هر مقدار؛ کوئری،
    اسلشِ پایانی و `/api` نادیده)؛

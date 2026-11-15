@@ -30,7 +30,7 @@ response = llm.chat(
     user_message="سوال کاربر",
     system_prompt="You are ...",
     temperature=0.7,
-    max_tokens=1024,
+    max_tokens=1024,   # پیش‌فرض ۱۰۲۴؛ None یعنی کلیدِ max_tokens اصلاً فرستاده نشود
 )
 
 # streaming

@@ -42,6 +42,7 @@ from src.agents.test_case_generator.final_review import (
     STATUS_READY as REVIEW_READY,
 )
 from src.agents.test_case_generator.final_review import FinalReviewGenerator
+from src.agents.test_case_generator.postman_evidence import PostmanEvidence
 from src.agents.test_case_generator.postman_generation import (
     PostmanGenerationError,
     Step4PostmanGenerator,
@@ -64,6 +65,7 @@ from src.agents.test_case_generator.task_analysis import (
     TaskAnalysisError,
     TaskAnalysisGenerator,
 )
+from src.agents.test_case_generator.task_analysis_diagnostics import task_input_composition
 from src.debug import DebugConfig
 from src.task_sources.jira import (
     JiraClient,
@@ -202,14 +204,20 @@ def run_api_mapping(
     step1_result: dict,
     services_raw: str,
     snapshot_keys: list[str] | None = None,
+    postman_evidence: PostmanEvidence | None = None,
 ) -> tuple[dict | None, str | None]:
-    """قدم ۲ — Step2ApiMappingGenerator (snapshotها، یا URL/فایل در صفحه‌ی مستقل)."""
+    """قدم ۲ — Step2ApiMappingGenerator (snapshotها، یا URL/فایل در صفحه‌ی مستقل).
+
+    ``postman_evidence`` شاهدِ کمکیِ Postman از انتخابِ منبع (SourceSelection.postman)؛
+    None یعنی همان رفتارِ قبلی.
+    """
     try:
         result = Step2ApiMappingGenerator(debug_config=DebugConfig.from_env()).generate(
             step1_result=step1_result,
             service_sources=split_sources(services_raw),
             user_id=USER_IDS[2],
             snapshot_keys=snapshot_keys,
+            postman_evidence=postman_evidence,
         )
     except ValueError as exc:
         # ورودیِ نامعتبر — مثلاً فهرستِ خالیِ سرویس‌ها
@@ -323,6 +331,8 @@ def plan_swagger_sources(state: WorkflowState, *, semantic: bool = False) -> Sou
         state.input_value(INPUT_DEVELOPED_SERVICES),
         manual=explicit_selection(state),
         analyze=analyzer,
+        # منبعِ هر URL (Description، Comment، Attachment) — همان منابعِ قدم ۱.
+        sources=task_sources(state),
     )
 
 
@@ -393,6 +403,25 @@ def task_sources(state: WorkflowState) -> tuple[TaskSource, ...]:
     imported = state.task_import
     task_input = imported.task_input if imported is not None and imported.ok else None
     return sources_for_task(state.input_value(INPUT_TASK_DESCRIPTION), task_input)
+
+
+def _log_task_input_composition(state: WorkflowState) -> None:
+    """اندازه‌ی issueِ Jira که قدمِ اول واقعاً از آن استفاده می‌کند — فقط عدد و وضعیت.
+
+    همان شرطِ sources_for_task: فقط وقتی متنِ فعلی دقیقاً متنِ ساخته‌شده از TaskInput
+    باشد. هیچ نامِ فایل، متن، کامنت یا مقدارِ Postmanی ثبت نمی‌شود. هر خطای این
+    عیب‌یابی بلعیده می‌شود تا اجرای قدمِ اول عوض نشود.
+    """
+    try:
+        imported = state.task_import
+        task = imported.task_input if imported is not None and imported.ok else None
+        if task is None or task.to_task_description() != state.input_value(INPUT_TASK_DESCRIPTION):
+            return
+        DebugConfig.from_env().get_logger("task_analysis").info(
+            "ترکیبِ issueِ Jira برای قدمِ اول", **task_input_composition(task)
+        )
+    except Exception:  # noqa: BLE001 — عیب‌یابی نباید قدمِ اول را بشکند
+        pass
 
 
 def jira_input_problem(state: WorkflowState, reference: str) -> str:
@@ -507,17 +536,21 @@ def _invoke(
     state: WorkflowState,
     payload: dict[str, Any],
     snapshot_keys: tuple[str, ...] = (),
+    postman_evidence: PostmanEvidence | None = None,
 ) -> tuple[dict | None, str | None]:
     """Generatorِ همان قدم را با ورودیِ جمع‌شده صدا می‌زند → (نتیجه، خطا)."""
     upstream = [payload[name] for name in _upstream(step)]
     if step == 1:
+        _log_task_input_composition(state)
         return run_task_analysis(
             state.input_value(INPUT_TASK_DESCRIPTION),
             state.input_value(INPUT_DEVELOPED_SERVICES),
             task_sources(state),
         )
     if step == 2:
-        return run_api_mapping(upstream[0], "", snapshot_keys=list(snapshot_keys))
+        return run_api_mapping(
+            upstream[0], "", snapshot_keys=list(snapshot_keys), postman_evidence=postman_evidence
+        )
     if step == 3:
         return run_scenario_analysis(*upstream)
     if step == 4:
@@ -558,11 +591,14 @@ def execute_step(
     # تحلیلِ معناییِ منابع)؛ مصرفِ اجرای قبلی جایگزین می‌شود تا دوباره شمرده نشود.
     with state.track_usage(step) if step in _LLM_STEPS else nullcontext():
         snapshot_keys: tuple[str, ...] = ()
+        postman_evidence: PostmanEvidence | None = None
         if step == 2:
             plan = plan or plan_swagger_sources(state, semantic=True)
             state.swagger_selection = plan
             _log_selection(plan)
             snapshot_keys = plan.keys
+            # شاهدِ کمکیِ Postman از همان انتخاب — به نگاشت می‌رود، انتخاب را عوض نمی‌کند.
+            postman_evidence = plan.postman
             if plan.error:
                 state.record_error(2, plan.error)
                 return StepOutcome(2, STEP_FAILED, plan.error)
@@ -573,7 +609,7 @@ def execute_step(
                 "\n".join(str(snapshot_path(key)) for key in plan.keys),
             )
             state.set_input(INPUT_SWAGGER_SNAPSHOTS, snapshot_fingerprint(list(plan.keys)))
-        result, error = _invoke(step, state, payload, snapshot_keys)
+        result, error = _invoke(step, state, payload, snapshot_keys, postman_evidence)
 
     if not error:
         error = unusable_reason(step, result)

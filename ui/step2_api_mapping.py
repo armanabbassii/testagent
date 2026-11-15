@@ -435,6 +435,9 @@ def _render_in_workflow(workflow: WorkflowState) -> None:
         plan = used
     else:
         preview = WorkflowState(inputs=dict(workflow.inputs))
+        # بدونِ issueِ Jira، پیش‌نمایش کلِ متن را Description می‌دید و ممکن بود
+        # خطایی نشان دهد که Run (با منبعِ هر URL) نمی‌دهد.
+        preview.task_import = workflow.task_import
         preview.set_input(INPUT_SWAGGER_SELECTION, selection)
         plan = plan_swagger_sources(preview)
     _render_selection(plan)

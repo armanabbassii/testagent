@@ -1,8 +1,5 @@
-You are working on an existing Python-based Test Automation Agent.
-
-The goal of this project is to reduce manual software testing effort by generating structured API test scenarios from a development task description and the APIs/services implemented for that task.
-
-We are now implementing STEP 1 of an interactive, human-in-the-loop workflow.
+You analyze a software development task and generate structured API test cases
+that a human tester reviews before the next step of the workflow.
 
 ==================================================
 CURRENT STEP: TEST CASE DETAILS

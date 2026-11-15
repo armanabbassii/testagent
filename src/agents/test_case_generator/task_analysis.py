@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
@@ -44,13 +45,23 @@ from src.agents.test_case_generator.json_output import (
     JsonExtractionError,
     extract_json_object,
 )
+from src.agents.test_case_generator.postman_summary import build_postman_summary
+from src.agents.test_case_generator.task_analysis_diagnostics import (
+    DIAG_STAGE_DIRECT,
+    DIAG_STAGE_EXPAND,
+    DIAG_STAGE_PLAN,
+    error_metadata,
+    input_composition,
+    request_sizes,
+    response_metadata,
+    stage_label,
+)
 from src.agents.test_case_generator.variable_dependencies import (
     RequestedVariable,
     validate_requested_variables,
 )
-from src.config import LLM_MAX_OUTPUT_TOKENS
 from src.debug import DebugConfig
-from src.llm_client import LLMClient, truncation_message
+from src.llm_client import LLMClient, diagnostic_stage, truncation_message
 from src.task_sources.sources import TaskSource, sources_from_text
 
 _PROMPT_PATH = Path(__file__).parent / "prompts" / "step1_task_analysis.md"
@@ -200,6 +211,29 @@ def no_test_cases_diagnostics(attempts: list[GenerationAttempt]) -> str:
 # ۲۰۰–۳۵۰ توکن است؛ ۸ تست‌کیس ≈ ۱٬۶۰۰–۲٬۸۰۰ توکن، با حاشیه‌ی کافی زیرِ
 # ۸٬۱۹۲. مقدار با batch_size در سازنده قابلِ تغییر است.
 DEFAULT_TEST_CASE_BATCH_SIZE = 8
+
+# فقط برای سقفِ صریحی که فراخوان به سازنده می‌دهد: زیرِ این عدد یک هشدار لاگ
+# می‌شود و سقف هرگز عوض نمی‌شود. برنامه خودش هیچ سقفی برای این قدم نمی‌فرستد.
+#
+# چرا ۴۰۹۶: یک دسته‌ی گسترشِ کامل (۸ تست‌کیس × ۲۰۰–۳۵۰ توکن) به‌تنهایی تا
+# ۲٬۸۰۰ توکن است و «برنامه‌ی فشرده» هم سربارِ ثابتِ requirements/evidence
+# دارد؛ پس با سقفی کمتر از این، حتی تسک‌های کوچک احتمالاً بریده می‌شوند. این
+# عدد تخمین است، نه ظرفیتِ مدل.
+LOW_OUTPUT_LIMIT_WARNING_THRESHOLD = 4096
+
+# سقفِ خروجیِ فقط فراخوانیِ یک‌مرحله‌ای (Direct). پاسخی که به این سقف بخورد
+# (finish_reason="length") هرگز خوانده نمی‌شود و تولیدِ مرحله‌ای (برنامه، سپس
+# دسته‌های گسترش) جایگزین می‌شود. بدونِ این سقف، Direct برای تسکی که خروجی‌اش
+# بزرگ است تا timeoutِ gateway ادامه می‌داد (HTTP 504) به‌جای این‌که زود به مسیرِ
+# مرحله‌ای برود. برنامه و گسترش این سقف را ارث نمی‌برند (پیش‌فرض: بدونِ سقف)؛ چون
+# برنامه‌ی بریده هیچ مسیرِ جایگزینی ندارد، سقف گذاشتن روی آن همان خطای قبلی را
+# برمی‌گرداند.
+DIRECT_MAX_OUTPUT_TOKENS = 8192
+
+# retryِ SDK برای فراخوانی‌های این قدم. هر فراخوانی چند دقیقه طول می‌کشد و یک
+# timeoutِ gateway (HTTP 504) با همان درخواستِ یکسان دوباره رخ می‌دهد؛ retry فقط
+# زمانِ شکست را سه برابر می‌کرد. بقیه‌ی قدم‌ها همان پیش‌فرضِ SDK را دارند.
+TASK_ANALYSIS_MAX_RETRIES = 0
 
 
 class TaskAnalysisError(RuntimeError):
@@ -361,30 +395,56 @@ def split_details_prompt(text: str) -> tuple[str, str]:
     return _split_input_section(text, ("task_description", "test_case_plan"))
 
 
+_POSTMAN_PLACEHOLDER = "{{postman_summary}}"
+
+
+def _with_postman_slot(template: str, summary: str) -> str:
+    """جای‌نگهدارِ اختیاریِ {{postman_summary}} را آماده می‌کند.
+
+    بدونِ خلاصه، خطِ جای‌نگهدار (و فاصله‌ی بعدش) حذف می‌شود تا پیامِ کاربر
+    بایت‌به‌بایت همان پیامِ پیش از این ویژگی باشد. با خلاصه، اگر قالب (مثلاً
+    پرامپتِ سفارشیِ تست) جای‌نگهدار نداشته باشد، خلاصه به انتها افزوده می‌شود تا
+    شاهد بی‌صدا گم نشود.
+    """
+    if not summary:
+        return template.replace(_POSTMAN_PLACEHOLDER + "\n\n", "").replace(
+            _POSTMAN_PLACEHOLDER, ""
+        )
+    if _POSTMAN_PLACEHOLDER not in template:
+        return template.rstrip() + "\n\n" + _POSTMAN_PLACEHOLDER
+    return template
+
+
 def render_prompt(
     template: str,
     task_description: str,
     developed_services: str = "",
+    postman_summary: str = "",
 ) -> str:
     """قالب را با ورودیِ کاربر پر می‌کند.
 
-    جای‌گذاری در یک پاس انجام می‌شود؛ بنابراین اگر متنِ خودِ کاربر شامل
-    «{{...}}» باشد به‌عنوان جای‌نگهدار تفسیر نمی‌شود.
+    جای‌گذاری در یک پاس انجام می‌شود؛ بنابراین اگر متنِ خودِ کاربر (یا خلاصه‌ی
+    Postman با «{{baseUrl}}») شامل «{{...}}» باشد به‌عنوان جای‌نگهدار تفسیر نمی‌شود.
+    ``postman_summary`` خلاصه‌ی postman_summary.build_postman_summary است؛ "" یعنی
+    هیچ — همان پیامِ قبلی.
     """
+    summary = (postman_summary or "").strip()
     values = {
         "task_description": (task_description or "").strip(),
         "developed_services": (developed_services or "").strip() or _EMPTY_SERVICES,
+        "postman_summary": summary,
     }
-    return _render(template, values)
+    return _render(_with_postman_slot(template, summary), values)
 
 
 def render_plan_prompt(
     template: str,
     task_description: str,
     developed_services: str = "",
+    postman_summary: str = "",
 ) -> str:
     """قالبِ پرامپتِ برنامه را پر می‌کند — همان ورودی‌های پرامپتِ اصلی."""
-    return render_prompt(template, task_description, developed_services)
+    return render_prompt(template, task_description, developed_services, postman_summary)
 
 
 def render_details_prompt(
@@ -404,12 +464,13 @@ def build_prompt(
     prompt_path: Path | str,
     task_description: str,
     developed_services: str = "",
+    postman_summary: str = "",
 ) -> tuple[str, str]:
     """(system prompt، پیامِ کاربرِ ساخته‌شده) را از فایلِ پرامپت برمی‌گرداند."""
     text = Path(prompt_path).read_text(encoding="utf-8")
     system_prompt, template = split_prompt(text)
     return system_prompt, render_prompt(
-        template, task_description, developed_services
+        template, task_description, developed_services, postman_summary
     )
 
 
@@ -417,12 +478,13 @@ def build_plan_prompt(
     prompt_path: Path | str,
     task_description: str,
     developed_services: str = "",
+    postman_summary: str = "",
 ) -> tuple[str, str]:
     """(system prompt، پیامِ کاربر) برای مرحله‌ی «برنامه‌ی تست‌کیس»."""
     text = Path(prompt_path).read_text(encoding="utf-8")
     system_prompt, template = split_plan_prompt(text)
     return system_prompt, render_plan_prompt(
-        template, task_description, developed_services
+        template, task_description, developed_services, postman_summary
     )
 
 
@@ -983,7 +1045,10 @@ def validate_analysis(data: dict) -> TaskAnalysisResult:
             + "\n  - ".join(errors)
         )
 
-    if structured and not requirements:
+    # identified_requirements از نیازمندی‌های ساختاریافته ساخته می‌شود — مدل دیگر
+    # آن را جداگانه نمی‌نویسد (همان متن‌ها، به همان ترتیب). فقط خروجیِ بدونِ
+    # "requirements" (قالبِ قدیمی) فهرستِ خودِ مدل را نگه می‌دارد.
+    if structured:
         requirements = [item["text"] for item in structured if item["text"]]
     result = TaskAnalysisResult(
         task_summary=task_summary,
@@ -1307,7 +1372,13 @@ class TaskAnalysisGenerator:
     پارامترها:
         debug_config        : تنظیماتِ لاگِ پروژه
         temperature         : دمای LLM — پایین، چون خروجی باید ساختاریافته باشد
-        max_tokens          : سقفِ توکنِ پاسخ (None یعنی مقدارِ مشترکِ LLM_MAX_OUTPUT_TOKENS)
+        max_tokens          : سقفِ برنامه و دسته‌های گسترش. پیش‌فرض None —
+                              max_tokens برای آن‌ها فرستاده نمی‌شود و فقط
+                              سقف‌های خودِ ارائه‌دهنده/مدل/context/gateway
+                              برقرارند. هیچ متغیرِ محیطی‌ای این را عوض نمی‌کند.
+        direct_max_tokens   : سقفِ فقط فراخوانیِ یک‌مرحله‌ای (Direct)؛ پیش‌فرض
+                              DIRECT_MAX_OUTPUT_TOKENS (۸۱۹۲). None یعنی Direct هم
+                              بدونِ سقف. برنامه و گسترش هرگز این مقدار را نمی‌گیرند.
         prompt_path         : مسیرِ فایلِ پرامپتِ اصلی (برای تست قابلِ جایگزینی است)
         plan_prompt_path    : مسیرِ پرامپتِ مرحله‌ی «برنامه‌ی تست‌کیس»
         details_prompt_path : مسیرِ پرامپتِ مرحله‌ی «گسترشِ تست‌کیس»
@@ -1326,6 +1397,7 @@ class TaskAnalysisGenerator:
         plan_prompt_path: Path | str | None = None,
         details_prompt_path: Path | str | None = None,
         batch_size: int | None = None,
+        direct_max_tokens: int | None = DIRECT_MAX_OUTPUT_TOKENS,
     ) -> None:
         self._log = (debug_config or DebugConfig.off()).get_logger(self.name)
         self._prompt_path = Path(prompt_path) if prompt_path else _PROMPT_PATH
@@ -1336,13 +1408,27 @@ class TaskAnalysisGenerator:
             Path(details_prompt_path) if details_prompt_path else _DETAILS_PROMPT_PATH
         )
         self._temperature = temperature
-        # None یعنی «مقدارِ مشترکِ پروژه»؛ عددِ صریح همیشه برنده است.
-        self._max_tokens = LLM_MAX_OUTPUT_TOKENS if max_tokens is None else max_tokens
+        # None (پیش‌فرض) یعنی برنامه هیچ سقفی نمی‌فرستد: LLMClient کلیدِ
+        # max_tokens را از درخواست حذف می‌کند. هیچ متغیرِ محیطی خوانده نمی‌شود.
+        self._max_tokens: int | None = max_tokens
+        self._direct_max_tokens: int | None = direct_max_tokens
+        for label, value in (("max_tokens", max_tokens), ("direct_max_tokens", direct_max_tokens)):
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int) or value < 1
+            ):
+                raise ValueError(f"{label} must be a positive integer.")
         self._batch_size = (
             DEFAULT_TEST_CASE_BATCH_SIZE if batch_size is None else batch_size
         )
         if self._batch_size < 1:
             raise ValueError("batch_size must be at least 1.")
+        if self._max_tokens is not None and self._max_tokens < LOW_OUTPUT_LIMIT_WARNING_THRESHOLD:
+            self._log.warning(
+                "سقفِ توکنِ خروجیِ تحلیلِ تسک پایین است — پاسخ‌ها احتمالاً بریده می‌شوند",
+                max_tokens=self._max_tokens,
+                source="max_tokens argument",
+                threshold=LOW_OUTPUT_LIMIT_WARNING_THRESHOLD,
+            )
 
     def generate(
         self,
@@ -1363,15 +1449,27 @@ class TaskAnalysisGenerator:
         """
         if not (task_description or "").strip():
             raise ValueError("task_description is empty — nothing to analyze.")
+        started = time.perf_counter()
 
+        # خلاصه‌ی محدودِ Collectionهای پیوست‌شده — شاهدِ کمکی، جدا از متنِ تسک. بدونِ
+        # Collection متنش خالی است و پیامِ کاربر دقیقاً همان پیامِ قبلی می‌ماند.
+        postman = build_postman_summary(sources)
         system_prompt, user_message = build_prompt(
-            self._prompt_path, task_description, developed_services
+            self._prompt_path, task_description, developed_services, postman.text
         )
         self._log.info(
             "شروع تحلیل تسک",
             user_id=user_id,
             task_chars=len(task_description),
             services_chars=len(developed_services or ""),
+            postman_collections=len(postman.collections),
+            postman_requests_listed=postman.included,
+            postman_requests_extracted=postman.extracted,
+        )
+        # فقط شمارش و اندازه — هیچ متن، نامِ فایل یا مقدارِ Postmanی ثبت نمی‌شود.
+        self._log.info(
+            "ترکیبِ ورودیِ تحلیلِ تسک",
+            **input_composition(sources, task_description, developed_services, postman),
         )
         self._log.trace(
             "prompt ساخته شد",
@@ -1379,34 +1477,43 @@ class TaskAnalysisGenerator:
             user_chars=len(user_message),
         )
 
-        llm = LLMClient(user_id=user_id, agent_name=self.name)
+        llm = LLMClient(
+            user_id=user_id, agent_name=self.name, max_retries=TASK_ANALYSIS_MAX_RETRIES
+        )
         self._log.debug("ارسال تسک به LLM")
-        raw = self._chat(llm, system_prompt, user_message)
+        raw = self._chat(
+            llm,
+            system_prompt,
+            user_message,
+            stage=DIAG_STAGE_DIRECT,
+            max_tokens=self._direct_max_tokens,
+        )
         self._log.trace("پاسخ LLM دریافت شد", response_chars=len(raw or ""))
 
         # پاسخِ بریده را نه ترمیم می‌کنیم و نه حدس می‌زنیم. به‌جای خطا، تولیدِ
         # مرحله‌ای اجرا می‌شود؛ خودِ پاسخِ ناقص هرگز خوانده نمی‌شود.
-        truncated = truncation_message(raw)
-        if truncated:
+        if truncation_message(raw):
             self._log.warning(
                 "پاسخِ یک‌مرحله‌ای بریده شد — تولیدِ مرحله‌ای آغاز می‌شود",
                 finish_reason="length",
+                direct_max_tokens=self._direct_max_tokens,
                 batch_size=self._batch_size,
             )
             result, raw_decisions = self._generate_staged(
                 llm,
                 task_description,
                 developed_services,
-                truncated,
+                self._direct_truncation_reason(),
                 single_call=GenerationAttempt(
                     stage=STAGE_SINGLE_CALL,
                     test_cases_state="truncated (finish_reason='length'; nothing was read)",
                     response_id=_response_id(raw),
                 ),
+                postman_summary=postman.text,
             )
         else:
             result, raw_decisions = self._analyze_single_call(
-                llm, raw, task_description, developed_services
+                llm, raw, task_description, developed_services, postman.text
             )
 
         result.update(
@@ -1417,6 +1524,11 @@ class TaskAnalysisGenerator:
             )
         )
         self._log_result(result)
+        self._log.info(
+            "زمانِ کلِ تحلیلِ تسک",
+            total_elapsed_s=round(time.perf_counter() - started, 3),
+            test_cases=len(result["test_cases"]),
+        )
         return result
 
     def _analyze_single_call(
@@ -1425,6 +1537,7 @@ class TaskAnalysisGenerator:
         raw: str,
         task_description: str,
         developed_services: str,
+        postman_summary: str = "",
     ) -> tuple[TaskAnalysisResult, Any]:
         """پاسخِ کاملِ مسیرِ یک‌فراخوانی را اعتبارسنجی می‌کند.
 
@@ -1456,17 +1569,90 @@ class TaskAnalysisGenerator:
                 developed_services,
                 _EMPTY_SINGLE_RESPONSE,
                 single_call=attempt,
+                postman_summary=postman_summary,
             )
         return validate_analysis(data), data.get("environment_decisions")
 
-    def _chat(self, llm: LLMClient, system_prompt: str, user_message: str) -> str:
-        """همه‌ی فراخوانی‌ها همان temperature و سقفِ توکن را می‌گیرند."""
-        return llm.chat(
-            user_message=user_message,
-            system_prompt=system_prompt,
-            temperature=self._temperature,
-            max_tokens=self._max_tokens,
+    def _direct_truncation_reason(self) -> str:
+        """چرا پاسخِ یک‌مرحله‌ای کنار گذاشته شد — فقط اگر برنامه هم شکست بخورد دیده می‌شود."""
+        if self._direct_max_tokens is None:
+            cap = "the provider's own output limit"
+        else:
+            cap = f"the Direct Analysis output cap of {self._direct_max_tokens} tokens"
+        return (
+            f"The single-call (Direct Analysis) response reached {cap} "
+            "(finish_reason='length'). It was discarded unread - nothing was repaired "
+            "or guessed - and staged generation (test case plan, then detail batches) "
+            "was used instead."
         )
+
+    def _limit_hint(self) -> str:
+        """کدام سقف و از کجا — تا کاربر بداند کدام متغیر را باید عوض کند."""
+        if self._max_tokens is None:
+            return (
+                "Task Analysis does not impose an output token limit: no max_tokens "
+                "was sent with any of its requests, so the provider's own limits "
+                "applied. The limit that was reached came from the provider, model, "
+                "context window or gateway, not from this application. Reducing the "
+                "size of the task or its attachments, or raising the provider-side "
+                "limit, are the remaining options."
+            )
+        return (
+            f"Task Analysis used an output limit of {self._max_tokens} tokens per "
+            "call (source: max_tokens argument). Whether the configured model can "
+            "actually produce that many tokens cannot be determined from the "
+            "application."
+        )
+
+    def _chat(
+        self,
+        llm: LLMClient,
+        system_prompt: str,
+        user_message: str,
+        *,
+        stage: str,
+        max_tokens: int | None,
+        batch: int | None = None,
+        batches: int | None = None,
+    ) -> str:
+        """همه‌ی فراخوانی‌ها همان temperature و سقفِ توکن را می‌گیرند.
+
+        عیب‌یابی (فقط فراداده): پیش از درخواست اندازه‌ی ورودی، پس از آن زمان و
+        نتیجه و usage، و در خطا نوع/کدِ HTTP/request id ثبت می‌شود. خودِ فراخوانی،
+        پاسخ و خطا دقیقاً همان‌اند — خطا بدونِ تغییر دوباره پرتاب می‌شود.
+        """
+        where: dict[str, object] = {"stage": stage, "max_tokens": max_tokens}
+        if batch is not None:
+            where.update(batch=batch, batches=batches)
+        self._log.info(
+            "درخواستِ LLMِ تحلیلِ تسک ارسال می‌شود",
+            **where,
+            **request_sizes(system_prompt, user_message),
+        )
+        started = time.perf_counter()
+        try:
+            with diagnostic_stage(stage_label(stage, batch, batches)):
+                raw = llm.chat(
+                    user_message=user_message,
+                    system_prompt=system_prompt,
+                    temperature=self._temperature,
+                    max_tokens=max_tokens,
+                )
+        except Exception as exc:
+            self._log.error(
+                "درخواستِ LLMِ تحلیلِ تسک شکست خورد",
+                **where,
+                elapsed_s=round(time.perf_counter() - started, 3),
+                **error_metadata(exc),
+            )
+            raise
+        self._log.info(
+            "پاسخِ LLMِ تحلیلِ تسک دریافت شد",
+            **where,
+            elapsed_s=round(time.perf_counter() - started, 3),
+            **response_metadata(raw),
+        )
+        return raw
 
     def _generate_staged(
         self,
@@ -1475,14 +1661,21 @@ class TaskAnalysisGenerator:
         developed_services: str,
         fallback_reason: str,
         single_call: GenerationAttempt | None = None,
+        postman_summary: str = "",
     ) -> tuple[TaskAnalysisResult, Any]:
         """برنامه‌ی فشرده می‌سازد و جزئیات را دسته‌به‌دسته گسترش می‌دهد.
 
         ``single_call`` می‌گوید پاسخِ یک‌فراخوانی چرا کنار گذاشته شد — فقط برای
-        پیامِ خطا اگر برنامه هم تست‌کیسی نداشته باشد.
+        پیامِ خطا اگر برنامه هم تست‌کیسی نداشته باشد. ``postman_summary`` فقط به
+        پرامپتِ برنامه می‌رود؛ گسترشِ دسته‌ها از همان برنامه کار می‌کند.
         """
         plan = self._plan(
-            llm, task_description, developed_services, fallback_reason, single_call
+            llm,
+            task_description,
+            developed_services,
+            fallback_reason,
+            single_call,
+            postman_summary=postman_summary,
         )
         details = self._expand_all(llm, task_description, plan["test_cases"])
         return _assemble_result(plan, details), plan.get("environment_decisions")
@@ -1494,11 +1687,14 @@ class TaskAnalysisGenerator:
         developed_services: str,
         fallback_reason: str,
         single_call: GenerationAttempt | None = None,
+        postman_summary: str = "",
     ) -> TaskAnalysisPlan:
         system_prompt, user_message = build_plan_prompt(
-            self._plan_prompt_path, task_description, developed_services
+            self._plan_prompt_path, task_description, developed_services, postman_summary
         )
-        raw = self._chat(llm, system_prompt, user_message)
+        raw = self._chat(
+            llm, system_prompt, user_message, stage=DIAG_STAGE_PLAN, max_tokens=self._max_tokens
+        )
 
         truncated = truncation_message(raw)
         if truncated:
@@ -1508,7 +1704,8 @@ class TaskAnalysisGenerator:
                 "A staged generation was attempted because the single-call "
                 "response could not be used, but the compact test case plan also "
                 "reached the output token limit. No partial test case list was "
-                "used."
+                "used.\n\n"
+                f"{self._limit_hint()}"
             )
 
         try:
@@ -1552,7 +1749,9 @@ class TaskAnalysisGenerator:
         details: list[TestCaseDetails] = []
         for number, batch in enumerate(batches, start=1):
             try:
-                details.extend(self._expand(llm, task_description, batch))
+                details.extend(
+                    self._expand(llm, task_description, batch, number=number, total=len(batches))
+                )
             except TaskAnalysisError as exc:
                 if len(batches) == 1:
                     raise
@@ -1571,18 +1770,29 @@ class TaskAnalysisGenerator:
         llm: LLMClient,
         task_description: str,
         batch: list[PlannedTestCase],
+        *,
+        number: int = 1,
+        total: int = 1,
     ) -> list[TestCaseDetails]:
         system_prompt, user_message = build_details_prompt(
             self._details_prompt_path, task_description, batch
         )
-        raw = self._chat(llm, system_prompt, user_message)
+        raw = self._chat(
+            llm,
+            system_prompt,
+            user_message,
+            stage=DIAG_STAGE_EXPAND,
+            max_tokens=self._max_tokens,
+            batch=number,
+            batches=total,
+        )
 
         # ترتیب مهم است: اول بریدگی، بعد JSON. پاسخِ بریده هرگز به‌عنوان
         # «JSON نامعتبر» گزارش نمی‌شود و هرگز ترمیم نمی‌گردد.
         truncated = truncation_message(raw)
         if truncated:
             self._log.error("پاسخِ گسترش بریده شد", finish_reason="length")
-            raise TaskAnalysisError(truncated)
+            raise TaskAnalysisError(f"{truncated}\n\n{self._limit_hint()}")
 
         try:
             data = extract_json_object(raw)

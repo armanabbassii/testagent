@@ -44,6 +44,11 @@ from src.agents.test_case_generator.json_output import (
     JsonExtractionError,
     extract_json_object,
 )
+from src.agents.test_case_generator.postman_evidence import (
+    PostmanEvidence,
+    render_postman_evidence,
+)
+from src.agents.test_case_generator.postman_matching import match_postman_to_swagger
 from src.agents.test_case_generator.swagger_snapshots import load_snapshots
 from src.config import LLM_MAX_OUTPUT_TOKENS
 from src.debug import DebugConfig
@@ -103,6 +108,11 @@ _PLACEHOLDER_RE = re.compile(r"\{\{\s*(test_cases|discovered_apis)\s*\}\}")
 
 _PROMPT_PLACEHOLDERS = ("test_cases", "discovered_apis")
 
+# جای‌نگهدارِ اختیاریِ شاهدِ Postman (postman_evidence.render_postman_evidence).
+# الزامی نیست؛ بدونِ شاهد، خطش حذف می‌شود تا پیامِ کاربر همان پیامِ قبلی بماند.
+_POSTMAN_PLACEHOLDER = "{{postman_evidence}}"
+_RENDER_RE = re.compile(r"\{\{\s*(test_cases|discovered_apis|postman_evidence)\s*\}\}")
+
 
 class ApiMappingError(RuntimeError):
     """ورودیِ نامعتبر قدم دوم یا نگاشتی که با قرارداد نمی‌خواند."""
@@ -133,6 +143,9 @@ class Step2Result(TypedDict):
     # انتخابِ قطعیِ میزبانِ هر تست‌کیس (host_selection.resolve_hosts) — قدم‌های
     # ۴ و ۵ فقط همین را می‌خوانند و محیط را دوباره تعیین نمی‌کنند.
     host_resolution: NotRequired[dict[str, Any]]
+    # شاهدِ ساختاریافته‌ی Postman (postman_evidence.PostmanEvidence.to_dict) — فقط
+    # وقتی Collectionی پیوست شده باشد. کمکی است، نه Swagger؛ هیچ قدمی به آن وابسته نیست.
+    postman_evidence: NotRequired[dict[str, Any]]
 
 
 class CompactMapping(TypedDict):
@@ -195,12 +208,29 @@ def split_prompt(text: str) -> tuple[str, str]:
     return system_prompt, user_template
 
 
+def _with_postman_slot(template: str, evidence: str) -> str:
+    """بدونِ شاهد خطِ جای‌نگهدار حذف می‌شود؛ قالبِ بی‌جای‌نگهدار شاهد را در انتها می‌گیرد."""
+    if not evidence:
+        return template.replace(_POSTMAN_PLACEHOLDER + "\n\n", "").replace(
+            _POSTMAN_PLACEHOLDER, ""
+        )
+    if _POSTMAN_PLACEHOLDER not in template:
+        return template.rstrip() + "\n\n" + _POSTMAN_PLACEHOLDER
+    return template
+
+
 def render_prompt(
     template: str,
     test_cases: list[dict],
     services: list[DiscoveredService],
+    postman_evidence: str = "",
 ) -> str:
-    """قالب را با تست‌کیس‌ها و فهرستِ عملیات‌های کشف‌شده پر می‌کند."""
+    """قالب را با تست‌کیس‌ها و فهرستِ عملیات‌های کشف‌شده پر می‌کند.
+
+    جای‌گذاری در یک پاس است؛ پس «{{...}}»ِ داخلِ تست‌کیس‌ها یا شاهدِ Postman
+    (مثلاً «{{base_url}}») هرگز به‌عنوانِ جای‌نگهدار تفسیر نمی‌شود.
+    """
+    evidence = (postman_evidence or "").strip()
     values = {
         "test_cases": json.dumps(test_cases, ensure_ascii=False, indent=2),
         "discovered_apis": json.dumps(
@@ -208,19 +238,21 @@ def render_prompt(
             ensure_ascii=False,
             indent=2,
         ),
+        "postman_evidence": evidence,
     }
-    return _PLACEHOLDER_RE.sub(lambda m: values[m.group(1)], template)
+    return _RENDER_RE.sub(lambda m: values[m.group(1)], _with_postman_slot(template, evidence))
 
 
 def build_prompt(
     prompt_path: Path | str,
     test_cases: list[dict],
     services: list[DiscoveredService],
+    postman_evidence: str = "",
 ) -> tuple[str, str]:
     """(system prompt، پیامِ کاربرِ ساخته‌شده) را از فایلِ پرامپت برمی‌گرداند."""
     text = Path(prompt_path).read_text(encoding="utf-8")
     system_prompt, template = split_prompt(text)
-    return system_prompt, render_prompt(template, test_cases, services)
+    return system_prompt, render_prompt(template, test_cases, services, postman_evidence)
 
 
 def _service_for_prompt(service: DiscoveredService) -> dict[str, Any]:
@@ -628,8 +660,13 @@ class ApiMappingAgent:
         test_cases: list[dict],
         services: list[DiscoveredService],
         user_id: str,
+        postman_evidence: str = "",
     ) -> tuple[list[ApiMapping], list[str]]:
         """(نگاشت‌ها، ابهام‌های گزارش‌شده) را برمی‌گرداند.
+
+        ``postman_evidence`` بلوکِ آماده‌ی postman_evidence.render_postman_evidence
+        است؛ در همه‌ی فراخوانی‌ها (هر دسته و تلاشِ دوم) همان یک بلوک می‌رود و ""
+        یعنی پیامِ قبلی، بدونِ تغییر.
 
         نگاشت در برابرِ نامزدهای مرتبط انجام می‌شود تا پرامپت کوچک بماند، ولی:
 
@@ -680,7 +717,7 @@ class ApiMappingAgent:
         for number, batch in enumerate(batches, start=1):
             try:
                 batch_mappings, batch_clarifications = self._map_batch(
-                    batch, selection, services, user_id
+                    batch, selection, services, user_id, postman_evidence
                 )
             except ApiMappingError as exc:
                 if len(batches) == 1:
@@ -714,10 +751,11 @@ class ApiMappingAgent:
         selection: RelevanceSelection,
         services: list[DiscoveredService],
         user_id: str,
+        postman_evidence: str = "",
     ) -> tuple[list[ApiMapping], list[str]]:
         """یک دسته را نگاشت می‌کند، با همان قاعده‌ی تلاشِ دومِ محدود."""
         mappings, clarifications = self._map_once(
-            test_cases, selection.services, services, user_id
+            test_cases, selection.services, services, user_id, postman_evidence
         )
 
         unresolved = [m["test_case_id"] for m in mappings if m["api"] is None]
@@ -729,7 +767,7 @@ class ApiMappingAgent:
             test_cases=unresolved,
         )
         retry_mappings, retry_clarifications = self._map_once(
-            _cases_with_ids(test_cases, unresolved), services, services, user_id
+            _cases_with_ids(test_cases, unresolved), services, services, user_id, postman_evidence
         )
         return (
             _merge_mappings(mappings, retry_mappings, test_cases),
@@ -742,6 +780,7 @@ class ApiMappingAgent:
         candidates: list[DiscoveredService],
         full_catalog: list[DiscoveredService],
         user_id: str,
+        postman_evidence: str = "",
     ) -> tuple[list[ApiMapping], list[str]]:
         """یک نگاشت؛ فقط JSONِ نامعتبر یک بارِ محدود دوباره درخواست می‌شود.
 
@@ -754,7 +793,7 @@ class ApiMappingAgent:
         اعتبارسنجیِ سخت‌گیرانه بگذرد.
         """
         system_prompt, user_message = build_prompt(
-            self._prompt_path, test_cases, candidates
+            self._prompt_path, test_cases, candidates, postman_evidence
         )
         self._log.info(
             "شروع نگاشتِ تست‌کیس به API",
@@ -864,8 +903,14 @@ class Step2ApiMappingGenerator:
         user_id: str,
         *,
         snapshot_keys: list[str] | None = None,
+        postman_evidence: PostmanEvidence | None = None,
     ) -> Step2Result:
         """نتیجه‌ی کاملِ قدم دوم را می‌سازد.
+
+        ``postman_evidence`` شاهدِ ساختاریافته‌ی Postman است (SourceSelection.postman).
+        بلوکِ محدودش به پرامپتِ نگاشت می‌رود و نسخه‌ی کاملش، فقط وقتی شاهدی هست،
+        در کلیدِ افزوده‌ی ``postman_evidence``ِ نتیجه می‌آید. None یا خالی یعنی
+        همان پرامپت و همان نتیجه‌ی قبلی.
 
         منبعِ کشف یکی از این دو است:
 
@@ -914,9 +959,18 @@ class Step2ApiMappingGenerator:
             load_errors=len(load_errors),
         )
 
-        mappings, clarifications = self._agent.map_test_cases(
-            test_cases, services, user_id
-        )
+        # بدونِ شاهد، همان فراخوانیِ قبلی (همان امضا) — سازگار با هر جایگزینِ
+        # map_test_cases؛ با شاهد، فقط به‌صورتِ آرگومانِ نام‌دار.
+        # تطبیقِ مشورتیِ Postman با عملیاتِ همین سرویس‌های انتخاب‌شده — پیش از نگاشت،
+        # فقط برای پرامپت و نتیجه؛ نامزدها و اعتبارسنجیِ نگاشت را عوض نمی‌کند.
+        matches = match_postman_to_swagger(postman_evidence, services)
+        evidence_text = render_postman_evidence(postman_evidence, matches=matches or None)
+        if evidence_text:
+            mappings, clarifications = self._agent.map_test_cases(
+                test_cases, services, user_id, postman_evidence=evidence_text
+            )
+        else:
+            mappings, clarifications = self._agent.map_test_cases(test_cases, services, user_id)
 
         counts = Counter(
             mapping["confidence"] for mapping in mappings if mapping["api"]
@@ -948,6 +1002,11 @@ class Step2ApiMappingGenerator:
                 if item["host_status"] != HOST_RESOLVED
             ),
         )
+        if postman_evidence is not None and not postman_evidence.empty:
+            # کلیدِ افزوده: نه Swagger است، نه بر نگاشت یا میزبان اثر می‌گذارد.
+            evidence_dict = postman_evidence.to_dict()
+            evidence_dict["matches"] = [match.to_dict() for match in matches]
+            result["postman_evidence"] = evidence_dict
         return result
 
 

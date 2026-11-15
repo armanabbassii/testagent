@@ -32,6 +32,8 @@ class JiraSettings:
     read_timeout: float = 60.0
     max_attachment_bytes: int = 10 * 1024 * 1024
     max_attachment_chars: int = 100_000
+    # بودجه‌ی کلِ متنِ پیوست‌های یک issue — بعد از سقفِ هر پیوست اعمال می‌شود.
+    max_total_attachment_chars: int = 200_000
 
     @property
     def verify(self) -> str | bool:
@@ -69,6 +71,8 @@ class JiraSettings:
             problems.append(f"JIRA_CA_BUNDLE points to a missing file: {self.ca_bundle}")
         if self.max_attachment_bytes <= 0 or self.max_attachment_chars <= 0:
             problems.append("JIRA_MAX_ATTACHMENT_BYTES and JIRA_MAX_ATTACHMENT_CHARS must be > 0")
+        if self.max_total_attachment_chars <= 0:
+            problems.append("JIRA_MAX_TOTAL_ATTACHMENT_CHARS must be > 0")
         if problems:
             raise JiraConfigError(
                 "Jira is not configured: " + "; ".join(problems) + ". Set these in .env "
@@ -93,6 +97,7 @@ class JiraSettings:
             read_timeout=config.JIRA_READ_TIMEOUT_SECONDS,
             max_attachment_bytes=config.JIRA_MAX_ATTACHMENT_BYTES,
             max_attachment_chars=config.JIRA_MAX_ATTACHMENT_CHARS,
+            max_total_attachment_chars=config.JIRA_MAX_TOTAL_ATTACHMENT_CHARS,
         )
 
 

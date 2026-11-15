@@ -70,6 +70,7 @@ INPUT_TASK_DESCRIPTION + INPUT_JIRA_ISSUE  (ui/workflow.py)
 | `JIRA_CONNECT_TIMEOUT_SECONDS` / `JIRA_READ_TIMEOUT_SECONDS` | `10` / `60` | timeoutِ هر درخواست |
 | `JIRA_MAX_ATTACHMENT_BYTES` | `10485760` | سقفِ حجمِ هر پیوست |
 | `JIRA_MAX_ATTACHMENT_CHARS` | `100000` | سقفِ متنِ استخراج‌شده از هر پیوست |
+| `JIRA_MAX_TOTAL_ATTACHMENT_CHARS` | `200000` | بودجه‌ی کلِ متنِ پیوست‌های یک issue، به ترتیبِ پیوست‌ها؛ پیوستِ بعدی با یادداشتِ دلیل بریده می‌شود. Description و Commentها شامل نمی‌شوند. JSONِ معتبر پیش از برش بدونِ تورفتگی ذخیره می‌شود (بدونِ تغییرِ محتوا). |
 
 همه‌ی کمبودها با هم گزارش می‌شوند (مثلاً «JIRA_SSO_URL is not set; JIRA_PASSWORD
 is not set»). `.env` در git نیست؛ رمز هرگز در کد، لاگ، UI یا پیامِ خطا نمی‌آید.

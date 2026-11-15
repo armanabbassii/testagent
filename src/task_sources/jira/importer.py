@@ -135,6 +135,14 @@ def import_issue(
     result.comments_retrieved = True
 
     attachments = []
+    # بودجه‌ی کلِ متنِ پیوست‌ها، به ترتیبِ پیوست‌ها در Jira. پیوستی که از بودجه‌ی
+    # باقی‌مانده بزرگ‌تر است بریده می‌شود و یادداشتش (در متنِ تسک و هشدارها) دلیل را
+    # می‌گوید؛ هیچ پیوستی بی‌صدا حذف نمی‌شود.
+    remaining = settings.max_total_attachment_chars
+    budget_reason = (
+        f"the total attachment text budget of {settings.max_total_attachment_chars} "
+        "characters for this issue (JIRA_MAX_TOTAL_ATTACHMENT_CHARS) was reached"
+    )
     for meta in fields.get("attachment") or []:
         content_url = str(meta.get("content") or "")
 
@@ -143,16 +151,18 @@ def import_issue(
                 raise JiraError("Jira did not provide a download URL")
             return client.download(url, limit)
 
-        attachments.append(
-            process_attachment(
-                filename=str(meta.get("filename") or "(unnamed)"),
-                media_type=str(meta.get("mimeType") or ""),
-                size=int(meta.get("size") or 0),
-                download=download,
-                max_bytes=settings.max_attachment_bytes,
-                max_chars=settings.max_attachment_chars,
-            )
+        limit = min(settings.max_attachment_chars, remaining)
+        attachment = process_attachment(
+            filename=str(meta.get("filename") or "(unnamed)"),
+            media_type=str(meta.get("mimeType") or ""),
+            size=int(meta.get("size") or 0),
+            download=download,
+            max_bytes=settings.max_attachment_bytes,
+            max_chars=limit,
+            limit_reason=budget_reason if limit < settings.max_attachment_chars else "",
         )
+        remaining -= len(attachment.content)
+        attachments.append(attachment)
     result.warnings = _attachment_warnings(attachments)
 
     result.task_input = TaskInput(

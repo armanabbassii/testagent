@@ -314,21 +314,56 @@ def extract_urls(text: str) -> list[str]:
     return urls
 
 
-def is_swagger_url(url: str) -> bool:
-    """آیا این URL به یک سندِ Swagger/OpenAPI اشاره می‌کند (نه به خودِ یک API)؟
+# میزبان‌هایی که فقط schemaِ یک قالبِ فایل را منتشر می‌کنند، نه سندِ API. مثلاً
+# مقدارِ ``info.schema`` در هر Postman Collection
+# (https://schema.getpostman.com/json/collection/v2.1.0/collection.json).
+_FORMAT_SCHEMA_HOSTS = frozenset({"schema.getpostman.com"})
 
-    صفحه‌ی Swagger UI، مسیرِ ``api-docs``، فایلِ ``.json``/``.yaml`` یا کوئریِ
-    ``urls.primaryName``. بقیه (مثلاً ``https://host/api/admin/voucher``)
-    ارجاع به یک endpoint هستند و منبعِ Swagger حساب نمی‌شوند.
+# نشانه‌های صریحِ یک سندِ Swagger/OpenAPI در مسیر (swagger.json، openapi.yaml،
+# …/v3/api-docs/<group>، …/swagger-ui/index.html).
+_SWAGGER_PATH_MARKERS = ("swagger", "openapi", "api-docs")
+
+_DATA_FILE_SUFFIXES = (".json", ".yaml", ".yml")
+
+
+def _host(parsed) -> str:
+    return (parsed.hostname or "").lower()
+
+
+def is_swagger_url(url: str) -> bool:
+    """آیا این URL با نشانه‌ی صریح به یک سندِ Swagger/OpenAPI اشاره می‌کند؟
+
+    نشانه‌ها: ``swagger``، ``openapi`` یا ``api-docs`` در مسیر (صفحه‌ی Swagger
+    UI، ``swagger.json``، ``openapi.yaml``، ``…/v3/api-docs/<group>``) یا کوئریِ
+    ``urls.primaryName``. پسوندِ ``.json``/``.yaml`` به‌تنهایی نشانه نیست — آن
+    URLها «سند»ِ مبهم‌اند (``is_document_url``). schemaِ قالب‌ها (مثلاً
+    ``schema.getpostman.com``) هرگز Swagger نیست. بقیه (مثلاً
+    ``https://host/api/admin/voucher``) ارجاع به endpoint هستند.
     """
     parsed = urlparse(url or "")
+    if _host(parsed) in _FORMAT_SCHEMA_HOSTS:
+        return False
     path = parsed.path.lower()
-    if "swagger" in path or "api-docs" in path:
-        return True
-    if path.endswith((".json", ".yaml", ".yml")):
+    if any(marker in path for marker in _SWAGGER_PATH_MARKERS):
         return True
     query = {key.lower() for key in parse_qs(parsed.query)}
     return "urls.primaryname" in query
+
+
+def is_document_url(url: str) -> bool:
+    """آیا این URL یک فایلِ داده یا schema است که Swagger بودنش معلوم نیست؟
+
+    schemaِ قالب‌ها (``schema.getpostman.com``) یا فایلِ ``.json``/``.yaml``/
+    ``.yml`` بدونِ نشانه‌ی Swagger (مثلاً ``admin.json``، نمونه‌ی پاسخ). این‌ها
+    نه منبعِ Swagger‌اند و نه endpoint: قدم ۲ را متوقف نمی‌کنند ولی در هشدارِ
+    قدم ۲ نام برده می‌شوند تا کاربر بداند به‌عنوانِ Swagger استفاده نشدند.
+    """
+    if is_swagger_url(url):
+        return False
+    parsed = urlparse(url or "")
+    if _host(parsed) in _FORMAT_SCHEMA_HOSTS:
+        return True
+    return parsed.path.lower().endswith(_DATA_FILE_SUFFIXES)
 
 
 def _normalized(url: str) -> tuple[str, str]:
@@ -368,11 +403,63 @@ class ServiceUrlResolution:
     ``matched``    : (URL، کلیدِ snapshot) برای هر URLِ Swagger که منبعش شناخته شد
     ``unresolved`` : URLهای Swagger که به هیچ منبعِ ثبت‌شده‌ای نمی‌رسند — خطا
     ``endpoints``  : URLهای غیرِ Swagger (ارجاع به endpoint) — فقط زمینه‌ی قدم ۱
+    ``documents``  : فایل‌های داده/schemaِ مبهم (``is_document_url``) — نه خطا،
+                     نه endpoint؛ فقط در ``document_warning`` نام برده می‌شوند
+    ``context_unresolved`` : URLهای Swaggerِ ناشناخته که فقط در منابعِ «زمینه»
+                     (نه معرفیِ صریحِ کاربر) آمده‌اند — نه خطا، فقط
+                     ``context_warning``. هر URL در ``unresolved`` یا این‌جاست، نه هر دو.
+    ``origins``    : (URL، برچسب‌های منبع) — هر جا URL دیده شد، به ترتیب و بدونِ
+                     تکرار؛ برچسبِ "" (متنِ بی‌منبع) نمایش داده نمی‌شود
     """
 
     matched: tuple[tuple[str, str], ...] = ()
     unresolved: tuple[str, ...] = ()
     endpoints: tuple[str, ...] = ()
+    documents: tuple[str, ...] = ()
+    context_unresolved: tuple[str, ...] = ()
+    origins: tuple[tuple[str, tuple[str, ...]], ...] = ()
+
+    def origins_of(self, url: str) -> tuple[str, ...]:
+        """برچسب‌های منابعی که این URL در آن‌ها دیده شد (بدونِ برچسبِ خالی)."""
+        for candidate, labels in self.origins:
+            if candidate == url:
+                return tuple(label for label in labels if label)
+        return ()
+
+    def describe(self, url: str) -> str:
+        """«URL (from Description, Attachment: a.json)» — یا فقط URL بدونِ منبع."""
+        labels = self.origins_of(url)
+        return f"{url} (from {', '.join(labels)})" if labels else url
+
+    def _listed(self, urls: tuple[str, ...]) -> str:
+        return "\n".join(f"  - {self.describe(url)}" for url in urls)
+
+    def context_warning(self) -> str:
+        """هشدارِ کاربر برای Swaggerِ ناشناخته‌ای که فقط در منابعِ زمینه بود."""
+        if not self.context_unresolved:
+            return ""
+        return (
+            "These Swagger URLs do not match a registered Swagger source and were "
+            "ignored because they appear only in Jira comments or attachments, which "
+            f"are not treated as an explicit Swagger reference:\n"
+            f"{self._listed(self.context_unresolved)}\n\nIf one of them is needed, add "
+            "it to Developed Services (it is then validated as usual), or choose the "
+            "source manually in Step 2."
+        )
+
+    def document_warning(self) -> str:
+        """هشدارِ کاربر برای URLهای سندِ مبهم — یا رشته‌ی خالی."""
+        if not self.documents:
+            return ""
+        listed = self._listed(self.documents)
+        return (
+            "These URLs were not used as Swagger sources because they do not clearly "
+            f"point to a Swagger/OpenAPI document:\n{listed}\n\nFile-format schemas "
+            "(for example a Postman Collection's info.schema) and data files such as "
+            "sample JSON are ignored. If one of them is a Swagger document, use its "
+            "Swagger UI URL with ?urls.primaryName=<group> or the raw OpenAPI URL "
+            "(…/v3/api-docs/<group>), or choose the source manually in Step 2."
+        )
 
     @property
     def keys(self) -> list[str]:
@@ -385,7 +472,7 @@ class ServiceUrlResolution:
         if not self.unresolved:
             return ""
         known = ", ".join(source.group for source in SWAGGER_SOURCES)
-        listed = "\n".join(f"  - {url}" for url in self.unresolved)
+        listed = self._listed(self.unresolved)
         return (
             "These Swagger URLs do not match a registered Swagger source:\n"
             f"{listed}\n\nRegistered groups: {known}. Use a Swagger UI URL with "
@@ -397,19 +484,57 @@ class ServiceUrlResolution:
 
 
 def resolve_service_urls(text: str) -> ServiceUrlResolution:
-    """URLهای Developed Services را به کلیدهای snapshot تبدیل می‌کند (بدونِ شبکه)."""
+    """URLهای یک متنِ واحد را به کلیدهای snapshot تبدیل می‌کند (بدونِ شبکه).
+
+    کلِ متن «معرفیِ صریح» حساب می‌شود (رفتارِ پیش از منبع‌آگاهی): هر Swaggerِ
+    ناشناخته خطاست.
+    """
+    return resolve_urls_by_origin((("", True, text),))
+
+
+def resolve_urls_by_origin(
+    segments: tuple[tuple[str, bool, str], ...] | list[tuple[str, bool, str]],
+) -> ServiceUrlResolution:
+    """URLهای چند متن را با منبعشان تطبیق می‌دهد (بدونِ شبکه).
+
+    هر بخش ``(برچسب، صریح؟، متن)`` است. «صریح» یعنی کاربر آن URL را خودش
+    معرفی کرده (Developed Services، Description): Swaggerِ ناشناخته‌ی آن خطاست.
+    URLی که فقط در بخش‌های غیرِ صریح (Comment، Attachment) آمده فقط هشدار
+    می‌دهد. URLِ تکراری یک بار طبقه‌بندی می‌شود و همه‌ی منبع‌هایش را نگه می‌دارد؛
+    اگر حتی یکی از آن‌ها صریح باشد، صریح است. طبقه‌بندیِ تطبیق‌خورده/سند/endpoint
+    به منبع بستگی ندارد.
+    """
+    seen: dict[str, tuple[list[str], list[bool]]] = {}
+    for label, explicit, text in segments:
+        for url in extract_urls(text):
+            labels, flags = seen.setdefault(url, ([], []))
+            if label not in labels:
+                labels.append(label)
+            flags.append(bool(explicit))
+
     matched: list[tuple[str, str]] = []
     unresolved: list[str] = []
+    context: list[str] = []
     endpoints: list[str] = []
-    for url in extract_urls(text):
+    documents: list[str] = []
+    for url, (_, flags) in seen.items():
         source = source_for_url(url)
         if source is not None:
             matched.append((url, source.key))
         elif is_swagger_url(url):
-            unresolved.append(url)
+            (unresolved if any(flags) else context).append(url)
+        elif is_document_url(url):
+            documents.append(url)
         else:
             endpoints.append(url)
-    return ServiceUrlResolution(tuple(matched), tuple(unresolved), tuple(endpoints))
+    return ServiceUrlResolution(
+        matched=tuple(matched),
+        unresolved=tuple(unresolved),
+        endpoints=tuple(endpoints),
+        documents=tuple(documents),
+        context_unresolved=tuple(context),
+        origins=tuple((url, tuple(labels)) for url, (labels, _) in seen.items()),
+    )
 
 
 def snapshot_path(key: str, *, directory: Path | str | None = None) -> Path:
@@ -852,7 +977,9 @@ __all__ = [
     "enabled_sources",
     "expand_selection",
     "extract_urls",
+    "is_document_url",
     "is_swagger_url",
+    "resolve_urls_by_origin",
     "load_snapshot",
     "load_snapshots",
     "refresh_snapshot",

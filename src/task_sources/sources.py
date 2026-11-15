@@ -16,6 +16,7 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass
 
+from src.task_sources.postman import PostmanCollection, PostmanRequest
 from src.task_sources.task_input import TaskInput
 
 SOURCE_DESCRIPTION = "description"
@@ -34,6 +35,13 @@ class TaskSource:
     # همان سرعنوانی که مدل در متنِ تسک می‌بیند: «Comment 3»، «Attachment: a.md»
     label: str
     text: str
+    # درخواست‌های ساختاریافته‌ی Postman — فقط برای پیوستی که Collectionِ شناخته‌شده
+    # است. منبعِ هر درخواست همین TaskSource است (label: «Attachment: x.json»).
+    # در text، sha256 و summary() نقشی ندارد؛ شاهد همیشه فقط متنِ اصلی است.
+    requests: tuple[PostmanRequest, ...] = ()
+    # فراداده‌ی همان Collection (نسخه، نام، شمارش‌های کشف/استخراج/حذف) — برای
+    # خلاصه‌ی قدم ۱. requests همان collection.requests است و مرجعِ کامل می‌ماند.
+    collection: PostmanCollection | None = None
 
     @property
     def sha256(self) -> str:
@@ -62,7 +70,14 @@ def sources_from_task_input(task: TaskInput) -> tuple[TaskSource, ...]:
         for number, comment in enumerate(task.comments, start=1)
     ]
     sources += [
-        TaskSource(SOURCE_ATTACHMENT, item.filename, f"Attachment: {item.filename}", item.content)
+        TaskSource(
+            SOURCE_ATTACHMENT,
+            item.filename,
+            f"Attachment: {item.filename}",
+            item.content,
+            requests=item.postman.requests if item.postman is not None else (),
+            collection=item.postman,
+        )
         for item in task.processed_attachments()
     ]
     return tuple(sources)

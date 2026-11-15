@@ -23,6 +23,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from src.task_sources.postman import PostmanCollection
 from src.task_sources.text import fence_block
 
 ATTACHMENT_PROCESSED = "processed"
@@ -66,6 +67,10 @@ class TaskAttachment:
     content: str = ""
     detail: str = ""
     truncated: bool = False
+    # نتیجه‌ی ساختاریافته‌ی Postman Collection (src/task_sources/postman.py) — فقط
+    # برای پیوستِ JSONی که Collectionِ v2.0/v2.1ِ شناخته‌شده است؛ از متنِ کامل و
+    # پیش از برشِ content ساخته می‌شود. در to_task_description و detail اثری ندارد.
+    postman: PostmanCollection | None = None
 
     @property
     def processed(self) -> bool:

@@ -2,8 +2,14 @@
 llm_client.py — کلاینت برای ارتباط با LLM لوکال (OpenAI-compatible)
 """
 
+import contextvars
 import functools
+import threading
+import time
 import uuid
+import weakref
+from contextlib import contextmanager
+from typing import Iterator
 from urllib.parse import urlsplit, urlunsplit
 
 import httpx
@@ -73,12 +79,26 @@ class LLMResponse(str):
         return self.finish_reason == FINISH_REASON_LENGTH
 
     def truncation_message(self) -> str:
-        """توضیحِ صریحِ بریده‌شدگی — برای قدم‌هایی که از پاسخ JSON می‌خواهند."""
+        """توضیحِ صریحِ بریده‌شدگی — برای قدم‌هایی که از پاسخ JSON می‌خواهند.
+
+        اگر ``max_tokens`` فرستاده نشده باشد (``None``)، سقفی که خورده سقفِ خودِ
+        ارائه‌دهنده است، نه سقفِ برنامه — پیام هم همین را می‌گوید و عددی جعل نمی‌کند.
+        """
         details = [f"finish_reason='{self.finish_reason}'"]
         if self.max_tokens is not None:
             details.append(f"max_tokens={self.max_tokens}")
         if self.completion_tokens is not None:
             details.append(f"completion_tokens={self.completion_tokens}")
+        if self.max_tokens is None:
+            return (
+                "The LLM response was truncated because it reached an output limit "
+                f"({', '.join(details)}). No max_tokens was sent with the request, "
+                "so the limit came from the provider, model, context window or "
+                "gateway, not from this application. The response is incomplete, "
+                "so no result could be read from it — nothing was repaired or "
+                "guessed. Run the step with a smaller input or raise the "
+                "provider-side limit."
+            )
         return (
             "The LLM response was truncated because it reached the output token "
             f"limit ({', '.join(details)}). The response is incomplete, so no "
@@ -98,7 +118,7 @@ def truncation_message(raw: object) -> str:
     return ""
 
 
-def _to_response(response: object, max_tokens: int) -> LLMResponse:
+def _to_response(response: object, max_tokens: int | None) -> LLMResponse:
     """``ChatCompletion`` را به ``LLMResponse`` تبدیل می‌کند.
 
     فراداده‌ها با ``getattr`` خوانده می‌شوند تا ماکِ ناقصِ تست‌ها هم کار کند.
@@ -151,6 +171,117 @@ def _log_response(response: LLMResponse, *, model: str, agent_name: str) -> None
         max_tokens=response.max_tokens,
         content_chars=len(response),
     )
+
+
+# ── عیب‌یابیِ تلاش‌های HTTP (فقط فراداده) ─────────────────────────────────────
+# برچسبِ مرحله‌ای که فراخوان (مثلاً Task Analysis) برای فراخوانیِ جاری گذاشته است.
+# hookها فقط وقتی برچسب هست لاگ می‌کنند؛ پس فراخوانی‌های بقیه‌ی قدم‌ها لاگِ جدیدی
+# نمی‌گیرند. کلاینت sync است و hookها در همان thread اجرا می‌شوند، پس contextvar
+# دیده می‌شود.
+_diagnostic_stage: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "llm_diagnostic_stage", default=None
+)
+
+# هدری که OpenAI SDK خودش روی هر تلاش می‌گذارد (۰ برای تلاشِ اول، ۱ برای اولین retry …).
+_RETRY_COUNT_HEADER = "x-stainless-retry-count"
+
+
+@contextmanager
+def diagnostic_stage(stage: str) -> Iterator[None]:
+    """در این بازه هر تلاشِ HTTPِ LLM با همین برچسب لاگ می‌شود."""
+    token = _diagnostic_stage.set(stage)
+    try:
+        yield
+    finally:
+        _diagnostic_stage.reset(token)
+
+
+class _AttemptTimer:
+    """hookهای httpx برای زمان‌سنجیِ هر تلاشِ HTTP — هرگز رفتارِ درخواست را عوض نمی‌کنند.
+
+    * زمانِ شروع روی خودِ شیءِ Request (WeakKeyDictionary) نگه داشته می‌شود؛ SDK برای
+      هر retry یک Request تازه می‌سازد، پس تلاش‌ها از هم جدا می‌مانند.
+    * شماره‌ی تلاش از هدرِ x-stainless-retry-count خوانده می‌شود؛ هیچ هدرِ دیگری،
+      بدنه یا URL خوانده یا لاگ نمی‌شود.
+    * hookِ پاسخ پیش از خواندنِ بدنه اجرا می‌شود؛ پس زمان تا رسیدنِ هدرهای پاسخ است.
+    * هر خطای داخلیِ hook بلعیده می‌شود تا retry یا پاسخ هرگز تحتِ‌تأثیر قرار نگیرد.
+    """
+
+    def __init__(self, agent_name: str, max_attempts: int | None) -> None:
+        self._agent_name = agent_name
+        self._max_attempts = max_attempts
+        self._started: weakref.WeakKeyDictionary[httpx.Request, float] = weakref.WeakKeyDictionary()
+        self._lock = threading.Lock()
+
+    def _attempt(self, request: httpx.Request) -> int | None:
+        try:
+            return int(request.headers.get(_RETRY_COUNT_HEADER, "")) + 1
+        except ValueError:
+            return None
+
+    def on_request(self, request: httpx.Request) -> None:
+        try:
+            stage = _diagnostic_stage.get()
+            if stage is None:
+                return
+            with self._lock:
+                self._started[request] = time.perf_counter()
+            _response_logger().info(
+                "تلاشِ HTTPِ LLM شروع شد",
+                agent=self._agent_name,
+                stage=stage,
+                attempt=self._attempt(request),
+                max_attempts=self._max_attempts,
+            )
+        except Exception:  # noqa: BLE001 — عیب‌یابی نباید درخواست را بشکند
+            pass
+
+    def on_response(self, response: httpx.Response) -> None:
+        try:
+            stage = _diagnostic_stage.get()
+            if stage is None:
+                return
+            request = response.request
+            with self._lock:
+                started = self._started.pop(request, None)
+            elapsed = None if started is None else round(time.perf_counter() - started, 3)
+            _response_logger().info(
+                "تلاشِ HTTPِ LLM پاسخ گرفت",
+                agent=self._agent_name,
+                stage=stage,
+                attempt=self._attempt(request),
+                max_attempts=self._max_attempts,
+                http_status=response.status_code,
+                elapsed_to_headers_s=elapsed,
+            )
+        except Exception:  # noqa: BLE001 — عیب‌یابی نباید پاسخ را بشکند
+            pass
+
+
+def _attach_attempt_hooks(http_client: object, agent_name: str, max_attempts: int | None) -> None:
+    """hookهای زمان‌سنجی را به کلاینتِ httpxِ موجود اضافه می‌کند (hookهای قبلی حفظ می‌شوند).
+
+    سازنده‌ی httpx.Client دست نمی‌خورد؛ کلاینتِ غیرِ httpx (مثلاً ماکِ تست) نادیده
+    گرفته می‌شود.
+    """
+    if not isinstance(http_client, httpx.Client):
+        return
+    timer = _AttemptTimer(agent_name, max_attempts)
+    hooks = http_client.event_hooks
+    http_client.event_hooks = {
+        "request": [*hooks.get("request", []), timer.on_request],
+        "response": [*hooks.get("response", []), timer.on_response],
+    }
+
+
+def _token_limit(max_tokens: int | None) -> dict[str, int]:
+    """پارامترِ سقفِ توکن برای درخواست.
+
+    ``None`` یعنی کلیدِ ``max_tokens`` اصلاً فرستاده نشود تا پیش‌فرضِ ارائه‌دهنده
+    اعمال شود. ``max_tokens=None`` را نمی‌شود مستقیم به SDK داد، چون SDK آن را به
+    ``"max_tokens": null`` تبدیل می‌کند؛ فقط نبودنِ کلید آن را از بدنه حذف می‌کند.
+    """
+    return {} if max_tokens is None else {"max_tokens": max_tokens}
 
 
 def _make_http_client(user_id: str, *, verify: bool = True) -> httpx.Client:
@@ -221,11 +352,29 @@ def _actionable_html_error(exc: APIStatusError) -> APIStatusError | None:
 
 
 class LLMClient:
-    def __init__(self, user_id: str, agent_name: str) -> None:
+    def __init__(self, user_id: str, agent_name: str, *, max_retries: int | None = None) -> None:
+        """``max_retries=None`` (پیش‌فرض) یعنی همان پیش‌فرضِ SDK (۲ retry) — هیچ
+        کلیدی به OpenAI داده نمی‌شود، پس رفتارِ همه‌ی فراخوان‌های موجود عوض نمی‌شود.
+        عدد (مثلاً ۰ برای Task Analysis) فقط retryِ همین کلاینت را تعیین می‌کند؛
+        timeout دست نمی‌خورد.
+        """
+        if max_retries is not None and (
+            isinstance(max_retries, bool) or not isinstance(max_retries, int) or max_retries < 0
+        ):
+            raise ValueError("max_retries must be a non-negative integer or None.")
+        http_client = _make_http_client(user_id, verify=LLM_SSL_VERIFY)
         self._client = OpenAI(
             base_url=LLM_BASE_URL,
             api_key=LLM_API_KEY,
-            http_client=_make_http_client(user_id, verify=LLM_SSL_VERIFY),
+            http_client=http_client,
+            **({} if max_retries is None else {"max_retries": max_retries}),
+        )
+        # فقط مشاهده: timeout و هدرها دست نمی‌خورند.
+        max_retries = getattr(self._client, "max_retries", None)
+        _attach_attempt_hooks(
+            http_client,
+            agent_name,
+            max_retries + 1 if isinstance(max_retries, int) else None,
         )
         self.model = LLM_MODEL
         self.agent_name = agent_name
@@ -245,7 +394,7 @@ class LLMClient:
                 raise
             raise improved from exc
 
-    def chat(self, user_message: str, system_prompt: str = "You are a helpful assistant.", temperature: float = 0.7, max_tokens: int = 1024) -> LLMResponse:
+    def chat(self, user_message: str, system_prompt: str = "You are a helpful assistant.", temperature: float = 0.7, max_tokens: int | None = 1024) -> LLMResponse:
         """یک پیام ساده به مدل می‌فرستد و پاسخ متنی برمی‌گرداند.
 
         خروجی از نوعِ ``LLMResponse`` است که خودش یک ``str`` است؛ پس قراردادِ
@@ -257,6 +406,10 @@ class LLMClient:
         بالاتری نباید دوباره حساب کند. ثبت پیش از کارهای بعدی (مثلِ
         ``gen.update``) انجام می‌شود تا خطای احتمالیِ آن مصرفِ انجام‌شده را از
         بین نبرد.
+
+        ``max_tokens=None`` (فقط وقتی صریحاً داده شود) یعنی کلیدِ ``max_tokens``
+        از درخواست حذف می‌شود و سقفِ پیش‌فرضِ ارائه‌دهنده اعمال می‌شود؛ فراخوانی
+        بدونِ این آرگومان همچنان ۱۰۲۴ می‌فرستد.
         """
 
         if obs.enabled:
@@ -271,7 +424,7 @@ class LLMClient:
                 {"role": "user", "content": user_message},
             ],
             temperature=temperature,
-            max_tokens=max_tokens,
+            **_token_limit(max_tokens),
         )
         parsed = _to_response(response, max_tokens)
         report_usage(parsed)
@@ -284,7 +437,7 @@ class LLMClient:
             name=f"{self.agent_name}-chat",
             model=self.model,
             input={"system": system_prompt, "user": user_message},
-            model_parameters={"temperature": temperature, "max_tokens": max_tokens},
+            model_parameters={"temperature": temperature, **_token_limit(max_tokens)},
         ) as gen:
             response = self._create_completion(
                 model=self.model,
@@ -293,7 +446,7 @@ class LLMClient:
                     {"role": "user", "content": user_message},
                 ],
                 temperature=temperature,
-                max_tokens=max_tokens,
+                **_token_limit(max_tokens),
             )
             content = _to_response(response, max_tokens)
             report_usage(content)
@@ -320,7 +473,7 @@ class LLMClient:
         user_message: str,
         system_prompt: str = "You are a helpful assistant.",
         temperature: float = 0.7,
-        max_tokens: int = 1024,
+        max_tokens: int | None = 1024,
     ):
         """پاسخ را به صورت streaming (chunk به chunk) برمی‌گرداند."""
         stream = self._create_completion(
@@ -330,7 +483,7 @@ class LLMClient:
                 {"role": "user", "content": user_message},
             ],
             temperature=temperature,
-            max_tokens=max_tokens,
+            **_token_limit(max_tokens),
             stream=True,
         )
         for chunk in stream:

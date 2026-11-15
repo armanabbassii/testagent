@@ -18,6 +18,7 @@ from src.agents.test_case_generator.auth_intent import (
     AUTH_INTENT_UNAUTHENTICATED,
 )
 from src.agents.test_case_generator.task_analysis import (
+    DIRECT_MAX_OUTPUT_TOKENS,
     REQUIRES_MAPPING,
     TaskAnalysisError,
     TaskAnalysisGenerator,
@@ -699,8 +700,9 @@ class TestTaskAnalysisGenerator:
     def test_llm_client_is_constructed_with_user_and_agent(self):
         _, mock_cls, _ = self._generate(_payload())
 
+        # قدمِ اول بدونِ retryِ SDK: یک 504 همان یک تلاش است.
         mock_cls.assert_called_once_with(
-            user_id="user-1", agent_name=TaskAnalysisGenerator.name
+            user_id="user-1", agent_name=TaskAnalysisGenerator.name, max_retries=0
         )
 
     def test_system_prompt_is_sent_separately_from_input(self):
@@ -714,7 +716,7 @@ class TestTaskAnalysisGenerator:
         assert "Add percentage voucher creation." not in kwargs["system_prompt"]
 
     def test_temperature_and_max_tokens_are_configurable(self):
-        _, _, llm = self._generate(_payload(), temperature=0.3, max_tokens=2048)
+        _, _, llm = self._generate(_payload(), temperature=0.3, direct_max_tokens=2048)
         kwargs = llm.chat.call_args.kwargs
 
         assert kwargs["temperature"] == 0.3
@@ -832,10 +834,11 @@ class TestStagedGeneration:
         assert [case["id"] for case in result["test_cases"]] == [
             f"TC-{index:03d}" for index in range(1, 21)
         ]
+        # فقط Direct سقفِ ۸۱۹۲ دارد؛ برنامه و همه‌ی دسته‌ها صریحاً None می‌دهند.
+        assert calls[0]["max_tokens"] == DIRECT_MAX_OUTPUT_TOKENS
         assert all(
-            call["max_tokens"] == LLM_MAX_OUTPUT_TOKENS
-            and call["temperature"] == 0.1
-            for call in calls
+            "max_tokens" in call and call["max_tokens"] is None and call["temperature"] == 0.1
+            for call in calls[1:]
         )
 
     def test_plan_fields_and_details_are_merged_without_loss(self):
@@ -933,7 +936,8 @@ class TestStagedGeneration:
             self._run(respond)
 
         message = str(excinfo.value)
-        assert "truncated because it reached the output token limit" in message
+        assert "Direct Analysis output cap of 8192 tokens" in message
+        assert "discarded unread" in message
         assert "A staged generation was attempted" in message
         assert "compact test case plan also reached the output token limit" in message
         assert "No partial test case list was used" in message

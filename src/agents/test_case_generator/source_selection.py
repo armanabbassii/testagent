@@ -11,7 +11,10 @@ snapshotهای محلی می‌خواند؛ هیچ شرطِ ویژه‌ی یک �
 ترتیبِ شواهد:
 
   1. URLِ Swagger/OpenAPI (``urls.primaryName=CRM`` یا ``…/api-docs/CRM``) →
-     همان منبع. URLِ Swaggerی که به منبعِ ثبت‌شده‌ای نرسد خطاست.
+     همان منبع. URLِ Swaggerی که به منبعِ ثبت‌شده‌ای نرسد خطاست — اگر کاربر
+     آن را صریحاً معرفی کرده باشد (``EXPLICIT_URL_ORIGINS``: Developed Services و
+     Description). اگر فقط در Comment یا Attachmentِ Jira آمده باشد فقط هشدار
+     است. منبعِ هر URL در هشدارها، خطاها و شاهدِ «Swagger URL» نام برده می‌شود.
   2. مسیرِ endpoint (URLِ کاملِ endpoint یا مسیرِ خام در متن) → منبعی که
      snapshotش عملیاتِ همان مسیر را دارد؛ اگر هیچ snapshotی آن را نداشت، منبعی
      که پیشوندِ ثبت‌شده‌اش (``/crm``) قطعه‌به‌قطعه با مسیر می‌خواند. مسیرِ
@@ -42,6 +45,12 @@ from pathlib import Path
 from typing import Any
 
 from src.agents.test_case_generator import swagger_snapshots as snapshots
+from src.agents.test_case_generator.postman_evidence import (
+    PostmanEvidence,
+    collect_postman_evidence,
+    with_conflicts,
+)
+from src.task_sources.sources import SOURCE_DESCRIPTION, TaskSource, sources_from_text
 from src.agents.test_case_generator.source_semantics import (
     RequiredOperation,
     SemanticAnalysis,
@@ -52,8 +61,9 @@ from src.agents.test_case_generator.swagger_snapshots import (
     SwaggerSource,
     expand_selection,
     extract_urls,
+    is_document_url,
     is_swagger_url,
-    resolve_service_urls,
+    resolve_urls_by_origin,
     snapshot_path,
     source_for,
     source_for_url,
@@ -61,6 +71,20 @@ from src.agents.test_case_generator.swagger_snapshots import (
 
 MODE_AUTO = "auto"
 MODE_MANUAL = "manual"
+
+# منبعِ URLهایی که کاربر در کادرِ Developed Services نوشته است. این یک نوعِ
+# TaskSource نیست (آن‌ها متنِ تسک‌اند)، فقط برچسبِ منبع در resolve_urls_by_origin.
+ORIGIN_DEVELOPED_SERVICES = "developed_services"
+DEVELOPED_SERVICES_LABEL = "Developed Services"
+
+# منابعی که URLِ Swaggerشان «معرفیِ صریحِ کاربر» است: Swaggerِ ناشناخته در آن‌ها
+# خطاست تا هیچ سندِ نامرتبطی بی‌صدا کنار گذاشته نشود.
+#
+# Comment عمداً این‌جا نیست: کامنت‌ها بحثِ بعدی‌اند (لاگ، لینک، درخواستِ
+# بازبینی) و URLِ Swaggerِ داخلشان معمولاً ارجاعِ جانبی است. Swaggerِ ناشناخته‌ی
+# کامنت فقط یک هشدارِ قابلِ‌مشاهده می‌دهد (همان رفتارِ Attachment). Swaggerِ
+# ثبت‌شده در هر منبعی — از جمله Comment و Attachment — مثلِ قبل شاهد است.
+EXPLICIT_URL_ORIGINS = frozenset({ORIGIN_DEVELOPED_SERVICES, SOURCE_DESCRIPTION})
 
 EVIDENCE_SWAGGER_URL = "swagger_url"
 EVIDENCE_ENDPOINT = "endpoint"
@@ -185,6 +209,9 @@ class SourceSelection:
     warnings: tuple[str, ...] = ()
     error: str = ""
     semantic: str = SEMANTIC_NOT_NEEDED
+    # شاهدِ ساختاریافته‌ی Postman — فقط برای نگاشت (قدم ۲) و گزارش؛ انتخاب را
+    # عوض نمی‌کند. بدونِ Collectionِ پیوست‌شده خالی است.
+    postman: PostmanEvidence = field(default_factory=PostmanEvidence)
 
     @property
     def ok(self) -> bool:
@@ -223,6 +250,8 @@ class SourceSelection:
             "warnings": len(self.warnings),
             "error": bool(self.error),
             "semantic": self.semantic,
+            "postman_requests": len(self.postman.requests),
+            "postman_conflicts": len(self.postman.conflicts),
         }
 
 
@@ -246,7 +275,8 @@ def endpoint_references(text: str) -> list[tuple[str, str]]:
     """(متنِ اصلی، مسیرِ نرمال‌شده) برای هر ارجاع به endpoint در متن.
 
     URLهای کاملی که سندِ Swagger نیستند، و مسیرهای خامِ داخلِ متن. URLهای
-    Swagger و مسیرهای تکراری کنار گذاشته می‌شوند.
+    Swagger، فایل‌های داده/schema (``is_document_url``) و مسیرهای تکراری کنار
+    گذاشته می‌شوند.
     """
     found: list[tuple[str, str]] = []
     seen: set[str] = set()
@@ -260,7 +290,11 @@ def endpoint_references(text: str) -> list[tuple[str, str]]:
     remainder = text or ""
     for url in extract_urls(remainder):
         remainder = remainder.replace(url, " ")
-        if source_for_url(url) is None and not is_swagger_url(url):
+        if (
+            source_for_url(url) is None
+            and not is_swagger_url(url)
+            and not is_document_url(url)
+        ):
             add(url)
     for match in _BARE_PATH_RE.finditer(remainder):
         add(match.group(1).rstrip(".,;:!"))
@@ -806,6 +840,43 @@ def _apply_semantics(
     return evidence, warnings, missing
 
 
+def _explicit_endpoints(
+    urls: ServiceUrlResolution, segments: list[tuple[str, bool, str]]
+) -> list[tuple[str, tuple[str, ...]]]:
+    """URLهای endpointی که دست‌کم یک منبعِ صریح دارند، با همان منابعِ صریح."""
+    explicit = {label for label, is_explicit, _ in segments if is_explicit and label}
+    found = []
+    for url in urls.endpoints:
+        origins = tuple(label for label in urls.origins_of(url) if label in explicit)
+        if origins:
+            found.append((url, origins))
+    return found
+
+
+def _url_segments(
+    task_description: str,
+    developed_services: str,
+    sources: tuple[TaskSource, ...] | None,
+) -> list[tuple[str, bool, str]]:
+    """بخش‌های (برچسب، صریح؟، متن) برای resolve_urls_by_origin.
+
+    برچسبِ هر منبع همان سرعنوانی است که کاربر در متنِ تسک می‌بیند
+    («Description»، «Comment 2»، «Attachment: a.json»).
+    """
+    segments = [
+        (
+            DEVELOPED_SERVICES_LABEL,
+            ORIGIN_DEVELOPED_SERVICES in EXPLICIT_URL_ORIGINS,
+            developed_services or "",
+        )
+    ]
+    for source in sources if sources is not None else sources_from_text(task_description):
+        segments.append(
+            (source.label, source.source_type in EXPLICIT_URL_ORIGINS, source.text)
+        )
+    return segments
+
+
 def select_sources(
     task_description: str,
     developed_services: str,
@@ -813,42 +884,70 @@ def select_sources(
     manual: str = "",
     directory: Path | str | None = None,
     analyze: SemanticAnalyze | None = None,
+    sources: tuple[TaskSource, ...] | None = None,
 ) -> SourceSelection:
     """منابعِ Swaggerِ قدم ۲ را از ورودی‌های قدم ۱ تعیین می‌کند (بدونِ شبکه).
 
     ``manual`` انتخابِ دستیِ قدم ۲ است (``admin,crm``؛ خالی یا ``auto`` یعنی
     خودکار). ``directory`` پوشه‌ی snapshotهاست (پیش‌فرض: ``SNAPSHOT_DIR``).
     ``analyze`` تحلیل‌گرِ معنایی (LLM) است؛ بدونِ آن انتخاب کاملاً قطعی است.
+    ``sources`` منابعِ متنِ تسک است (``pipeline.task_sources``: Description،
+    هر Comment و هر Attachmentِ Jira). None یعنی کلِ متن یک Description است —
+    همان رفتارِ پیش از منبع‌آگاهی (هر Swaggerِ ناشناخته خطاست).
     هیچ استثنایی بیرون نمی‌آید: هر مشکل در ``error`` برمی‌گردد.
     """
     registry = snapshots.SWAGGER_SOURCES
     text = f"{developed_services or ''}\n{task_description or ''}"
-    urls = resolve_service_urls(text)
+    segments = _url_segments(task_description, developed_services, sources)
+    urls = resolve_urls_by_origin(segments)
+    # شاهدِ ساختاریافته‌ی Postman (پیوست‌ها) — فقط برای نگاشت و گزارش؛ در کلیدها،
+    # شواهد و خطاهای انتخابِ منبع هیچ نقشی ندارد. ناسازگاریِ میزبان با URLِ
+    # endpointِ صریحِ Jira هشدار است و هر دو طرف نگه داشته می‌شوند.
+    postman = with_conflicts(
+        collect_postman_evidence(sources), _explicit_endpoints(urls, segments)
+    )
+    # URLهای سندِ مبهم و Swaggerِ ناشناخته‌ی منابعِ زمینه هرگز اجرا را متوقف
+    # نمی‌کنند، ولی در هر نتیجه‌ای (حتی نتیجه‌ی خطادار) دیده می‌شوند.
+    document_warnings = [
+        warning for warning in (urls.context_warning(), urls.document_warning()) if warning
+    ] + [conflict.message() for conflict in postman.conflicts]
 
     try:
         manual_keys = expand_selection(manual)
     except SwaggerSnapshotError as exc:
         return SourceSelection(
-            mode=MODE_MANUAL, urls=urls, error=f"{exc} Choose the sources again in Step 2."
+            mode=MODE_MANUAL,
+            urls=urls,
+            warnings=tuple(document_warnings),
+            error=f"{exc} Choose the sources again in Step 2.",
+            postman=postman,
         )
     mode = MODE_MANUAL if manual_keys else MODE_AUTO
 
     if urls.unresolved:
-        return SourceSelection(mode=mode, urls=urls, error=urls.error())
-    disabled = [(url, key) for url, key in urls.matched if not source_for(key).enabled]
-    if disabled:
-        listed = "\n".join(f"  - {url} → {_label(key)}" for url, key in disabled)
         return SourceSelection(
             mode=mode,
             urls=urls,
+            warnings=tuple(document_warnings),
+            error=urls.error(),
+            postman=postman,
+        )
+    disabled = [(url, key) for url, key in urls.matched if not source_for(key).enabled]
+    if disabled:
+        listed = "\n".join(f"  - {urls.describe(url)} → {_label(key)}" for url, key in disabled)
+        return SourceSelection(
+            mode=mode,
+            urls=urls,
+            warnings=tuple(document_warnings),
             error=(
                 "These Swagger URLs point to a registered source that is disabled "
                 f"(enabled=False in SWAGGER_SOURCES):\n{listed}\n\nEnable the source "
                 "or remove the URL. Step 2 was not run."
             ),
+            postman=postman,
         )
 
-    warnings: list[str] = []
+    warnings: list[str] = list(document_warnings)
     catalogs: dict[str, _Catalog] = {}
     unavailable: list[str] = []
     for source in registry:
@@ -863,7 +962,9 @@ def select_sources(
             catalogs[source.key] = catalog
 
     url_keys = urls.keys
-    evidence = [Evidence(key, EVIDENCE_SWAGGER_URL, url) for url, key in urls.matched]
+    evidence = [
+        Evidence(key, EVIDENCE_SWAGGER_URL, urls.describe(url)) for url, key in urls.matched
+    ]
     endpoints: list[EndpointMatch] = []
     errors: list[str] = []
     for reference, path in endpoint_references(text):
@@ -883,6 +984,7 @@ def select_sources(
         endpoints=tuple(endpoints),
         searched=_ordered(catalogs, registry),
         unavailable=_ordered(unavailable, registry),
+        postman=postman,
     )
 
     if mode == MODE_MANUAL:
